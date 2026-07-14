@@ -1,0 +1,3 @@
+{
+  "extends": "@fuck-eu-chat-control/config/tsconfig.base.json"
+}
