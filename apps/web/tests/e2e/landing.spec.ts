@@ -3,29 +3,26 @@ import { expect, test } from "@playwright/test";
 import { invitationHex } from "./_helpers";
 
 /**
- * Scenarios 1, 2, 3, 11, 12: landing explainer + docs, mobile layout, create
- * conversation + copy link, fragment stays out of server route paths, and
- * the chromium/firefox project matrix covers the browser smoke (the same
- * tests run under both projects declared in playwright.config.ts).
+ * Scenarios 1, 2, 3, 11, 12: landing explainer + start affordance, mobile
+ * layout, create conversation + copy link, fragment stays out of server
+ * route paths, and the chromium/firefox project matrix covers the browser
+ * smoke (the same tests run under both projects declared in
+ * playwright.config.ts).
  */
 
 test.describe("landing", () => {
-  test("renders the explainer, security model, STUN-only, no-account, and start affordance", async ({
+  test("renders the explainer, no-account promise, server-can't-read promise, and start affordance", async ({
     page,
   }) => {
     await page.goto("/");
 
     await expect(page.getByRole("heading", { name: "fck-chat-control", level: 1 })).toBeVisible();
 
-    // Security model + STUN-only + no-account vocabulary is visible somewhere
-    // on the landing. These are the load-bearing promises (no identity, no
-    // TURN, server never sees content) so they are worth pinning.
-    await expect(
-      page.getByText("Serverless, end-to-end-encrypted, no-account peer-to-peer chat"),
-    ).toBeVisible();
-    await expect(page.getByText("Security model")).toBeVisible();
-    await expect(page.getByText("STUN-only (no TURN)")).toBeVisible();
-    await expect(page.getByText("At-rest encryption")).toBeVisible();
+    // The load-bearing promises: no account, server can't read content,
+    // user-side verification. These sell the tool, so they are worth pinning.
+    await expect(page.getByText("No account, ever")).toBeVisible();
+    await expect(page.getByText("Server can't read it")).toBeVisible();
+    await expect(page.getByText("You verify, not us")).toBeVisible();
 
     // Start affordance + conversation list region.
     await expect(page.getByRole("button", { name: /Start a conversation/ })).toBeVisible();

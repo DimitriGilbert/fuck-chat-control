@@ -6,7 +6,7 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@fuck-eu-chat-control/ui/components/empty";
-import { CopyIcon, KeyRoundIcon, NetworkIcon, ShieldOffIcon } from "lucide-react";
+import { CopyIcon, KeyRoundIcon, LinkIcon, ShieldCheckIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -20,53 +20,53 @@ interface LandingProps {
 }
 
 /**
- * Landing page body. Replaces the ASCII banner with: a short explainer
- * (what / why / security / limitations), the primary start-conversation
- * panel, and the stored-conversation list with resume.
+ * Landing page body. Lead with what the user gets (a private 1:1 chat that
+ * needs no account), one primary call to action, and a short honest strip
+ * of how it stays private. The wall of caveats lives on /docs/security and
+ * /docs/deployment.
  */
 export function Landing({ onResume }: LandingProps): React.ReactElement {
   const { state, ready } = useChat();
   const conversations = state.conversations;
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-6">
-      <header className="space-y-3">
-        <h1 className="text-2xl font-semibold tracking-tight">fck-chat-control</h1>
-        <p className="text-muted-foreground text-sm">
-          Serverless, end-to-end-encrypted, no-account peer-to-peer chat. No phone number, no email,
-          no central directory. The broker only relays encrypted signaling and drops out of the data
-          path once your browser and your peer's are connected directly.
+    <div className="mx-auto w-full max-w-3xl px-4 py-8 sm:py-12">
+      <header className="space-y-4">
+        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">fck-chat-control</h1>
+        <p className="text-muted-foreground max-w-[58ch] text-base leading-7 sm:text-lg sm:leading-8">
+          A private 1:1 chat that needs no account, no phone number, no app. Open a link, talk,
+          close the tab. The server that hooks you up is gone from the conversation the moment you
+          connect.
         </p>
+        <div className="text-muted-foreground text-xs">
+          Built against "chat control" - the EU's mass-scanning push. The server can&apos;t read
+          what it never receives.
+        </div>
       </header>
 
-      <section className="mt-6 grid gap-3 sm:grid-cols-2">
-        <FactCard
-          icon={<KeyRoundIcon className="size-4" />}
-          title="Why this exists"
-          body="Chat-control proposals mandate client-side scanning and identity checks that break end-to-end encryption. This app is a counter-example: the server never sees content, holds no identity, and cannot decrypt history — because it is never in the path."
-        />
-        <FactCard
-          icon={<ShieldOffIcon className="size-4" />}
-          title="Security model"
-          body="Each side generates a device key. After the handshake, both sides show the same safety number. Verify it out-of-band (in person, by phone). v1 has no PAKE and no verification code in the link — whoever joins first is accepted."
-        />
-        <FactCard
-          icon={<NetworkIcon className="size-4" />}
-          title="STUN-only (no TURN)"
-          body="Connections use direct WebRTC with STUN. Peers behind symmetric NAT (~10–20% of networks) may fail to connect. There is no TURN relay, so both peers must be reachable directly."
-        />
-        <FactCard
-          icon={<CopyIcon className="size-4" />}
-          title="At-rest encryption"
-          body="History is sealed with an AES-256 key kept in this browser. Auto mode (the default) stores that key on disk, so an unlocked browser profile can be read. Passphrase-protected export/import lets you move data safely."
-        />
-      </section>
-
-      <section className="mt-6">
+      <section className="mt-8">
         <StartConversationPanel ready={ready} />
       </section>
 
-      <section className="mt-6">
+      <section className="mt-10 grid gap-3 sm:grid-cols-3">
+        <FactCard
+          icon={<LinkIcon className="size-4" />}
+          title="No account, ever"
+          body="No phone, no email, no profile. An invitation is a random id in a URL - nothing about you travels with it."
+        />
+        <FactCard
+          icon={<ShieldCheckIcon className="size-4" />}
+          title="Server can't read it"
+          body="Messages are encrypted with keys that live in your browser. The broker relays the handshake and steps out of the data path."
+        />
+        <FactCard
+          icon={<KeyRoundIcon className="size-4" />}
+          title="You verify, not us"
+          body="After connecting, both sides show the same safety number. Compare it in person or by voice. If it matches, the line is clean."
+        />
+      </section>
+
+      <section className="mt-10">
         <h2 className="mb-2 text-sm font-medium">Conversations in this browser</h2>
         {conversations.length === 0 ? (
           <Empty>
@@ -90,6 +90,25 @@ export function Landing({ onResume }: LandingProps): React.ReactElement {
           </ul>
         )}
       </section>
+
+      <footer className="text-muted-foreground mt-12 border-t border-border pt-4 text-xs">
+        v1 is text-only and direct (STUN, no TURN relay). The sharp edges - symmetric NAT, at-rest
+        key handling, the lack of PAKE - are documented on the{" "}
+        <a
+          href="/docs/security"
+          className="text-primary underline underline-offset-4 hover:opacity-80"
+        >
+          security
+        </a>{" "}
+        and{" "}
+        <a
+          href="/docs/deployment"
+          className="text-primary underline underline-offset-4 hover:opacity-80"
+        >
+          deployment
+        </a>{" "}
+        pages.
+      </footer>
     </div>
   );
 }
@@ -116,7 +135,7 @@ function FactCard({ icon, title, body }: FactCardProps): React.ReactElement {
 
 interface ConversationRowProps {
   readonly conversation: ConversationRecord;
-  readonly onResume: (conversation: ConversationRecord) => void;
+  readonly onResume: (conversationId: ConversationRecord) => void;
 }
 
 function ConversationRow({ conversation, onResume }: ConversationRowProps): React.ReactElement {
