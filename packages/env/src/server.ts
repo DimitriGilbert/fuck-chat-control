@@ -5,7 +5,7 @@ import { z } from "zod";
 export const env = createEnv({
   server: {
     CORS_ORIGIN: z.url(),
-    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    NODE_ENV: z.enum(["development", "production", "test"]),
   },
   runtimeEnv: process.env,
   skipValidation: !!process.env.SKIP_ENV_VALIDATION,

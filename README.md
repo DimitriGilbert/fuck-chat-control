@@ -1,42 +1,87 @@
 # fuck-eu-chat-control
 
-This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines React, TanStack Start, Self, and more.
+A serverless, no-account, end-to-end-encrypted peer-to-peer chat whose
+server drops out of the data path after the handshake. Built as
+concrete resistance to the EU "chat control" mass-scanning mandate:
+there is no server-side key material, no message log, and nothing to
+hand over. Once two peers complete the application handshake over the
+broker, they exchange messages over a direct WebRTC data channel and
+the broker leaves the path entirely.
 
-## Features
+The security model in one paragraph: messages are end-to-end encrypted
+under keys derived from an authenticated P-256 ECDH handshake; the
+broker only relays signaling bytes; identity is TOFU with a
+per-conversation safety number that the two humans must compare over an
+independent trusted channel (v1 has no PAKE and no six-digit code).
+The server holds no persistent state, no presence table, and no
+application logs. v1 is text-only chat; file transfer exists at the
+protocol level but has no UI yet.
 
-- **TypeScript** - For type safety and improved developer experience
-- **TanStack Start** - SSR framework with TanStack Router
-- **TailwindCSS** - Utility-first CSS for rapid UI development
-- **Shared UI package** - shadcn/ui primitives live in `packages/ui`
-- **Vite+** - Unified Vite toolchain, workspace task runner, linting, and formatting
+For the security properties and their precise boundaries, read
+[`docs/architecture/threat-model.md`](docs/architecture/threat-model.md)
+and [`docs/architecture/protocol-v1.md`](docs/architecture/protocol-v1.md).
+For deployment, read
+[`docs/deployment/deployment.md`](docs/deployment/deployment.md).
 
-## Getting Started
+## Stack
 
-First, install the dependencies:
+- **TypeScript** across the workspace, with type safety enforced via `pnpm check`.
+- **TanStack Start** (Nitro) — SSR React app and the in-process broker
+  WebSocket route (`/ws`) on the same port.
+- **TailwindCSS** + shared `shadcn/ui` primitives in `packages/ui`.
+- **Vite+** — unified Vite toolchain, workspace task runner, linting,
+  and formatting.
+- Crypto: `@noble/curves` (P-256 ECDSA/ECDH), `hash-wasm` (Argon2id),
+  and native WebCrypto for AES-256-GCM, HKDF-SHA256, and SHA-256. See
+  [`docs/adr/001-crypto-dependencies.md`](docs/adr/001-crypto-dependencies.md).
+
+## Getting started
 
 ```bash
 pnpm install
+pnpm dev
 ```
 
-Then, run the development server:
+Open <http://localhost:3001>. Loopback and LAN operation work without
+STUN; cross-internet operation needs a STUN service — see the
+deployment guide.
+
+## Tests
 
 ```bash
-pnpm run dev
+pnpm test:unit                    # vitest unit tests
+pnpm --filter web test:e2e        # playwright end-to-end
+pnpm --filter web test:integration # vitest integration (broker/ws)
 ```
 
-Open [http://localhost:3001](http://localhost:3001) in your browser to see the fullstack application.
+Or run everything for the web app with `pnpm --filter web test`.
 
-## UI Customization
+## Deployment
 
-React web apps in this stack share shadcn/ui primitives through `packages/ui`.
+The app is a single process: the Nitro server serves the app and hosts
+the broker WebSocket route. Build and run with Docker Compose:
 
-- Change design tokens and global styles in `packages/ui/src/styles/globals.css`
-- Update shared primitives in `packages/ui/src/components/*`
-- Adjust shadcn aliases or style config in `packages/ui/components.json` and `apps/web/components.json`
+```bash
+docker compose up -d --build
+```
 
-### Add more shared components
+Production needs a TLS-terminating reverse proxy in front of node
+(Caddy/nginx/Traefik) that upgrades `/ws` to WSS, and — for internet
+peers — a STUN service on UDP 3478. v1 has no TURN relay; symmetric-NAT
+peer pairs (~10–20%) cannot connect. Full details, ports, env vars,
+logging posture, and the operator checklist are in
+[`docs/deployment/deployment.md`](docs/deployment/deployment.md).
 
-Run this from the project root to add more primitives to the shared UI package:
+## UI customization
+
+React web apps share `shadcn/ui` primitives through `packages/ui`.
+
+- Change design tokens and global styles in `packages/ui/src/styles/globals.css`.
+- Update shared primitives in `packages/ui/src/components/*`.
+- Adjust shadcn aliases or style config in `packages/ui/components.json`
+  and `apps/web/components.json`.
+
+Add shared primitives from the project root:
 
 ```bash
 npx shadcn@latest add accordion dialog popover sheet table -c packages/ui
@@ -48,53 +93,41 @@ Import shared components like this:
 import { Button } from "@fuck-eu-chat-control/ui/components/button";
 ```
 
-### Add app-specific blocks
+For app-specific blocks, run the shadcn CLI from `apps/web`.
 
-If you want to add app-specific blocks instead of shared primitives, run the shadcn CLI from `apps/web`.
-
-## Deployment
-
-### Docker Compose
-
-- Target: web + server
-- Config: `docker-compose.yml` (app Dockerfiles live in `apps/*/Dockerfile`)
-- Build images: pnpm run docker:build
-- Start: pnpm run docker:up
-- Logs: pnpm run docker:logs
-- Stop: pnpm run docker:down
-
-Environment variables are read from each app's `.env` file (baked into web builds for public variables) and overridden in `docker-compose.yml` for container networking.
-
-For more details, see the guide on [Deploying with Docker Compose](https://www.better-t-stack.dev/docs/guides/docker).
-
-## Git Hooks and Formatting
-
-- Optional native Vite+ hooks: `pnpm run hooks:setup`
-- Docs: [Vite+ commit hooks](https://viteplus.dev/guide/commit-hooks)
-- Run checks: `pnpm run check`
-
-## Project Structure
+## Project structure
 
 ```
 fuck-eu-chat-control/
 ├── apps/
-│   └── web/         # Fullstack application (React + TanStack Start)
+│   └── web/         # Fullstack app (React + TanStack Start) + broker /ws route
 ├── packages/
-│   ├── ui/          # Shared shadcn/ui components and styles
+│   ├── env/         # Typed env (CORS_ORIGIN, NODE_ENV only)
+│   └── ui/          # Shared shadcn/ui components and styles
+└── docs/
+    ├── architecture/  # threat model, protocol v1, orchestrator, runtime
+    ├── adr/           # architecture decisions
+    └── deployment/    # operator deployment guide
 ```
 
-## Available Scripts
+## Available scripts
 
-- `pnpm run dev`: Start all applications in development mode
-- `pnpm run build`: Build all applications
-- `pnpm run dev:web`: Start only the web application
-- `pnpm run check-types`: Check TypeScript types across all apps
-- `pnpm run check`: Run Vite+ format/lint checks and workspace TypeScript checks
-- `pnpm run lint`: Run Vite+ lint checks
-- `pnpm run format`: Run Vite+ formatting
-- `pnpm run staged`: Run Vite+ checks against staged files
-- `pnpm run hooks:setup`: Install Vite+ native Git hooks with `vp config`
-- `pnpm run docker:build`: Build the Docker Compose images
-- `pnpm run docker:up`: Build and start the Docker Compose stack
-- `pnpm run docker:logs`: Tail logs from the Docker Compose stack
-- `pnpm run docker:down`: Stop the Docker Compose stack
+- `pnpm dev` — start all apps in development mode.
+- `pnpm build` — build all apps.
+- `pnpm check` — run Vite+ format/lint checks and workspace TypeScript checks (0 warnings required).
+- `pnpm check-types` — TypeScript types across all apps.
+- `pnpm lint` / `pnpm format` — Vite+ lint / format.
+- `pnpm test:unit` — workspace unit tests.
+- `pnpm test:e2e` — workspace E2E (Playwright).
+- `pnpm test` — unit + E2E.
+- `pnpm --filter web test:integration` — broker/WebSocket integration tests.
+- `pnpm dev:web` — start only the web app.
+- `pnpm staged` — run Vite+ checks against staged files.
+- `pnpm hooks:setup` — install Vite+ native Git hooks via `vp config`.
+- `pnpm docker:build` / `docker:up` / `docker:logs` / `docker:down` — Docker Compose lifecycle.
+
+## Git hooks and formatting
+
+- Optional native Vite+ hooks: `pnpm hooks:setup`.
+- Run checks: `pnpm check`.
+- Vite+ commit hooks docs: <https://viteplus.dev/guide/commit-hooks>.

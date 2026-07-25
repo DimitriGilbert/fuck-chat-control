@@ -11,6 +11,13 @@
 # Testing
 /coverage
 
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/tests/e2e/.tmp/
+
 # Build outputs
 /.next/
 /out/

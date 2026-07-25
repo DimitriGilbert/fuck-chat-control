@@ -186,8 +186,8 @@ V1 supports text messages and file/media transfer (files and media are ephemeral
 97. As a user, I want the app to load quickly, so that latency to first message is low.
 98. As a user, I want a conversation list on app open, so that I can see and resume prior conversations.
 99. As a user, I want to assign a display name to a peer, so that my conversation list is recognizable rather than a list of fingerprints.
-100. As a user, I want the app's landing page to explain what it is and why it exists, so that I can decide whether to trust and use it.
-101. As a user, I want documentation accessible from the app, so that I can understand the security model and threat surface without leaving the site.
+100.  As a user, I want the app's landing page to explain what it is and why it exists, so that I can decide whether to trust and use it.
+101.  As a user, I want documentation accessible from the app, so that I can understand the security model and threat surface without leaving the site.
 
 ## Implementation Decisions
 
@@ -205,6 +205,7 @@ The system is organized around a small number of modules with clear boundaries. 
 
 **Crypto module (deep, security-critical, fully unit-tested).**
 Encapsulates all cryptographic primitives behind a narrow interface. Responsibilities:
+
 - Generate and store a persistent device identity key pair (ECDSA P-256).
 - Generate ephemeral session ECDH key pairs (P-256) per connection.
 - Generate ephemeral session ECDSA signing usage (or reuse identity for signing — identity signs session keys; messages are signed by identity).
@@ -215,7 +216,7 @@ Encapsulates all cryptographic primitives behind a narrow interface. Responsibil
 - Run SPAKE2 PAKE when a verification code is present.
 - Generate and manage the at-rest encryption key (extractable AES-256 key, optional Argon2 passphrase wrapping).
 - Encrypt and decrypt the export/import bundle (passphrase-wrapped identity + history).
-Exposes nothing about WebRTC, signaling, or the DOM. All inputs and outputs are plain bytes/strings. This module is the one place where cryptographic correctness matters, and it is testable exhaustively against known answer vectors.
+  Exposes nothing about WebRTC, signaling, or the DOM. All inputs and outputs are plain bytes/strings. This module is the one place where cryptographic correctness matters, and it is testable exhaustively against known answer vectors.
 
 **Framing / message-protocol module.**
 Defines the wire format of frames sent over the WebRTC data channel once the encrypted channel is established. Frame types include: text message, file manifest, file chunk, media manifest, media chunk, control (session key exchange, PAKE messages, safety-number announcement, identity announcement, leave). Each frame carries a type tag, a nonce, ciphertext, and a signature over the plaintext (or over the ciphertext + nonce, per a defined scheme). Large payloads are split into chunks with a manifest describing name, size, MIME type, and content hash. Reassembly and hash verification happen here. The framing module is testable against mock data channels with no real WebRTC.
@@ -233,7 +234,7 @@ Wraps `RTCPeerConnection` and `RTCDataChannel`. Responsibilities: create offer/a
 Wraps TanStack DB collections for persisted conversations, messages, peer identity records, and local display names. Responsibilities: read/write conversations; read/write text messages (encrypted at rest before write); store peer identity keys by fingerprint for TOFU verification on resume; store user-assigned display names. Files and media are not persisted here — they are handled transiently by the framing module. The store module is testable with an in-memory TanStack DB configuration.
 
 **Conversation orchestrator (integration layer).**
-Ties the modules together into the flows: the *initiator flow* (generate conversation ID, optionally generate PAKE code, build invitation link, open signaling, create offer, wait for joiner, complete key exchange, verify peer identity on first contact or on resume, open chat) and the *participant flow* (parse link, open signaling, create answer, complete key exchange, verify peer identity, open chat). Owns the conversation lifecycle state machine: `idle → waiting → signaling → handshaking → verifying → connected → disconnected`. Coordinates resumption: on reopen, loads history from the store, rejoins the broker room, re-runs key exchange, verifies the peer's identity key matches the stored one. Holds references to the other modules and coordinates them. This module is tested with integration tests that wire real (non-mocked) crypto and framing against mocked signaling and WebRTC.
+Ties the modules together into the flows: the _initiator flow_ (generate conversation ID, optionally generate PAKE code, build invitation link, open signaling, create offer, wait for joiner, complete key exchange, verify peer identity on first contact or on resume, open chat) and the _participant flow_ (parse link, open signaling, create answer, complete key exchange, verify peer identity, open chat). Owns the conversation lifecycle state machine: `idle → waiting → signaling → handshaking → verifying → connected → disconnected`. Coordinates resumption: on reopen, loads history from the store, rejoins the broker room, re-runs key exchange, verifies the peer's identity key matches the stored one. Holds references to the other modules and coordinates them. This module is tested with integration tests that wire real (non-mocked) crypto and framing against mocked signaling and WebRTC.
 
 **Export/import module.**
 Produces and consumes the encrypted bundle: serializes identity key + conversation history, encrypts the bundle with a passphrase-derived key (Argon2), produces a single file. Import reverses the process, with merge-or-replace logic. Testable with no network.
@@ -308,6 +309,7 @@ A good test exercises external behavior through a module's public interface, not
 
 **Crypto module — exhaustive unit tests, highest priority.**
 This is the deep module and the security-critical one. Tests must cover:
+
 - Persistent identity key pair generation produces valid P-256 points.
 - Ephemeral ECDH key pair generation produces valid P-256 points.
 - Two independent ECDH key pairs derive the same shared secret regardless of which side initiates.
@@ -368,7 +370,8 @@ The working name "Fuck EU Chat Control" is deliberately provocative. The EU's pr
 
 ### On the threat model, stated plainly
 
-The system protects the *content* of conversations against:
+The system protects the _content_ of conversations against:
+
 - The broker (sees only signaling metadata and encrypted key-exchange bytes over DTLS; holds no persistent state; holds no presence table).
 - Network observers between peers (see DTLS-SRTP encrypted traffic).
 - A passive observer who has not obtained the invitation link or its fragment. The invitation is a bearer rendezvous handle; PAKE additionally authenticates a holder of the code, subject to the six-digit-code limitation above.
@@ -376,9 +379,10 @@ The system protects the *content* of conversations against:
 - A copied local message database that does not include the corresponding browser-origin key material. Auto-key mode does not protect an unlocked browser profile; passphrase mode can protect an offline profile copy while the app is locked.
 - Compromise of one session's keys (other sessions use fresh ephemeral keys; forward secrecy across sessions holds).
 
-The system does *not* protect against:
+The system does _not_ protect against:
+
 - A global passive adversary performing traffic analysis on timing and size of P2P packets. Padding and traffic shaping are future work.
-- An active MITM on the broker when no PAKE code is used *and* the users do not compare safety numbers. This is the fundamental limitation of unauthenticated key exchange; PAKE or safety-number verification is the mitigation.
+- An active MITM on the broker when no PAKE code is used _and_ the users do not compare safety numbers. This is the fundamental limitation of unauthenticated key exchange; PAKE or safety-number verification is the mitigation.
 - The user's own device being compromised (malware, browser extension in the same origin, etc.). No in-browser crypto can defend against a hostile endpoint. Passphrase mode raises the bar but does not eliminate this.
 - A peer learning the other peer's IP address through direct WebRTC candidates. The deployment's own STUN listener necessarily receives a client's source IP to answer its request, but stores neither that request nor conversation metadata. Avoiding peer IP disclosure requires a relay or anonymity layer, neither of which is in v1.
 - Availability attacks: a malicious broker or anyone holding a conversation ID can delay, drop, occupy, or terminate signaling; PAKE and safety-number verification authenticate a peer but do not make the connection available.
@@ -396,6 +400,7 @@ Resumable conversations introduce a persistent identity key per device. This is 
 ### On future hardening (not in this PRD)
 
 Candidate follow-up PRDs, listed so they are not forgotten:
+
 - Per-message ratcheting for within-conversation forward secrecy.
 - TURN relay (ciphertext-only) for NAT-fallback reliability.
 - Encrypted mailbox for async delivery.

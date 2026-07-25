@@ -100,16 +100,16 @@ The shared UI package already includes:
 
 ### Fixed Component Selection
 
-| Purpose | Components |
-| --- | --- |
-| Chat transcript | `message-scroller`, `message`, `bubble`, `marker` |
-| Attachments and progress | `attachment`, `progress` |
-| Composer | `input-group`, `textarea`, `button`, `tooltip` |
-| Conversation list and empty states | `card`, `empty`, `skeleton` |
-| Confirmations | `dialog`, `alert-dialog` |
-| Settings and import/export | `sheet`, `tabs` |
-| Menus and labels | `dropdown-menu`, `checkbox`, `label` |
-| Notifications | `sonner` |
+| Purpose                            | Components                                        |
+| ---------------------------------- | ------------------------------------------------- |
+| Chat transcript                    | `message-scroller`, `message`, `bubble`, `marker` |
+| Attachments and progress           | `attachment`, `progress`                          |
+| Composer                           | `input-group`, `textarea`, `button`, `tooltip`    |
+| Conversation list and empty states | `card`, `empty`, `skeleton`                       |
+| Confirmations                      | `dialog`, `alert-dialog`                          |
+| Settings and import/export         | `sheet`, `tabs`                                   |
+| Menus and labels                   | `dropdown-menu`, `checkbox`, `label`              |
+| Notifications                      | `sonner`                                          |
 
 ### Exact Install Commands
 
