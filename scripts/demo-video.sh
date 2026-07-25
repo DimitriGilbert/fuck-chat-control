@@ -1,25 +1,30 @@
 #!/usr/bin/env bash
 # scripts/demo-video.sh
 #
-# Re-runnable, self-contained demo video generator for fck-chat-control.
+# Re-runnable demo video generator for fck-chat-control.
 #
-# Boots the dev server, opens two isolated browser sessions (Alice + Bob),
-# walks through the full private-chat flow (start -> join -> connect ->
-# exchange messages -> verify safety number) while recording Alice's window,
-# then burns in timed captions with ffmpeg and writes a compressed WebM.
+# Opens two isolated browser sessions (Alice + Bob) against an ALREADY-RUNNING
+# dev/preview server, walks through the full private-chat flow (start -> join ->
+# connect -> exchange messages -> verify safety number) while recording Alice's
+# window, then burns in timed captions with ffmpeg and writes a compressed WebM.
+#
+# It does NOT start or stop the dev server. Boot it yourself first:
+#   pnpm dev                                   # serves http://localhost:3001
+# then in another terminal:
+#   bash scripts/demo-video.sh                 # writes docs/media/chat-demo.webm
 #
 # Re-run any time the UI changes -- the output is overwritten in place.
 #
 # Usage:
-#   bash scripts/demo-video.sh                          # defaults
-#   PORT=3007 OUT=docs/media/chat-demo.webm bash scripts/demo-video.sh
+#   bash scripts/demo-video.sh
+#   BASE_URL=http://localhost:3001/ OUT=docs/media/chat-demo.webm bash scripts/demo-video.sh
 #
 # Env vars (all optional):
-#   PORT       dev server port             (default 3001)
-#   OUT        output webm path            (default docs/media/chat-demo.webm)
-#   RAW        intermediate raw webm path  (default /tmp/chat-demo-raw.webm)
-#   KEEP_RAW   "1" to keep the raw recording (default unset)
-#   FONT       ttf path for drawtext       (default auto-detected)
+#   BASE_URL   server URL to record against   (default http://localhost:3001/)
+#   OUT        output webm path               (default docs/media/chat-demo.webm)
+#   RAW        intermediate raw webm path     (default /tmp/chat-demo-raw.webm)
+#   KEEP_RAW   "1" to keep the raw recording  (default unset)
+#   FONT       ttf path for drawtext          (default auto-detected)
 #
 # Prerequisites (install once):
 #   npm i -g agent-browser && agent-browser install      # Chrome for CDP
@@ -27,34 +32,26 @@
 #   pnpm install                                           # repo deps
 #
 # Notes:
-#   * `vp dev` binds IPv6 ::1 only -- we probe http://localhost:PORT/, never
-#     127.0.0.1. vite+ does NOT always honor $PORT (it may grab the next free
-#     port), so we parse the real "Local:" URL out of the dev log and probe
-#     THAT -- $PORT is a hint, not a guarantee.
+#   * The server MUST already be up and reachable at $BASE_URL before you run
+#     this script. It will fail fast if not -- start it with `pnpm dev`.
+#   * `vp dev` binds IPv6 ::1 only, so use http://localhost:PORT/, not 127.0.0.1.
 #   * agent-browser's `--session <name>` is a GLOBAL flag and must precede the
 #     subcommand:  `agent-browser --session alice open <url>`.
 #   * Do NOT use agent-browser's --allowed-domains here -- it disables
 #     RTCPeerConnection, which would break the WebRTC chat handshake.
-#   * We never use `--host` on `vp dev`; the demo only talks to localhost.
-#   * The script runs ~1-2 minutes (boot + record + ffmpeg). Run it directly
-#     in a terminal -- `bash scripts/demo-video.sh` -- not under a wrapper
-#     that reaps background processes mid-run (the embedded `vp dev &` needs
-#     to live for the whole capture).
 #
-# Exit codes: 0 success; non-zero on any failure. The dev server is torn down
-# on exit either way (trap).
+# Exit codes: 0 success; non-zero on any failure. Only the browser sessions are
+# closed on exit -- your dev server is left running.
 
 set -uo pipefail
 
 # ---------- paths and params -------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PORT="${PORT:-3001}"
+BASE_URL="${BASE_URL:-http://localhost:3001/}"
 OUT="${OUT:-$REPO_ROOT/docs/media/chat-demo.webm}"
 RAW="${RAW:-/tmp/chat-demo-raw.webm}"
 KEEP_RAW="${KEEP_RAW:-0}"
-BASE_URL="http://localhost:${PORT}/"
 
-# node_modules/.bin must be on PATH so `vp` resolves in a non-interactive shell.
 export PATH="$REPO_ROOT/node_modules/.bin:$PATH"
 
 # Auto-pick a bold TTF for ffmpeg drawtext if not provided.
@@ -76,23 +73,17 @@ rm -f "$RAW" "$OUT"
 
 log() { printf '\n\033[1;36m[demo]\033[0m %s\n' "$*"; }
 
-# Tear down everything we started. Safe to call multiple times.
+# Close only the browser sessions this script opened. The dev server is the
+# caller's responsibility and is NEVER touched here.
 teardown() {
-  log "tearing down"
+  log "closing browser sessions"
   npx agent-browser --session alice record stop >/dev/null 2>&1 || true
   npx agent-browser close --all >/dev/null 2>&1 || true
-  if [[ -n "${VP_PID:-}" ]]; then
-    kill -9 "$VP_PID" 2>/dev/null || true
-    wait "$VP_PID" 2>/dev/null || true
-  fi
-  pkill -9 -f "vite-plus-core" 2>/dev/null || true
-  pkill -9 -f "vp dev" 2>/dev/null || true
 }
 trap teardown EXIT
 
 # Extract the first ref matching a regex from a session's interactive snapshot.
-# Usage:  ref_for <session> <grep-regex>
-# Prints "eN" (without @) on stdout, empty on no match.
+# Usage:  ref_for <session> <grep-regex>   -> prints "eN" (without @), empty if none.
 ref_for() {
   local session="$1" pattern="$2"
   npx agent-browser --session "$session" snapshot -i 2>/dev/null \
@@ -115,7 +106,7 @@ wait_for_text() {
   return 1
 }
 
-# Wait for $1 occurrences of "Connected" across both sessions, timeout $2s.
+# Wait for $1 sessions to show "Connected", timeout $2s.
 wait_for_connected() {
   local need="$1" timeout="${2:-25}"
   local deadline=$((SECONDS + timeout))
@@ -131,46 +122,20 @@ wait_for_connected() {
   return 1
 }
 
-# ---------- 0. start the dev server ------------------------------------------
-log "booting vp dev (requested port $PORT)"
-cd "$REPO_ROOT/apps/web"
-HOST=localhost PORT="$PORT" SKIP_ENV_VALIDATION=1 vp dev > /tmp/demo-vp-dev.log 2>&1 &
-VP_PID=$!
-
-# Wait for vite+ to print its "Local:" URL, then probe that exact URL. We do
-# NOT assume the server honored $PORT -- vite+ may pick another port if $PORT
-# is taken, so we parse the real URL out of the log and fall back to $BASE_URL.
-log "waiting for the dev server to print its local URL"
-base_url=""
-for _ in $(seq 1 90); do
-  if grep -q 'Local:' /tmp/demo-vp-dev.log 2>/dev/null; then
-    base_url="$(grep -m1 'Local:' /tmp/demo-vp-dev.log | grep -oE 'https?://[^ ]+' | head -1)"
-    break
-  fi
-  sleep 1
-done
-[[ -z "$base_url" ]] && base_url="$BASE_URL"   # fall back to the requested port
-log "dev server URL: $base_url"
-
-log "waiting for $base_url to respond 200"
-boot_ok=0
-for _ in $(seq 1 90); do
-  if curl -sf -o /dev/null "$base_url"; then boot_ok=1; break; fi
-  sleep 1
-done
-if (( boot_ok != 1 )); then
-  echo "FATAL: server did not come up at $base_url. Tail of log:" >&2
-  tail -20 /tmp/demo-vp-dev.log >&2
+# ---------- 0. confirm the server is already up ------------------------------
+log "checking that the server is already up at $BASE_URL"
+if ! curl -sf -o /dev/null "$BASE_URL"; then
+  echo "FATAL: $BASE_URL is not responding. Start the dev server first:" >&2
+  echo "  pnpm dev   (then run this script again)" >&2
   exit 3
 fi
-log "server ready (pid $VP_PID) at $base_url"
+log "server reachable at $BASE_URL"
 
 # ---------- 1. configure viewport + open Alice, start recording -------------
-# Wipe any prior sessions so we start clean.
 npx agent-browser close --all >/dev/null 2>&1 || true
 
-log "opening Alice at $base_url"
-npx agent-browser --session alice open "$base_url" >/dev/null
+log "opening Alice at $BASE_URL"
+npx agent-browser --session alice open "$BASE_URL" >/dev/null
 npx agent-browser --session alice set viewport 1920 1080 >/dev/null
 
 log "starting recorder on Alice's session"
@@ -230,7 +195,7 @@ fi
 sleep 2
 
 # ============================================================================
-# BEAT 5 -- MESSAGE EXCHANGE     caption: 23.0s - 30.0s
+# BEAT 5 -- MESSAGE EXCHANGE     caption: 23.0s - 32.0s
 #   "Messages are end-to-end encrypted. The server never sees them."
 # ============================================================================
 log "Alice: sending a message"
@@ -252,13 +217,13 @@ if [[ -n "$MSG_REF_BOB" ]]; then
   SEND_REF_BOB="$(ref_for bob 'Send message')"
   [[ -n "$SEND_REF_BOB" ]] && npx agent-browser --session bob click "@${SEND_REF_BOB}" >/dev/null 2>&1 || true
 fi
-sleep 2
+sleep 3
 
 # Bring Alice back into focus for the camera before the final beat.
 npx agent-browser --session alice snapshot -i >/dev/null 2>&1 || true
 
 # ============================================================================
-# BEAT 6 -- SAFETY NUMBER        caption: 30.0s - 36.0s
+# BEAT 6 -- SAFETY NUMBER        caption: 32.0s - 38.0s
 #   "Both sides show the same safety number -- verify it out-of-band."
 # ============================================================================
 log "Alice: opening safety number dialog"
@@ -266,7 +231,7 @@ SAFETY_REF="$(ref_for alice 'Review safety number|Safety number')"
 if [[ -n "$SAFETY_REF" ]]; then
   npx agent-browser --session alice click "@${SAFETY_REF}" >/dev/null 2>&1 || true
 fi
-sleep 3
+sleep 4
 
 # Stop recording.
 log "stopping recorder"
@@ -287,8 +252,8 @@ build_drawtext() {
     "6|12|Alice starts the chat -- the link is just a random ID."
     "12|18|Bob opens it. The broker relays only the encrypted handshake."
     "18|23|WebRTC data channel open -- the server is now out of the path."
-    "23|30|Messages are end-to-end encrypted. The server never sees them."
-    "30|36|Both sides show the same safety number -- verify it out-of-band."
+    "23|32|Messages are end-to-end encrypted. The server never sees them."
+    "32|38|Both sides show the same safety number -- verify it out-of-band."
   )
   local filter="" first=1 seg
   for entry in "${captions[@]}"; do
