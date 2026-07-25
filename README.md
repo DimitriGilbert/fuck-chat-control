@@ -27,9 +27,9 @@ text-only; file transfer exists at the protocol/framing layer with no UI yet.
 
 Two isolated browser profiles connect over WebRTC, exchange messages the
 server can never see, and verify a matching safety number. Recorded live with
-agent-browser driving real Chrome at 1080p (VP9, ~270 KB):
+agent-browser driving real Chrome at 1080p (VP9, ~240 KB):
 
-<video src="docs/media/chat-demo.webm" controls muted width="960" alt="Two-browser live chat demo"></video>
+<video src="https://github.com/DimitriGilbert/fck-chat-control/releases/download/demo-v1/chat-demo.webm" controls muted width="960" alt="Two-browser live chat demo"></video>
 
 The broker relays only the encrypted signaling handshake, then drops out of
 the data path — from that point the two browsers talk directly.
