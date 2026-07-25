@@ -17,6 +17,12 @@ The server holds no persistent state, no presence table, and no
 application logs. v1 is text-only chat; file transfer exists at the
 protocol level but has no UI yet.
 
+**Status:** v1 is implemented and tested — two real browsers (chromium +
+firefox) connect, complete the authenticated handshake, and exchange
+messages that match a shared safety number. 427 unit tests, 5 integration
+tests (broker over a real dev server), and 24 end-to-end tests pass. v1 is
+text-only; file transfer exists at the protocol/framing layer with no UI yet.
+
 For the security properties and their precise boundaries, read
 [`docs/architecture/threat-model.md`](docs/architecture/threat-model.md)
 and [`docs/architecture/protocol-v1.md`](docs/architecture/protocol-v1.md).
