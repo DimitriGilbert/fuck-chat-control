@@ -23,6 +23,17 @@ messages that match a shared safety number. 427 unit tests, 5 integration
 tests (broker over a real dev server), and 24 end-to-end tests pass. v1 is
 text-only; file transfer exists at the protocol/framing layer with no UI yet.
 
+## Demo
+
+Two isolated browser profiles connect over WebRTC, exchange messages the
+server can never see, and verify a matching safety number. Recorded live with
+agent-browser driving real Chrome at 1080p (VP9, ~270 KB):
+
+<video src="docs/media/chat-demo.webm" controls muted width="960" alt="Two-browser live chat demo"></video>
+
+The broker relays only the encrypted signaling handshake, then drops out of
+the data path — from that point the two browsers talk directly.
+
 For the security properties and their precise boundaries, read
 [`docs/architecture/threat-model.md`](docs/architecture/threat-model.md)
 and [`docs/architecture/protocol-v1.md`](docs/architecture/protocol-v1.md).
