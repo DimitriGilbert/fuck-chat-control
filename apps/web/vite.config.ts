@@ -25,6 +25,25 @@ export default defineConfig({
     ...nitro({
       features: { websocket: true },
       handlers: [{ route: "/ws", handler: "./src/server/broker.ts" }],
+      // Prerender the docs routes at build time. These are content-only SSR
+      // pages with no per-request state, so we emit static HTML for them and
+      // skip the runtime SSR pass on each hit. Mechanism: Nitro `routeRules`
+      // per-route prerender flag (verified in nitro's index.d.mts: the
+      // `NitroRouteRules` type exposes `prerender?: boolean`). Crawling is
+      // off; we list the routes explicitly so a stray link never pulls the
+      // broker or chat shell into the prerender queue.
+      routeRules: {
+        "/docs": { prerender: true },
+        "/docs/": { prerender: true },
+        "/docs/security": { prerender: true },
+        "/docs/threat-model": { prerender: true },
+        "/docs/protocol": { prerender: true },
+        "/docs/deployment": { prerender: true },
+      },
+      prerender: {
+        crawlLinks: false,
+        failOnError: true,
+      },
     }),
     viteReact(),
   ],

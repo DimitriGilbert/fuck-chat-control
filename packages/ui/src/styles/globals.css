@@ -128,3 +128,65 @@
     @apply font-sans;
   }
 }
+
+/* Docs prose: minimal hand-styled readable markup. Scoped to .docs-prose so
+   it never collides with the chat UI. Dark-mode friendly via tokens. */
+@layer components {
+  .docs-prose {
+    @apply text-[0.975rem] leading-7 text-foreground;
+  }
+  .docs-prose p {
+    @apply my-4;
+  }
+  .docs-prose h1 {
+    @apply mt-2 mb-4 text-3xl font-semibold tracking-tight;
+  }
+  .docs-prose h2 {
+    @apply mt-10 mb-3 text-2xl font-semibold tracking-tight;
+  }
+  .docs-prose h3 {
+    @apply mt-7 mb-2 text-xl font-semibold;
+  }
+  .docs-prose h4 {
+    @apply mt-5 mb-2 text-base font-semibold;
+  }
+  .docs-prose ul {
+    @apply my-4 list-disc space-y-1.5 pl-6;
+  }
+  .docs-prose ol {
+    @apply my-4 list-decimal space-y-1.5 pl-6;
+  }
+  .docs-prose li {
+    @apply leading-7;
+  }
+  .docs-prose a {
+    @apply text-foreground underline underline-offset-4 hover:opacity-80;
+  }
+  .docs-prose blockquote {
+    @apply my-4 border-l-2 border-border pl-4 italic text-muted-foreground;
+  }
+  .docs-prose code {
+    @apply rounded-[0.35rem] border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.85em];
+  }
+  .docs-prose pre {
+    @apply my-4 overflow-x-auto rounded-md border border-border bg-muted p-4 font-mono text-[0.85rem] leading-6;
+  }
+  .docs-prose pre code {
+    @apply border-0 bg-transparent p-0 text-inherit;
+  }
+  .docs-prose table {
+    @apply my-5 block w-full overflow-x-auto border-collapse text-left text-sm;
+  }
+  .docs-prose thead {
+    @apply border-b border-border;
+  }
+  .docs-prose th {
+    @apply px-3 py-2 font-semibold;
+  }
+  .docs-prose td {
+    @apply border-t border-border px-3 py-2 align-top;
+  }
+  .docs-prose hr {
+    @apply my-8 border-border;
+  }
+}

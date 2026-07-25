@@ -25,6 +25,7 @@
     "dotenv": "catalog:",
     "hash-wasm": "^4.12.0",
     "lucide-react": "catalog:",
+    "marked": "^16.4.0",
     "next-themes": "catalog:",
     "nitro": "^3.0.260610-beta",
     "react": "catalog:",
