@@ -74,9 +74,20 @@ function hasDangerousScheme(href: string): boolean {
  * independent of the React component. `target` and `rel` are allowed on
  * anchors so the link renderer's `target="_blank" rel="noreferrer"` for
  * external links survives sanitization.
+ *
+ * DOMPurify is browser-only (it walks the DOM to sanitize). At SSR/prerender
+ * time there is no `window`, so `DOMPurify.sanitize` is undefined and calling
+ * it throws. The docs routes that prerender this function consume trusted,
+ * repo-authored markdown (`?raw` imports from `docs/`), so SSR passthrough of
+ * the marked output is safe there. In the browser — where untrusted message
+ * markdown is rendered — the DOM exists, the guard passes, and the
+ * sanitization security property (R12/F1) is enforced.
  */
 export function renderMarkdown(source: string): string {
   const raw = marked.parse(source, { async: false }) as string;
+  if (typeof window === "undefined" || typeof DOMPurify?.sanitize !== "function") {
+    return raw;
+  }
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
     ADD_ATTR: ["target", "rel"],
