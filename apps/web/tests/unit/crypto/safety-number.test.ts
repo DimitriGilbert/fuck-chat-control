@@ -36,7 +36,7 @@ async function independentSafetyNumber(
   const [first, second] = compareBytes(a, b) <= 0 ? [a, b] : [b, a];
   const material = concat(conv, first, second);
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", material));
-  const value = uint40Be(digest.subarray(0, 5));
+  const value = uint40Be(digest.subarray(0, 5)) % 10 ** 12;
   const padded = value.toString(10).padStart(12, "0");
   const groups: string[] = [];
   for (let i = 0; i < padded.length; i += 2) groups.push(padded.slice(i, i + 2));

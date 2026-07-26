@@ -5,6 +5,13 @@ import { sha256 } from "./primitives";
 const SAFETY_NUMBER_BITS = 40;
 const SAFETY_NUMBER_BYTES = SAFETY_NUMBER_BITS / 8;
 const SAFETY_NUMBER_DIGITS = 12;
+/**
+ * Signal-style safety number: a 40-bit truncation rendered in base 10. The
+ * raw 40-bit value can reach 2^40 - 1 (13 decimal digits); taking it modulo
+ * 10^12 guarantees exactly 12 digits, so the result always formats as six
+ * two-digit groups instead of intermittently overflowing into a seventh.
+ */
+const SAFETY_NUMBER_MODULUS = 10 ** 12;
 
 function compareBytes(a: Uint8Array, b: Uint8Array): number {
   const len = Math.min(a.length, b.length);
@@ -41,5 +48,5 @@ export async function computeSafetyNumber(
   material.set(second, conversationId.length + first.length);
   const digest = await sha256(material);
   const truncated = digest.subarray(0, SAFETY_NUMBER_BYTES);
-  return formatSafetyNumber(uint40BigEndian(truncated));
+  return formatSafetyNumber(uint40BigEndian(truncated) % SAFETY_NUMBER_MODULUS);
 }
