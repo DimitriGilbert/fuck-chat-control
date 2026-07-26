@@ -93,7 +93,17 @@ export function ImportBundleDialog({
   const canImport = bundle !== null && passphrase.length > 0 && !busy;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next: boolean): void => {
+        // R10/F2: prevent dismissal (overlay click / Esc) while an import is
+        // in flight — closing mid-import would tear down the dialog before the
+        // promise settles and leak a hanging state. The explicit Cancel
+        // button stays disabled via `disabled={busy}`.
+        if (!next && busy) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Import encrypted bundle</DialogTitle>

@@ -392,6 +392,36 @@ export function deriveRole(localIdentityKey: PublicKey, remoteIdentityKey: Publi
   return cmp < 0 ? Role.Initiator : Role.Responder;
 }
 
+/**
+ * R3/F2 (Phase 8.2): constants for the TransferCancel control payload. The
+ * payload is a single 4-byte big-endian transferId so the receiver can
+ * correlate the cancel to its inbound transfer state without parsing AAD.
+ */
+export const TRANSFER_CANCEL_PAYLOAD_BYTES = 4 as const;
+
+/**
+ * Encode a TransferCancel control payload (4-byte big-endian transferId).
+ * Used by the framing sender when it aborts a transfer due to sequence
+ * exhaustion; the receiver decodes this and drops the matching state.
+ */
+export function encodeTransferCancelPayload(transferId: number): Uint8Array {
+  assertUint32(transferId, "transfer id");
+  const out = new Uint8Array(TRANSFER_CANCEL_PAYLOAD_BYTES);
+  writeUint32Be(out, 0, transferId);
+  return out;
+}
+
+/**
+ * Decode a TransferCancel control payload. Validates length and range; throws
+ * {@link ProtocolError}(InvalidLength / InvalidRange) on malformed input.
+ */
+export function decodeTransferCancelPayload(payload: Uint8Array): number {
+  assertExactLength(payload, TRANSFER_CANCEL_PAYLOAD_BYTES, "transfer cancel payload");
+  const transferId = readUint32Be(payload, 0);
+  assertUint32(transferId, "transfer id");
+  return transferId;
+}
+
 export function deriveNonce(senderSessionId: SessionId, sequence: number): Uint8Array {
   assertUint32(sequence, "sequence");
   if (sequence > MAX_SEQUENCE) {

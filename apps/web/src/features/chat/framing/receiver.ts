@@ -1,5 +1,6 @@
 import { decryptFrame, ReplayWindow } from "../crypto/aead";
 import { CryptoError } from "../crypto/errors";
+import { decodeTransferCancelPayload } from "../protocol/codec";
 import { MAX_CONCURRENT_TRANSFERS, MAX_INCOMPLETE_TRANSFER_BYTES } from "../protocol/limits";
 import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/types";
 import type { FrameAad } from "../protocol/types";
@@ -120,6 +121,16 @@ export class FrameReceiver {
     }
     const subtype = subtypeByte as ControlSubtype;
     const payload = plaintext.subarray(1);
+    // R3/F2 (Phase 8.2): the sender-side abort signal is handled inline (not
+    // routed through onControl) because the receiver is the authoritative
+    // owner of inbound transfer state and the cancel must always drop the
+    // matching entry, even if the host application has no other use for the
+    // control event. The payload carries the 4-byte transferId.
+    if (subtype === ControlSubtype.TransferCancel) {
+      const transferId = decodeTransferCancelPayload(payload);
+      this.cancelTransfer(transferId);
+      return;
+    }
     this.config.onControl(subtype, payload);
   }
 

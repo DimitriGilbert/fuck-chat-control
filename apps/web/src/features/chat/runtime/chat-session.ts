@@ -113,6 +113,12 @@ export function buildOrchestrator(
       session.messages = session.messages.concat(message);
       session.lastMessagePreview = previewOf(message.text);
       session.lastMessageAt = message.timestamp;
+      // R9/F5 (Phase 8.5): advance the separate "last received" cursor only
+      // for received-direction messages so the read-marker logic in the
+      // controller can advance the cursor independently of sent messages.
+      if (message.direction === "received") {
+        session.lastReceivedAt = message.timestamp;
+      }
       onChange(session);
     },
     onSafetyNumber: (safetyNumber: string, verified: boolean): void => {
@@ -241,6 +247,9 @@ export function wireBridge(params: {
     record: null,
     lastMessagePreview: null,
     lastMessageAt: null,
+    // R9/F5 (Phase 8.5): seed the separate "last received" cursor so the
+    // read-marker logic can advance it independently of lastMessageAt.
+    lastReceivedAt: null,
     transfers: [],
     receivedFiles: new Map<number, ReceivedFile>(),
     detached: false,
@@ -268,6 +277,17 @@ export function seedSessionFromHistory(
   // R7/F3: mirror the durable authFailed flag from the record so a resumed
   // conversation still surfaces the "create a fresh invitation" affordance.
   session.authFailed = record?.authFailed === true;
+  // R9/F5 (Phase 8.5): seed lastReceivedAt from the most recent RECEIVED
+  // message so the read-marker logic advances correctly on resume.
+  let lastReceivedAt: number | null = null;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    if (m.direction === "received") {
+      lastReceivedAt = m.timestamp;
+      break;
+    }
+  }
+  session.lastReceivedAt = lastReceivedAt;
   if (history.length > 0) {
     const last = history[history.length - 1] as ConversationMessage;
     session.lastMessagePreview = previewOf(last.text);
@@ -284,6 +304,15 @@ export function seedSessionFromHistory(
  * controller removes it from the map.
  */
 export function teardownSession(session: ChatSession): void {
+  // R9/F7: zero each received-file byte buffer BEFORE releasing the WebRTC +
+  // signaling resources. Files are transient (PRD: nothing is persisted on
+  // disk); teardown is the last chance to clear the plaintext bytes held in
+  // memory for the UI's on-demand download. Mirrors clearConversation's
+  // zeroing, applied on the session-disconnect path.
+  for (const file of session.receivedFiles.values()) {
+    file.data.fill(0);
+  }
+  session.receivedFiles.clear();
   try {
     session.orchestrator.leave();
   } catch {

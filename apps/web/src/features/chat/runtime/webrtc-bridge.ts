@@ -174,6 +174,19 @@ export class WebRtcBridge {
     } catch {
       // best-effort
     }
+    // R6/F5: close the responder-path DataChannelTransport explicitly. The
+    // adapter's own close() only tears down the channel it created via
+    // createDataChannel (the initiator path). The responder receives its
+    // channel via onDataChannel and the bridge stashes it in `nego.channel`;
+    // without an explicit close here its listeners (bufferedamountlow /
+    // message / open) stay attached to the underlying RTCDataChannel until
+    // the browser GCs it.
+    try {
+      this.nego.channel?.close();
+    } catch {
+      // best-effort
+    }
+    this.nego.channel = null;
     try {
       this.adapter.close();
     } catch {

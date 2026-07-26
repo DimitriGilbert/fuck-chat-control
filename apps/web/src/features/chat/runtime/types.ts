@@ -47,6 +47,16 @@ export interface ChatSession {
   /** Timestamp of the most recent message; null when there are none. */
   lastMessageAt: number | null;
   /**
+   * R9/F5 (Phase 8.5): timestamp of the most recent RECEIVED message; null
+   * when the conversation has never received one. Tracked SEPARATELY from
+   * {@link lastMessageAt} (which advances on sent OR received) so the
+   * read-marker logic can advance the cursor only on RECEIVED messages —
+   * a sent message must NOT count as "the user has read up to here",
+   * otherwise a peer's message that arrives with an earlier timestamp
+   * (clock drift, queue ordering) would be silently miscounted as read.
+   */
+  lastReceivedAt: number | null;
+  /**
    * Live transfer state for this session: queued/sending/receiving/complete/
    * cancelled/error entries for every file sent or received. The controller
    * mutates this array (immutably) as the orchestrator emits transfer events.

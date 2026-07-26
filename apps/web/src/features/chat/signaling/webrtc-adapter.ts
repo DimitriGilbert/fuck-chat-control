@@ -30,34 +30,47 @@ export class DataChannelTransport implements FrameTransport {
   private drainListener: (() => void) | null = null;
   private messageHandler: ((bytes: Uint8Array) => void) | null = null;
   private openListener: (() => void) | null = null;
+  /**
+   * Bound listeners added in the constructor and removed in {@link close} so
+   * the underlying RTCDataChannel can release its JS-side references. Without
+   * explicit removal the channel keeps the closures (and through them, this
+   * transport) alive until the RTCDataChannel itself is GC'd — which on some
+   * browsers is not prompt even after `.close()`.
+   */
+  private readonly handleBufferedAmountLow: () => void;
+  private readonly handleMessage: (event: MessageEvent) => void;
+  private readonly handleOpen: () => void;
 
   public constructor(options: DataChannelTransportOptions) {
     this.channel = options.channel;
     this.channel.binaryType = "arraybuffer";
     this.channel.bufferedAmountLowThreshold = 0;
-    this.channel.addEventListener("bufferedamountlow", () => {
+    this.handleBufferedAmountLow = (): void => {
       const listener = this.drainListener;
       if (listener !== null) {
         listener();
       }
-    });
-    this.channel.addEventListener("message", (event) => {
+    };
+    this.handleMessage = (event: MessageEvent): void => {
       const handler = this.messageHandler;
       if (handler === null) {
         return;
       }
-      const data = (event as MessageEvent).data;
+      const data = event.data;
       if (!(data instanceof ArrayBuffer)) {
         return;
       }
       handler(new Uint8Array(data));
-    });
-    this.channel.addEventListener("open", () => {
+    };
+    this.handleOpen = (): void => {
       const listener = this.openListener;
       if (listener !== null) {
         listener();
       }
-    });
+    };
+    this.channel.addEventListener("bufferedamountlow", this.handleBufferedAmountLow);
+    this.channel.addEventListener("message", this.handleMessage);
+    this.channel.addEventListener("open", this.handleOpen);
   }
 
   public get bufferedAmount(): number {
@@ -105,6 +118,13 @@ export class DataChannelTransport implements FrameTransport {
   }
 
   public close(): void {
+    // R6/F5: remove the listeners added in the constructor so the underlying
+    // RTCDataChannel can release its closures. Then null the handler refs so
+    // a late event arriving on a not-yet-closed channel sees no listener to
+    // invoke.
+    this.channel.removeEventListener("bufferedamountlow", this.handleBufferedAmountLow);
+    this.channel.removeEventListener("message", this.handleMessage);
+    this.channel.removeEventListener("open", this.handleOpen);
     this.drainListener = null;
     this.messageHandler = null;
     this.openListener = null;
@@ -114,7 +134,7 @@ export class DataChannelTransport implements FrameTransport {
 
 export class WebRtcAdapter {
   private readonly peerConnection: RTCPeerConnection;
-  private readonly handlers: WebRtcAdapterHandlers;
+  private handlers: WebRtcAdapterHandlers;
   private dataChannel: RTCDataChannel | null = null;
   /**
    * ICE candidates that arrived before the remote SDP was applied. The browser
@@ -123,6 +143,15 @@ export class WebRtcAdapter {
    * remote description is in place.
    */
   private pendingIceCandidates: RTCIceCandidateInit[] = [];
+  /**
+   * Bound listeners added in the constructor and removed in {@link close} so
+   * the RTCPeerConnection can release its closures (R6/F5). Same rationale as
+   * DataChannelTransport: without explicit removal the PC keeps the closures
+   * (and through them, this adapter + its handlers) alive.
+   */
+  private readonly handleIceCandidate: (event: RTCPeerConnectionIceEvent) => void;
+  private readonly handleConnectionStateChange: () => void;
+  private readonly handleDataChannel: (event: RTCDataChannelEvent) => void;
 
   public constructor(options: WebRtcAdapterOptions = {}) {
     this.handlers = options;
@@ -130,17 +159,20 @@ export class WebRtcAdapter {
       iceServers: options.iceServers ?? [],
       bundlePolicy: "max-bundle",
     });
-    this.peerConnection.addEventListener("icecandidate", (event) => {
+    this.handleIceCandidate = (event: RTCPeerConnectionIceEvent): void => {
       if (event.candidate !== null) {
         this.handlers.onIceCandidate?.(event.candidate.toJSON());
       }
-    });
-    this.peerConnection.addEventListener("connectionstatechange", () => {
+    };
+    this.handleConnectionStateChange = (): void => {
       this.handlers.onConnectionStateChange?.(this.peerConnection.connectionState);
-    });
-    this.peerConnection.addEventListener("datachannel", (event) => {
+    };
+    this.handleDataChannel = (event: RTCDataChannelEvent): void => {
       this.handlers.onDataChannel?.(new DataChannelTransport({ channel: event.channel }));
-    });
+    };
+    this.peerConnection.addEventListener("icecandidate", this.handleIceCandidate);
+    this.peerConnection.addEventListener("connectionstatechange", this.handleConnectionStateChange);
+    this.peerConnection.addEventListener("datachannel", this.handleDataChannel);
   }
 
   public async createOffer(): Promise<RTCSessionDescriptionInit> {
@@ -201,6 +233,17 @@ export class WebRtcAdapter {
   }
 
   public close(): void {
+    // R6/F5: remove the listeners added in the constructor so the
+    // RTCPeerConnection can release its closures, then null `this.handlers`
+    // defensively so any listener that fires before the PC actually closes
+    // (or after, on a misbehaving impl) sees no handler to invoke.
+    this.peerConnection.removeEventListener("icecandidate", this.handleIceCandidate);
+    this.peerConnection.removeEventListener(
+      "connectionstatechange",
+      this.handleConnectionStateChange,
+    );
+    this.peerConnection.removeEventListener("datachannel", this.handleDataChannel);
+    this.handlers = {};
     if (this.dataChannel !== null) {
       this.dataChannel.close();
       this.dataChannel = null;

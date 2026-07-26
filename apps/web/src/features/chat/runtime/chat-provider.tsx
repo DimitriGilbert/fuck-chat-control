@@ -99,12 +99,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
   React.useEffect(() => {
     let unsubscribe = (): void => {};
     let disposedController: ChatController | null = null;
+    let disposedIdentityManager: IdentityManager | null = null;
+    let disposedAtRestKeyManager: AtRestKeyManager | null = null;
     let cancelled = false;
 
     try {
       const { brokerUrl, baseUrl } = resolveBrowserDeps();
       const identityManager: IdentityManager = createIdentityManager(window.localStorage);
       const atRestKeyManager: AtRestKeyManager = createAtRestKeyManager(window.localStorage);
+      disposedIdentityManager = identityManager;
+      disposedAtRestKeyManager = atRestKeyManager;
 
       // Load persisted identity + at-rest key BEFORE constructing the
       // controller: createChatController reads both synchronously at
@@ -156,6 +160,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       if (disposedController !== null) {
         disposedController.dispose();
       }
+      // R9/F8: on unmount, drop the in-memory at-rest key and the identity
+      // reference so neither stays resident after the provider is gone. Both
+      // managers rehydrate from storage on the next mount; this is about not
+      // keeping secret material live in a discarded closure.
+      disposedAtRestKeyManager?.lock();
+      disposedIdentityManager?.evict();
     };
   }, []);
 

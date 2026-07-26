@@ -130,7 +130,10 @@ describe("slice 5: cancellation releases buffers", () => {
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 5);
     const filePromise = sender.sendFile(data, "payload.bin", "application/octet-stream");
     await waitFor(() => sender.activeTransferCount === 1);
-    sender.cancelTransfer(1);
+    // R9/F4 (Phase 8.5): the sender allocates transfer ids starting at
+    // FIRST_TRANSFER_ID = 1_000_000 (see framing/sender.ts). The first
+    // sendFile call yields id = 1_000_000; cancel that id.
+    sender.cancelTransfer(1_000_000);
     await expect(filePromise).rejects.toMatchObject({
       code: FramingErrorCode.TransferCancelled,
     });

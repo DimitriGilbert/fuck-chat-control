@@ -1,4 +1,5 @@
 import { encryptFrame } from "../crypto/aead";
+import { encodeTransferCancelPayload } from "../protocol/codec";
 import { MAX_BUFFERED_DATA_BYTES, MAX_SEQUENCE, PROTOCOL_VERSION } from "../protocol/limits";
 import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/types";
 import type { FrameAad, FrameHeader } from "../protocol/types";
@@ -9,7 +10,19 @@ import type { FileManifest, FrameSenderConfig } from "./types";
 import { encodeWireFrame } from "./wire";
 
 const UINT32_MAX = 0xffffffff;
-const FIRST_TRANSFER_ID = 1;
+/**
+ * R9/F4 (Phase 8.5): the sender's transfer-id space starts at 1_000_000 so
+ * the controller's queued-placeholder ids ([1, 999_999]) can never collide
+ * with a real orchestrator-allocated id (>= 1_000_000). Without this gap,
+ * queuedId=N could be reused as a real transfer id after the queued entry
+ * was drained, and the snapshot's two transfers (the queued placeholder +
+ * the now-real one) would alias — late events for the queued id would
+ * mutate the wrong transfer in the list. The 1M floor leaves room for ~1M
+ * concurrent queued placeholders per session, far beyond any realistic UI
+ * burst, while the upper space (1_000_000 .. UINT32_MAX) still fits ~4B
+ * real transfers per session.
+ */
+const FIRST_TRANSFER_ID = 1_000_000;
 
 interface DrainWaiter {
   readonly resolve: () => void;
@@ -90,6 +103,31 @@ export class FrameSender {
         await this.sendEncryptedFrame(FrameType.FileChunk, chunk, transferId, i);
         this.config.onProgress?.(transferId, end, data.length);
       }
+    } catch (err) {
+      // R3/F2 (Phase 8.2): if the sender hit a fatal sequence/transfer-id
+      // exhaustion mid-send, the chunks the receiver is still buffering will
+      // never arrive. Emit a TransferCancel control frame so the receiver can
+      // drop its matching inbound transfer state promptly instead of waiting
+      // for a transport-level timeout. Fire-and-forget: we are about to
+      // re-throw the original error and the transport may itself be tearing
+      // down, so swallow any secondary failure of the control send.
+      if (isSequenceExhaustedError(err)) {
+        try {
+          // sendControl routes through sendEncryptedFrame, which also consumes
+          // a sequence number. Under genuine exhaustion there may not be a
+          // sequence left to spend — in that case the control frame is a
+          // best-effort signal and the receiver will still time out. We do
+          // NOT re-enter the chunk loop; the cancel is emitted and the
+          // original error propagates.
+          await this.sendControl(
+            ControlSubtype.TransferCancel,
+            encodeTransferCancelPayload(transferId),
+          );
+        } catch {
+          // best-effort: the original error is the one callers see.
+        }
+      }
+      throw err;
     } finally {
       this.activeTransfers.delete(transferId);
       this.cancelledTransfers.delete(transferId);
@@ -207,4 +245,21 @@ export class FrameSender {
     const wire = encodeWireFrame(header, enc.nonce, enc.ciphertext);
     this.config.transport.send(wire);
   }
+}
+
+/**
+ * R3/F2 (Phase 8.2): classify a sender-side error as a fatal sequence-space
+ * exhaustion. The sender throws {@link FramingError} with code
+ * {@link FramingErrorCode.SequenceExhausted} when either the per-session
+ * sequence counter or the transfer-id allocator overflows UINT32. Both are
+ * fatal: no further frames can be sent on this session, and any in-flight
+ * transfer's chunks will never reach the receiver. The orchestrator + sender
+ * cooperate to emit a {@link ControlSubtype.TransferCancel} so the receiver
+ * drops its matching state.
+ */
+function isSequenceExhaustedError(err: unknown): boolean {
+  if (err instanceof FramingError && err.code === FramingErrorCode.SequenceExhausted) {
+    return true;
+  }
+  return false;
 }

@@ -5,7 +5,20 @@ import type { ConversationId } from "@/features/chat/protocol/types";
 
 import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 
+/**
+ * R7/F6 (Phase 8.3): the invitation fragment now carries an optional PAKE
+ * code suffix. The bare conversation id is 32 lowercase hex chars; the new
+ * `~<code>` tail carries the 6-digit SPAKE2 password the responder needs to
+ * derive the same traffic keys as the initiator. The code is optional —
+ * safety-number-only invitations parse exactly as before.
+ *
+ * The PAKE code length is bounded to 1..6 decimal digits (matches the PRD's
+ * "6-digit code" wording while still accepting shorter codes for tests and
+ * future flexibility). The hex portion is unchanged so existing invitation
+ * links keep round-tripping.
+ */
 const HEX_CHARS_PATTERN = /^[0-9a-f]{32}$/;
+const HEX_WITH_CODE_PATTERN = /^[0-9a-f]{32}~\d{1,6}$/;
 
 export function generateConversationId(): ConversationId {
   return encodeConversationId(randomBytes(CONVERSATION_ID_BYTES));
@@ -38,7 +51,49 @@ export function formatInvitation(id: ConversationId, baseUrl: string): string {
   return `${trimmed}#${conversationIdToHex(id)}`;
 }
 
-export function parseInvitation(fragment: string): { conversationId: ConversationId } {
+/**
+ * Result of parsing an invitation fragment. The PAKE `code` is null for
+ * safety-number-only invitations; non-null when the initiator appended
+ * `~<code>` to carry the SPAKE2 password out-of-band alongside the
+ * conversation id.
+ */
+export interface ParsedInvitation {
+  readonly conversationId: ConversationId;
+  readonly code: string | null;
+}
+
+/**
+ * Parse an invitation fragment into the conversation id plus any PAKE code
+ * the initiator embedded. Accepts:
+ *   - bare hex: `abcdef0123456789abcdef0123456789`
+ *   - leading-hash: `#abcdef...`
+ *   - hex+code: `abcdef...~123456` or `#abcdef...~123456`
+ *
+ * The hex portion MUST be 32 lowercase hex chars; the optional `~code` tail
+ * MUST be 1..6 decimal digits. Anything else throws
+ * {@link OrchestratorErrorCode.MalformedInvitation}.
+ */
+export function parseInvitation(fragment: string): ParsedInvitation {
   const stripped = fragment.startsWith("#") ? fragment.slice(1) : fragment;
-  return { conversationId: hexToConversationId(stripped) };
+  if (HEX_CHARS_PATTERN.test(stripped)) {
+    return { conversationId: hexToConversationId(stripped), code: null };
+  }
+  if (HEX_WITH_CODE_PATTERN.test(stripped)) {
+    const tildeIdx = stripped.indexOf("~");
+    if (tildeIdx < 0) {
+      // Defensive: regex guarantees the tilde is present; this branch is
+      // unreachable but keeps the narrowing explicit for the type checker.
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedInvitation,
+        "invitation fragment with code missing '~' separator",
+      );
+    }
+    const hexPart = stripped.slice(0, tildeIdx);
+    const codePart = stripped.slice(tildeIdx + 1);
+    return { conversationId: hexToConversationId(hexPart), code: codePart };
+  }
+  // Re-run hexToConversationId on the stripped fragment to surface the
+  // canonical "32 lowercase hex" error message for malformed inputs that
+  // match neither shape (preserves the pre-Phase-8 error contract).
+  return { conversationId: hexToConversationId(stripped), code: null };
 }

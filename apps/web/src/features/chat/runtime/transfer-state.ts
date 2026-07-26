@@ -47,6 +47,13 @@ export type TransferEvent =
  * something changed, otherwise the same reference. A late event for an
  * unknown id (or for a transfer already in a terminal state) is a no-op so
  * the snapshot stays stable across races.
+ *
+ * R9/F4 (Phase 8.5): id-space convention. Queued placeholders use ids in
+ * [1, 999_999]; real orchestrator-allocated transfer ids start at 1_000_000
+ * (see framing/sender.ts FIRST_TRANSFER_ID). The dedup-by-id `start` branch
+ * therefore never aliases a queued placeholder to a real transfer — the two
+ * id spaces are disjoint, and a late event for a queued id cannot reach over
+ * to a real transfer that happens to share the number.
  */
 export function applyTransferEvent(
   state: readonly TransferState[],

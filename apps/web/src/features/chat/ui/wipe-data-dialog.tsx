@@ -36,8 +36,8 @@ export function WipeDataAlertDialog({
   const isAll = mode === "all";
   const title = isAll ? "Wipe all local data?" : "Clear current conversation?";
   const description = isAll
-    ? "Every conversation and message stored in this browser will be deleted. The server has no copy. This cannot be undone."
-    : "The active conversation's history will be removed from this browser. This cannot be undone.";
+    ? "Every conversation and message stored in this browser will be deleted. The server has no copy. Note: the AES-256 key that protects your history is held separately by this browser profile; clearing browser site data later will destroy it and render any remaining ciphertext unrecoverable. To preserve your identity and history, export an encrypted bundle first. This action cannot be undone."
+    : "The active conversation's history will be removed from this browser. The at-rest encryption key that protects your remaining conversations is retained. This action cannot be undone.";
 
   function handleConfirm(): void {
     if (controller === null || mode === null) return;

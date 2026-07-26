@@ -194,6 +194,15 @@ export interface ChatController {
    */
   __receiveMessageForTest(id: ConversationId, text: string): Promise<void>;
   /**
+   * Test seam: mirror a synthetic SENT message into a session's snapshot
+   * without driving the orchestrator's crypto path (which would require the
+   * session to be Connected). Mutates `lastMessageAt` AND `messages` the same
+   * way the real sendText path does, but — critically — does NOT advance
+   * `lastReceivedAt`, because sent messages must not push the read marker
+   * forward (R9/F5 / Phase 8.5). NOT part of the public contract.
+   */
+  __sendMessageForTest(id: ConversationId, text: string): Promise<void>;
+  /**
    * Test seam: attach a loopback transport to a session's orchestrator so two
    * controllers can run the real crypto handshake against each other without
    * WebRTC. The caller cross-wires a pair via {@link linkLoopbackPair} and
@@ -245,9 +254,23 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     deps.atRestKeyManager,
   );
   const listeners = new Set<(state: ChatControllerState) => void>();
-  const sessions = new Map<ConversationId, ChatSession>();
+  /**
+   * R9/F3 (Phase 8.5): the session/holder/readMarker/sendQueue maps key by the
+   * HEX STRING of the ConversationId, not the branded Uint8Array reference.
+   * ConversationId is a `Brand<Uint8Array, "ConversationId">`; without keyOf,
+   * `sessions.get(id)` uses SameValueZero reference equality, so two value-
+   * equal ids produced by different code paths (e.g. an id round-tripped
+   * through `orchestrator.start()` vs. one re-parsed from a fragment during
+   * `resumeConversation`) would miss each other in the map. The test seam
+   * `__receiveMessageForTest`, the controller's own `resumeConversation`
+   * re-entry, and any caller that holds an old id reference all rely on value
+   * equality. `keyOf` normalizes to a lowercase hex string (16 bytes → 32
+   * chars), matching the store's `idKey` convention; it is O(16) per call,
+   * negligible next to the React re-render it gates.
+   */
+  const sessions = new Map<string, ChatSession>();
   // Holders link each orchestrator's construction-time handlers to its session.
-  const holders = new Map<ConversationId, SessionHolder>();
+  const holders = new Map<string, SessionHolder>();
   let activeConversationId: ConversationId | null = null;
   let conversationsCache: readonly ConversationRecord[] = [];
   // `ready` is true once the controller is constructed: the deps contract
@@ -274,7 +297,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       .map((session) => summarizeSession(session))
       .sort(compareSummaries);
     const active =
-      activeConversationId !== null ? (sessions.get(activeConversationId) ?? null) : null;
+      activeConversationId !== null
+        ? (sessions.get(keyOf(activeConversationId)) ?? null)
+        : null;
     const activeView = activeSessionView(active);
     return {
       activeConversationId,
@@ -307,23 +332,28 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * The onChange callback every session invokes when its snapshot mutates.
    * Background/idle sessions come through here too: we update the per-session
    * unread (when the session is not active) and emit a fresh snapshot.
+   *
+   * R9/F5 (Phase 8.5): the active-session branch advances readMarkers ONLY
+   * based on RECEIVED messages (session.lastReceivedAt), never sent ones.
+   * Previously the cursor tracked lastMessageAt (advanced by sent OR received),
+   * which meant a sent message could push the read marker past a peer message
+   * that arrived with an earlier timestamp (clock drift, queue ordering),
+   * causing the unread count to drop to 0 in the non-active branch even though
+   * the user had not actually seen the peer's message.
    */
   const onSessionChange: SessionChangeCallback = (session): void => {
     if (activeConversationId !== session.id) {
       // Non-active session receiving a message: increment unread. The message
       // itself is already mirrored into `session.messages` by the handler; the
       // unread bump reflects "things the user hasn't looked at yet."
-      // We bump unread only for received-direction messages; the handler does
-      // not distinguish, so we conservatively bump on every change after the
-      // first message arrives. To stay correct, we only bump when the session
-      // has a brand-new last-message timestamp that advanced.
-      // (Simulated/test receives set lastMessageAt; the controller's test seam
-      // drives this path explicitly.)
-      const last = session.lastMessageAt;
+      // R9/F5: only RECEIVED-direction messages count toward unread; sent
+      // messages by definition are already seen (the user typed them).
+      const last = session.lastReceivedAt;
       if (last !== null) {
-        // Count messages whose timestamp is >= the session's "read up to"
-        // marker. The marker is updated whenever the session is selected.
-        const readUpTo = readMarkers.get(session.id) ?? -Infinity;
+        // Count RECEIVED messages whose timestamp is past the session's
+        // "read up to" marker. The marker is updated whenever the session is
+        // selected OR when a received message arrives while active.
+        const readUpTo = readMarkers.get(keyOf(session.id)) ?? -Infinity;
         let unread = 0;
         for (const m of session.messages) {
           if (m.timestamp > readUpTo && m.direction === "received") {
@@ -331,11 +361,21 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
           }
         }
         session.unread = unread;
+      } else {
+        // Never received a message: unread stays at 0.
+        session.unread = 0;
       }
     } else {
-      // Active session: no unread, advance the read marker to the latest.
-      if (session.lastMessageAt !== null) {
-        readMarkers.set(session.id, session.lastMessageAt);
+      // Active session: no unread. Advance the read marker ONLY for RECEIVED
+      // messages — a sent message must NOT push the cursor forward, otherwise
+      // a peer's message arriving with an earlier timestamp would be skipped
+      // by the non-active branch's "m.timestamp > readUpTo" check.
+      if (session.lastReceivedAt !== null) {
+        const k = keyOf(session.id);
+        const prev = readMarkers.get(k) ?? -Infinity;
+        if (session.lastReceivedAt > prev) {
+          readMarkers.set(k, session.lastReceivedAt);
+        }
       }
       session.unread = 0;
     }
@@ -347,7 +387,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   };
 
   // Read markers track "the user has seen up to this timestamp" per session.
-  const readMarkers = new Map<ConversationId, number>();
+  const readMarkers = new Map<string, number>();
 
   /**
    * Per-session registry of received file bytes, keyed by transfer id. The
@@ -381,17 +421,23 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     /** Resolves with null if the queued send is cancelled before start. */
     readonly reject: (err: unknown) => void;
   }
-  const sendQueues = new Map<ConversationId, QueuedSend[]>();
+  const sendQueues = new Map<string, QueuedSend[]>();
   let nextQueuedId = 1;
 
   function syncActiveReadMarker(session: ChatSession): void {
-    const latest = session.lastMessageAt ?? -Infinity;
-    readMarkers.set(session.id, latest);
+    // R9/F5 (Phase 8.5): advance the read marker only as far as the most
+    // recent RECEIVED message. Using lastMessageAt here would mark sent-only
+    // tails as "read up to T", which then suppresses the unread count for a
+    // peer message arriving with an earlier timestamp (clock drift, queue
+    // reorder). lastReceivedAt is null when the session has never received a
+    // message — fall back to -Infinity so recomputeUnread sees no reads yet.
+    const latest = session.lastReceivedAt ?? -Infinity;
+    readMarkers.set(keyOf(session.id), latest);
     recomputeUnread(session);
   }
 
   function recomputeUnread(session: ChatSession): void {
-    const readUpTo = readMarkers.get(session.id) ?? -Infinity;
+    const readUpTo = readMarkers.get(keyOf(session.id)) ?? -Infinity;
     let unread = 0;
     for (const m of session.messages) {
       if (m.timestamp > readUpTo && m.direction === "received") {
@@ -446,7 +492,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   }
 
   function registerSession(session: ChatSession): void {
-    sessions.set(session.id, session);
+    sessions.set(keyOf(session.id), session);
     activeConversationId = session.id;
     syncActiveReadMarker(session);
   }
@@ -454,6 +500,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   async function startSession(
     role: Role,
     fragment?: string,
+    seed?: (session: ChatSession) => Promise<void>,
   ): Promise<{ session: ChatSession; invitation: string | null }> {
     const { orchestrator, holder } = buildSessionOrchestrator();
     let conversationId: ConversationId;
@@ -466,7 +513,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       await orchestrator.join(fragment as string);
       conversationId = orchestrator.conversationId as ConversationId;
     }
-    holders.set(conversationId, holder);
+    holders.set(keyOf(conversationId), holder);
     const presence = bridgePresenceCallbacks(orchestrator);
     const session = wireBridge({
       orchestrator,
@@ -479,13 +526,23 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       ...presence,
     });
     session.invitation = invitation;
-    session.bridge.start();
+    // R9/F3 (Phase 8.5): register the session in the session map BEFORE
+    // bridge.start() so the seed hook (if any) can populate the snapshot
+    // before any live inbound frame arrives. The previous ordering started
+    // the bridge first, racing a fast peer's onMessage against
+    // seedSessionFromHistory — the seed would then overwrite the live frame.
+    // The seed hook is optional so startConversation/joinConversation are
+    // unaffected; it is invoked between registerSession and bridge.start().
     registerSession(session);
+    if (seed !== undefined) {
+      await seed(session);
+    }
+    session.bridge.start();
     return { session, invitation };
   }
 
   function findSessionOrThrow(id: ConversationId): ChatSession {
-    const session = sessions.get(id);
+    const session = sessions.get(keyOf(id));
     if (session === undefined) {
       throw new Error(`no live session for conversation ${id}`);
     }
@@ -514,14 +571,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * still saturated.
    */
   function drainSendQueue(id: ConversationId): void {
-    const session = sessions.get(id);
+    const k = keyOf(id);
+    const session = sessions.get(k);
     if (session === undefined) return;
-    const queue = sendQueues.get(id);
+    const queue = sendQueues.get(k);
     if (queue === undefined || queue.length === 0) return;
     if (countInFlightTransfers(session) >= MAX_CONCURRENT_TRANSFERS) return;
     const next = queue.shift()!;
     if (queue.length === 0) {
-      sendQueues.delete(id);
+      sendQueues.delete(k);
     }
     void startSend(id, next).catch((err: unknown) => {
       // The queued send's reject is handled inside startSend; this catch is
@@ -536,7 +594,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * the real orchestrator id once the send starts.
    */
   async function startSend(id: ConversationId, queued: QueuedSend): Promise<void> {
-    const session = sessions.get(id);
+    const session = sessions.get(keyOf(id));
     if (session === undefined) {
       queued.reject(new Error(`no live session for conversation ${id}`));
       return;
@@ -591,10 +649,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
 
     async resumeConversation(conversationId: ConversationId): Promise<void> {
       assertNotDisposed(disposed);
-      if (sessions.has(conversationId)) {
+      const resumeKey = keyOf(conversationId);
+      if (sessions.has(resumeKey)) {
         // Already live; just select it.
         activeConversationId = conversationId;
-        const existing = sessions.get(conversationId) as ChatSession;
+        const existing = sessions.get(resumeKey) as ChatSession;
         syncActiveReadMarker(existing);
         // Re-arm inbound handlers on resume.
         existing.detached = false;
@@ -607,18 +666,27 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       }
       // Re-enter the conversation by joining with the existing conversation id
       // (idempotent at the repository level for the in-memory store).
-      const fragment = `#${hexFromId(conversationId)}`;
-      const { session } = await startSession(Role.Initiator, fragment);
-      const history = await session.orchestrator.getHistory();
-      seedSessionFromHistory(session, record, history);
-      recomputeUnread(session);
+      const fragment = `#${keyOf(conversationId)}`;
+      // R9/F3 (Phase 8.5): seed the session snapshot INSIDE startSession,
+      // BEFORE the bridge is started. This closes the race where a fast peer
+      // rejoins and delivers a message between startSession returning and
+      // seedSessionFromHistory running — that ordering overwrote the live
+      // frame with persisted history. With the seed hook, the snapshot is
+      // populated first; the bridge opens only after seeding completes, so
+      // any inbound frame is APPENDED to the seeded history, not lost.
+      const { session } = await startSession(Role.Initiator, fragment, async (s) => {
+        const history = await s.orchestrator.getHistory();
+        seedSessionFromHistory(s, record, history);
+        recomputeUnread(s);
+      });
+      void session;
       await refreshConversations();
       emit(null);
     },
 
     selectConversation(conversationId: ConversationId): void {
       assertNotDisposed(disposed);
-      const session = sessions.get(conversationId);
+      const session = sessions.get(keyOf(conversationId));
       if (session === undefined) {
         throw new Error(`cannot select unknown conversation ${conversationId}`);
       }
@@ -636,14 +704,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // No-arg form leaves the active session (legacy UI contract).
       const target = conversationId ?? activeConversationId;
       if (target === null) return;
-      const session = sessions.get(target);
+      const k = keyOf(target);
+      const session = sessions.get(k);
       if (session === undefined) return;
       teardownSession(session);
-      sessions.delete(target);
-      holders.delete(target);
-      readMarkers.delete(target);
-      sendQueues.delete(target);
-      if (activeConversationId === target) {
+      sessions.delete(k);
+      holders.delete(k);
+      readMarkers.delete(k);
+      sendQueues.delete(k);
+      if (activeConversationId !== null && keyOf(activeConversationId) === k) {
         // Do NOT auto-select another session — the caller decides what to
         // surface next. The empty state is a valid and expected outcome.
         activeConversationId = null;
@@ -726,27 +795,29 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
           status: "queued",
         });
         onSessionChange(session);
-        const queue = sendQueues.get(id) ?? [];
+        const qk = keyOf(id);
+        const queue = sendQueues.get(qk) ?? [];
         const queued = new Promise<number>((resolve, reject): void => {
           queue.push({ data, name, mimeType, size: data.length, queuedId, resolve, reject });
         });
-        sendQueues.set(id, queue);
+        sendQueues.set(qk, queue);
         return queued;
       }
     },
 
     cancelTransfer(id: ConversationId, transferId: number): void {
       assertNotDisposed(disposed);
-      const session = sessions.get(id);
+      const k = keyOf(id);
+      const session = sessions.get(k);
       if (session === undefined) return;
       // Cancel a queued send (never entered the orchestrator) by dropping it
       // from the queue and rejecting its promise via a synthetic placeholder.
-      const queue = sendQueues.get(id);
+      const queue = sendQueues.get(k);
       if (queue !== undefined) {
         const idx = queue.findIndex((q) => q.queuedId === transferId);
         if (idx !== -1) {
           const [removed] = queue.splice(idx, 1);
-          if (queue.length === 0) sendQueues.delete(id);
+          if (queue.length === 0) sendQueues.delete(k);
           session.transfers = session.transfers
             .filter((t) => t.id !== transferId)
             .concat({
@@ -768,7 +839,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     },
 
     getReceivedFile(id: ConversationId, transferId: number): ReceivedFile | null {
-      const session = sessions.get(id);
+      const session = sessions.get(keyOf(id));
       if (session === undefined) return null;
       return session.receivedFiles.get(transferId) ?? null;
     },
@@ -776,7 +847,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     async getHistory(id?: ConversationId): Promise<ConversationMessage[]> {
       const target = id ?? activeConversationId;
       if (target === null) return [];
-      const session = sessions.get(target);
+      const session = sessions.get(keyOf(target));
       if (session === undefined) return [];
       return await session.orchestrator.getHistory();
     },
@@ -785,7 +856,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       assertNotDisposed(disposed);
       const target = id ?? activeConversationId;
       if (target === null) return;
-      const session = sessions.get(target);
+      const session = sessions.get(keyOf(target));
       if (session === undefined) return;
       session.orchestrator.markSafetyNumberVerified();
       session.safetyNumberVerified = true;
@@ -804,7 +875,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       assertNotDisposed(disposed);
       const target = id ?? activeConversationId;
       if (target === null) return;
-      const session = sessions.get(target);
+      const session = sessions.get(keyOf(target));
       if (session === undefined) return;
       try {
         session.orchestrator.retry();
@@ -854,8 +925,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     async clearConversation(id?: ConversationId): Promise<void> {
       const target = id ?? activeConversationId;
       if (target === null) return;
+      const targetKey = keyOf(target);
       await repository.clearConversation(target);
-      const session = sessions.get(target);
+      const session = sessions.get(targetKey);
       if (session !== undefined) {
         // (5.2.1) Cancel every non-terminal transfer through the orchestrator
         // (and the bridge if it grows a cancelSend seam). Queued sends never
@@ -890,14 +962,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         }
         session.receivedFiles.clear();
         // (5.2.4) Drain the session's send queue. Mirrors leaveConversation's
-        // sendQueues.delete(target) and rejects any queued sends so their
+        // sendQueues.delete(targetKey) and rejects any queued sends so their
         // promises do not hang awaiting a slot that will never free.
-        const queue = sendQueues.get(target);
+        const queue = sendQueues.get(targetKey);
         if (queue !== undefined) {
           for (const queued of queue) {
             queued.reject(new Error("conversation cleared"));
           }
-          sendQueues.delete(target);
+          sendQueues.delete(targetKey);
         }
         // (5.2.5) Detach inbound handlers so a late frame does not repopulate
         // the snapshot. Re-armed on the next send/resume/select.
@@ -905,6 +977,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         session.messages = [];
         session.lastMessagePreview = null;
         session.lastMessageAt = null;
+        // R9/F5 (Phase 8.5): reset the separate "last received" cursor so the
+        // read marker does not survive a clear and accidentally suppress
+        // unread counting for messages that arrive after the clear.
+        session.lastReceivedAt = null;
         recomputeUnread(session);
       }
       await refreshConversations();
@@ -925,6 +1001,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         session.messages = [];
         session.lastMessagePreview = null;
         session.lastMessageAt = null;
+        // R9/F5 (Phase 8.5): keep the read-marker and unread cursors in sync
+        // with the wiped snapshot.
+        session.lastReceivedAt = null;
         session.unread = 0;
       }
       await refreshConversations();
@@ -971,7 +1050,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     },
 
     async __receiveMessageForTest(id: ConversationId, text: string): Promise<void> {
-      const session = sessions.get(id);
+      const session = sessions.get(keyOf(id));
       if (session === undefined) return;
       // Honor the detach gate so this seam faithfully simulates a real
       // orchestrator onMessage (which is gated in chat-session.ts). A late
@@ -992,11 +1071,43 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       session.messages = session.messages.concat(message);
       session.lastMessagePreview = message.text;
       session.lastMessageAt = message.timestamp;
+      // R9/F5 (Phase 8.5): mirror the separate "last received" cursor like the
+      // real onMessage handler in chat-session.ts does, so the test seam
+      // faithfully reproduces the read-marker advancement a live receive
+      // would trigger.
+      session.lastReceivedAt = message.timestamp;
+      onSessionChange(session);
+    },
+
+    async __sendMessageForTest(id: ConversationId, text: string): Promise<void> {
+      const session = sessions.get(keyOf(id));
+      if (session === undefined) return;
+      // Honor the detach gate so this seam faithfully simulates a real
+      // controller.sendText (which re-arms detached on entry). A late send
+      // arriving after clearConversation must not repopulate the snapshot.
+      if (session.detached) return;
+      // Persist via the repo and mirror into the snapshot — exactly what the
+      // real sendText path does. The critical difference from
+      // __receiveMessageForTest: we do NOT bump `lastReceivedAt`, because sent
+      // messages must not advance the read marker (R9/F5 / Phase 8.5).
+      const { MessageDirection } = await import("@/features/chat/store");
+      const timestamp = Date.now();
+      const message = await repository.appendMessage(
+        id,
+        text,
+        MessageDirection.Sent,
+        timestamp,
+      );
+      session.messages = session.messages.concat(message);
+      session.lastMessagePreview = message.text;
+      session.lastMessageAt = message.timestamp;
+      // Intentionally NOT touching session.lastReceivedAt: a sent message must
+      // not push the read-marker cursor forward.
       onSessionChange(session);
     },
 
     __attachTransportForTest(id: ConversationId, transport: PeerTransport): void {
-      const session = sessions.get(id);
+      const session = sessions.get(keyOf(id));
       if (session === undefined) return;
       // Notify presence + attach: mirrors what the WebRTC bridge does once
       // the data channel opens. Driving this from a test lets two controllers
@@ -1062,7 +1173,13 @@ function compareConversationId(a: ConversationId, b: ConversationId): number {
   return la - lb;
 }
 
-function hexFromId(id: ConversationId): string {
+/**
+ * R9/F3 (Phase 8.5): canonical Map key for a ConversationId. The branded
+ * Uint8Array reference is unsuitable as a Map key (two value-equal ids from
+ * different producers miss each other under SameValueZero); the lowercase hex
+ * string is stable across producers and matches the store's `idKey` convention.
+ */
+function keyOf(id: ConversationId): string {
   let hex = "";
   for (let i = 0; i < id.length; i++) {
     hex += id[i].toString(16).padStart(2, "0");

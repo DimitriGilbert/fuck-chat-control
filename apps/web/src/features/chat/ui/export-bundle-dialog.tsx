@@ -62,7 +62,17 @@ export function ExportBundleDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(next: boolean): void => {
+        // R10/F2: prevent dismissal (overlay click / Esc) while an export is
+        // in flight — closing mid-export would tear down the dialog before the
+        // promise settles and leak a hanging state. The explicit Cancel
+        // button stays disabled via `disabled={busy}`.
+        if (!next && busy) return;
+        onOpenChange(next);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Export encrypted bundle</DialogTitle>

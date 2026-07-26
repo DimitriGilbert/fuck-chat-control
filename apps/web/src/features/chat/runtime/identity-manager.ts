@@ -34,6 +34,14 @@ export interface IdentityManager {
   get(): IdentityKeyPair;
   /** Loads the persisted identity, or generates and persists a fresh one. */
   ensureLoaded(): Promise<void>;
+  /**
+   * Drop the in-memory identity reference (R9/F8). The persisted form on disk
+   * is unchanged — the next manager that calls `ensureLoaded` on the same
+   * storage rehydrates the key — but evicting here means a long-lived tab
+   * that loses its ChatProvider does not keep the private key resident. The
+   * next `get()` on THIS manager throws until `ensureLoaded()` runs again.
+   */
+  evict(): void;
 }
 
 /**
@@ -83,6 +91,12 @@ export function createIdentityManager(storage: IdentityStorage): IdentityManager
       };
       storage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(stored));
       identity = fresh;
+    },
+    evict(): void {
+      // Drop the closure-captured identity so the private key is no longer
+      // reachable from this manager. A subsequent get() throws until
+      // ensureLoaded() repopulates it from storage.
+      identity = null;
     },
   };
 }

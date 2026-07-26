@@ -23,6 +23,16 @@ export const ControlSubtype = {
   Leave: 0x03,
   SafetyNumberAnnouncement: 0x04,
   PakeShare: 0x05,
+  /**
+   * R3/F2 (Phase 8.2): a sender that aborts a transfer due to a sequence/
+   * transfer-id space exhaustion (a fatal sender-side state error) emits this
+   * control frame so the receiver can drop the matching inbound transfer
+   * state instead of timing out waiting for chunks that will never arrive.
+   * Payload: 4-byte big-endian transferId (matching the AAD's transferId
+   * field, but carried redundantly so the receiver can correlate without
+   * parsing the AAD).
+   */
+  TransferCancel: 0x06,
 } as const;
 export type ControlSubtype = (typeof ControlSubtype)[keyof typeof ControlSubtype];
 
@@ -32,6 +42,7 @@ export const CONTROL_SUBTYPE_VALUES: readonly ControlSubtype[] = [
   ControlSubtype.Leave,
   ControlSubtype.SafetyNumberAnnouncement,
   ControlSubtype.PakeShare,
+  ControlSubtype.TransferCancel,
 ];
 
 export const Role = {

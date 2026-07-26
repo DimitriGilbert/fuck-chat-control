@@ -26,7 +26,7 @@ import {
   PROTOCOL_VERSION,
 } from "@/features/chat/protocol/limits";
 import { AuthMode, ControlSubtype, Role } from "@/features/chat/protocol/types";
-import type { ConversationId, Signature, Transcript } from "@/features/chat/protocol/types";
+import type { ConversationId, PublicKey, Signature, Transcript } from "@/features/chat/protocol/types";
 import { FrameReceiver } from "@/features/chat/framing";
 import { FrameSender } from "@/features/chat/framing";
 import type { FrameTransport, ReceivedFile } from "@/features/chat/framing";
@@ -170,6 +170,17 @@ export class ConversationOrchestrator {
   private transcript: Transcript | null = null;
   private handshakeError: unknown = null;
   private handshakeCompleting = false;
+  /**
+   * R7/F4 (Phase 8.4): monotonically increasing generation counter bumped on
+   * every attachTransport entry. Captured by the beginHandshake/handleInbound
+   * closures; on resolution they abort (without touching this.ephemeral) if
+   * the generation has advanced underneath them — the sign of a re-entrant
+   * attachTransport call (e.g. the bridge reattaching after a data-channel
+   * flip). Without this guard the older handshake's promises can resolve
+   * AFTER the newer handshake has begun, racing the ephemeral key / hello
+   * fields and corrupting state.
+   */
+  private handshakeGeneration = 0;
   /**
    * Auth mode for this session. Defaults to {@link AuthMode.SafetyNumberOnly}.
    * Becomes {@link AuthMode.Pake} when the parsed invitation carried a `~code`
@@ -350,12 +361,18 @@ export class ConversationOrchestrator {
       );
     }
     this.started = true;
-    // Accept either a full invitation link (`https://host#<hex>`) or a bare
-    // fragment (`#<hex>` / `<hex>`). Everything before the last `#` is the
-    // URL prefix the initiator wrapped around the conversation id.
+    // R7/F6 (Phase 8.3): accept either a full invitation link
+    // (`https://host#<hex>` / `https://host#<hex>~<code>`) or a bare fragment
+    // (`#<hex>` / `<hex>` / `#<hex>~<code>` / `<hex>~<code>`). Everything
+    // before the last `#` is the URL prefix the initiator wrapped around the
+    // conversation id. parseInvitation strips a single leading `#` and
+    // extracts the optional `~<code>` tail (PAKE password). The redundant
+    // double-`#` normalization from the prior slice is gone — lastIndexOf +
+    // slice already produces the bare fragment, and parseInvitation handles
+    // the optional leading `#`.
     const hashIndex = fragment.lastIndexOf("#");
     const bare = hashIndex >= 0 ? fragment.slice(hashIndex + 1) : fragment;
-    const parsed = parseInvitation(bare.startsWith("#") ? bare : `#${bare}`);
+    const parsed = parseInvitation(bare);
     this.conversation = parsed.conversationId;
     await this.repository.createConversation(parsed.conversationId, Date.now());
     // R7/F3 durability: hydrate the in-memory cache from the durable repo flag.
@@ -365,6 +382,18 @@ export class ConversationOrchestrator {
     // orchestrator on a previously-auth-failed conversation reads the durable
     // truth and retry() correctly throws AuthFailedRetryBlocked.
     this.authFailedCached = await this.repository.getAuthFailed(parsed.conversationId);
+    // R7/F6 (Phase 8.3): if the invitation carried a PAKE code, switch the
+    // negotiated auth mode to Pake before the handshake begins. setPakeCode
+    // throws AlreadyStarted here only if join() ran twice (we set this.started
+    // above), which is impossible by contract — but we still need to call it
+    // BEFORE connectSignaling so the PAKE state is ready when the peer
+    // arrives. We bypass the started guard by writing the fields directly
+    // (setPakeCode is the public API for external callers; the parser path
+    // runs after this.started is flipped so the public API would refuse).
+    if (parsed.code !== null) {
+      this.pakeCode = parsed.code;
+      this.authMode = AuthMode.Pake;
+    }
     this.connectSignaling();
     this.setState(ConnectionState.Waiting);
   }
@@ -393,6 +422,13 @@ export class ConversationOrchestrator {
         "attachTransport called before start()/join()",
       );
     }
+    // R7/F4 (Phase 8.4): bump the handshake generation on every entry so the
+    // beginHandshake/handleInbound closures can detect a re-entrant
+    // attachTransport (a newer handshake kicking off while an older one is
+    // still awaiting PAKE shares or async crypto). The closures capture the
+    // generation at scheduling time and abort (without mutating this.ephemeral
+    // or other handshake state) if it has advanced by the time they resolve.
+    this.handshakeGeneration += 1;
     this.transport = transport;
     this.setState(ConnectionState.Handshaking);
     // Kick off the local Hello generation and transmission.
@@ -656,7 +692,18 @@ export class ConversationOrchestrator {
         "handshake started without conversation/transport",
       );
     }
+    // R7/F4 (Phase 8.4): capture the handshake generation at scheduling time.
+    // If attachTransport was called again before this async function reaches
+    // its mutation phase, the generation has advanced and a NEWER handshake is
+    // already running — abort WITHOUT touching this.ephemeral / this.localHello
+    // so the newer handshake owns those fields cleanly.
+    const generation = this.handshakeGeneration;
     const ephemeral = await generateEphemeralKeyPair();
+    if (generation !== this.handshakeGeneration) {
+      // A newer attachTransport superseded this handshake while we were
+      // generating the ephemeral key. Drop our work silently.
+      return;
+    }
     const sessionId = encodeSessionId(randomBytes(32));
     const localHello: HelloComponents = {
       protocolVersion: PROTOCOL_VERSION,
@@ -689,8 +736,14 @@ export class ConversationOrchestrator {
     ) {
       return;
     }
+    // R7/F4 (Phase 8.4): capture the generation at scheduling time. If a
+    // newer attachTransport has bumped the generation while we awaited an
+    // async step inside this dispatch, drop the in-flight handling — a newer
+    // handshake owns the field set and would be corrupted by our writes.
+    const generation = this.handshakeGeneration;
     if (bytes.length === HELLO_BYTES) {
       const hello = decodeHello(bytes);
+      if (generation !== this.handshakeGeneration) return;
       this.remoteHello = hello;
       await this.maybeSignAndSend();
       await this.maybeCompleteHandshake();
@@ -698,16 +751,19 @@ export class ConversationOrchestrator {
     }
     if (bytes.length === SIGNATURE_MESSAGE_BYTES) {
       const signature = decodeSignatureMessage(bytes);
+      if (generation !== this.handshakeGeneration) return;
       await this.verifyPeerAndComplete(signature);
       return;
     }
     if (bytes.length === PAKE_MESSAGE_BYTES) {
       const msg = decodePakeShare(bytes);
+      if (generation !== this.handshakeGeneration) return;
       await this.handlePakeShare(msg.role, msg.share);
       return;
     }
     if (bytes.length === PAKE_CONFIRM_MESSAGE_BYTES) {
       const msg = decodePakeConfirm(bytes);
+      if (generation !== this.handshakeGeneration) return;
       await this.handlePakeConfirm(msg.role, msg.tag);
       return;
     }
@@ -1181,14 +1237,17 @@ export class ConversationOrchestrator {
    * room for the current conversation. The signaling layer drives the broker
    * join/leave and SDP/ICE relay; it does NOT carry application bytes.
    *
-   * The signaling role affects only glare resolution (which side keeps its
-   * SDP offer when both peers offer simultaneously). For first contact the
-   * peer identity is unknown at this point, so we cannot call
-   * {@link deriveRole}; we default to {@link Role.Initiator}. Glare-correct
-   * behavior is established once WebRTC is wired and the peer's identity is
-   * known; this slice wires signaling plumbing, not the WebRTC offer/answer
-   * flow. The authoritative TOFU comparison in {@link verifyPeerAndComplete}
-   * uses the async repo API and is unaffected.
+   * R7/F5 (Phase 8.1): the signaling role is derived deterministically from
+   * the local identity key (parity of the first byte) instead of being
+   * hard-coded to {@link Role.Initiator}. Both internal-signaling peers derive
+   * via the same rule, so a peer whose key is even-parity is Initiator and an
+   * odd-parity peer is Responder — one of each per pair, with high probability
+   * under uniform P-256 public keys. This makes glare resolvable even when
+   * the orchestrator drives its own signaling socket (useInternalSignaling=
+   * true), instead of both sides defaulting to "impolite" and racing offers
+   * without resolution. The derivation is independent of the peer identity
+   * (which is unknown at this point) and stable across reconnects for the
+   * same local identity.
    */
   private connectSignaling(): void {
     if (this.conversation === null) {
@@ -1215,7 +1274,7 @@ export class ConversationOrchestrator {
     const client = new SignalingClient({
       brokerUrl: this.brokerUrl,
       roomId,
-      role: Role.Initiator,
+      role: deriveInternalSignalingRole(this.identity.publicKey),
       socketFactory: this.socketFactory,
       handlers: {
         onPeerJoin: () => {
@@ -1300,6 +1359,28 @@ function randomBytes(length: number): Uint8Array {
   const out = new Uint8Array(length);
   globalThis.crypto.getRandomValues(out);
   return out;
+}
+
+/**
+ * R7/F5 (Phase 8.1): derive the internal-signaling role from the local
+ * identity key. The rule is deterministic and stable across reconnects for
+ * the same identity: an even-parity first byte yields Initiator, an odd-parity
+ * first byte yields Responder. Both internal-signaling peers apply the same
+ * rule, so a pair of peers with different-parity keys (the common case under
+ * uniform P-256 public keys) gets one Initiator and one Responder, making
+ * glare resolvable via {@link GlareResolver} instead of both sides impolite.
+ *
+ * The derivation does NOT take the peer's identity key (which is unknown at
+ * connectSignaling time) and so is independent of the authoritative TOFU
+ * comparison in {@link verifyPeerAndComplete}; it only affects who keeps
+ * their SDP offer when both peers offer simultaneously.
+ */
+function deriveInternalSignalingRole(localIdentityKey: PublicKey): Role {
+  // SEC1 uncompressed public keys always start with 0x04 (the prefix byte);
+  // use the first key byte (X coordinate) instead so the parity actually
+  // varies across identities.
+  const parityByte = localIdentityKey[1] ?? 0;
+  return (parityByte & 0x01) === 0 ? Role.Initiator : Role.Responder;
 }
 
 /**
