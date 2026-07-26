@@ -103,7 +103,15 @@ export interface ChatControllerDeps {
 
 export interface ChatController {
   // --- Multi-session surface ---
-  startConversation(): Promise<{ invitation: string }>;
+  /**
+   * Start a fresh conversation as the initiator.
+   *
+   * R7/F6 / Phase 10: pass an optional `code` to authenticate the handshake
+   * via PAKE. The returned invitation link will carry `~<code>` in the URL
+   * fragment (never sent to the server); a responder opening that link runs
+   * SPAKE2 against the same code and aborts loudly on mismatch.
+   */
+  startConversation(options?: { readonly code?: string }): Promise<{ invitation: string }>;
   joinConversation(fragment: string): Promise<void>;
   resumeConversation(conversationId: ConversationId): Promise<void>;
   selectConversation(conversationId: ConversationId): void;
@@ -501,12 +509,13 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     role: Role,
     fragment?: string,
     seed?: (session: ChatSession) => Promise<void>,
+    pakeCode?: string,
   ): Promise<{ session: ChatSession; invitation: string | null }> {
     const { orchestrator, holder } = buildSessionOrchestrator();
     let conversationId: ConversationId;
     let invitation: string | null = null;
     if (role === Role.Initiator && fragment === undefined) {
-      invitation = await orchestrator.start();
+      invitation = await orchestrator.start(pakeCode);
       conversationId = orchestrator.conversationId as ConversationId;
     } else {
       // Responder or resume-via-join: the orchestrator parses the fragment.
@@ -629,9 +638,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   }
 
   return {
-    async startConversation(): Promise<{ invitation: string }> {
+    async startConversation(options?: { readonly code?: string }): Promise<{ invitation: string }> {
       assertNotDisposed(disposed);
-      const result = await startSession(Role.Initiator);
+      const code = options?.code;
+      const trimmedCode = code === undefined ? undefined : code.trim();
+      const result = await startSession(Role.Initiator, undefined, undefined, trimmedCode);
       // Initiator always produces an invitation link; the orchestrator's
       // `start()` returns it before we wire the bridge.
       const invitation = result.invitation as string;

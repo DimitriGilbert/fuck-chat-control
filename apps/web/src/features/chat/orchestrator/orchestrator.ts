@@ -51,6 +51,7 @@ import {
 } from "./handshake-codec";
 import {
   conversationIdToHex,
+  formatCodedInvitation,
   formatInvitation,
   generateConversationId,
   parseInvitation,
@@ -327,8 +328,23 @@ export class ConversationOrchestrator {
     return await this.repository.getMessages(this.conversation);
   }
 
-  /** INITIATOR flow: generate conversation id, persist, format invitation. */
-  async start(): Promise<string> {
+  /**
+   * INITIATOR flow: generate conversation id, persist, format invitation.
+   *
+   * R7/F6 (Phase 8.3 / Phase 10 demo-amenable): accepts an optional 6-digit
+   * PAKE code. When supplied, the negotiated auth mode flips to
+   * {@link AuthMode.Pake} BEFORE signaling opens (so the PAKE state is ready
+   * when the peer arrives), and the returned invitation link carries the
+   * `~<code>` suffix so the responder's `parseInvitation` extracts it. The
+   * code rides in the URL fragment (hash), which browsers never send to the
+   * server — the broker only sees the bare conversation id.
+   *
+   * The code is written directly to {@link pakeCode} / {@link authMode} rather
+   * than via {@link setPakeCode} because {@link setPakeCode} is the public
+   * seam and refuses post-`start` calls (we have already flipped
+   * {@link started}). Mirrors the {@link join} path's direct write.
+   */
+  async start(code?: string): Promise<string> {
     if (this.started) {
       throw new OrchestratorError(
         OrchestratorErrorCode.AlreadyStarted,
@@ -345,7 +361,14 @@ export class ConversationOrchestrator {
     // false), but the read is cheap defense-in-depth and keeps start()/join()
     // symmetric.
     this.authFailedCached = await this.repository.getAuthFailed(id);
-    const invitation = formatInvitation(id, this.baseUrl);
+    if (code !== undefined && code.length > 0) {
+      this.pakeCode = code;
+      this.authMode = AuthMode.Pake;
+    }
+    const invitation =
+      code !== undefined && code.length > 0
+        ? formatCodedInvitation(id, this.baseUrl, code)
+        : formatInvitation(id, this.baseUrl);
     this.invitationLink = invitation;
     this.connectSignaling();
     this.setState(ConnectionState.Waiting);

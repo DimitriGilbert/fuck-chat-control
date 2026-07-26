@@ -52,6 +52,33 @@ export function formatInvitation(id: ConversationId, baseUrl: string): string {
 }
 
 /**
+ * R7/F6 (Phase 8.3 / Phase 10): format an invitation link that carries the
+ * 6-digit PAKE code in the URL fragment. The code is appended as `~<code>`
+ * after the 32-hex conversation id; the entire tail stays in the hash, so
+ * browsers never send it to the server. The responder's
+ * {@link parseInvitation} extracts both halves.
+ *
+ * Use this when the initiator wants PAKE authentication against a malicious
+ * broker. The code must ALSO be conveyed to the responder via a side channel
+ * for full protection: an attacker who intercepts THIS link gets the code
+ * too. The link alone is a convenience for the common case where Alice pastes
+ * it into the same chat she is already having with Bob (e.g. over Signal); a
+ * determined MITM who intercepts the link itself is outside the threat model
+ * of the 6-digit code.
+ */
+export function formatCodedInvitation(
+  id: ConversationId,
+  baseUrl: string,
+  code: string,
+): string {
+  if (code.length === 0) {
+    return formatInvitation(id, baseUrl);
+  }
+  const trimmed = baseUrl.endsWith("#") ? baseUrl.slice(0, -1) : baseUrl;
+  return `${trimmed}#${conversationIdToHex(id)}~${code}`;
+}
+
+/**
  * Result of parsing an invitation fragment. The PAKE `code` is null for
  * safety-number-only invitations; non-null when the initiator appended
  * `~<code>` to carry the SPAKE2 password out-of-band alongside the

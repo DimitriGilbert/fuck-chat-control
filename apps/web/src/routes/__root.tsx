@@ -42,9 +42,51 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
  *
  * `@tanstack/react-router-devtools` is browser-only (touches `window`), so the
  * dynamic import lives inside a `useEffect` to keep SSR safe.
+ *
+ * The dynamic export is stored in state. `setState` treats a function-valued
+ * payload as an updater (`(prev) => next`), so passing the component type
+ * directly would make React invoke it with the previous state (null) as its
+ * argument — the source of the original `Cannot destructure property
+ * 'initialIsOpen' of 'props' as it is null` throw. We wrap the component in
+ * an arrow updater so React stores it rather than calling it.
+ *
+ * A React error boundary sits around the rendered devtools as a defensive
+ * floor: devtools are non-critical chrome, and any throw (version skew,
+ * missing context, future regression) must never blank the chat shell or break
+ * an e2e run.
  */
 type DevToolsPosition = "bottom-right" | "bottom-left" | "top-right" | "top-left";
-type DevToolsComponent = React.ComponentType<{ position?: DevToolsPosition }>;
+interface DevToolsProps {
+  readonly position?: DevToolsPosition;
+  readonly initialIsOpen?: boolean;
+}
+type DevToolsComponent = React.ComponentType<DevToolsProps>;
+
+interface DevToolsBoundaryState {
+  readonly failed: boolean;
+}
+
+class DevToolsBoundary extends React.Component<
+  { readonly children: React.ReactNode },
+  DevToolsBoundaryState
+> {
+  state: DevToolsBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): DevToolsBoundaryState {
+    return { failed: true };
+  }
+
+  componentDidCatch(): void {
+    // Swallow: devtools are non-functional chrome and must never surface a
+    // visible error to the user. The boundary exists precisely so a devtools
+    // throw cannot blank the chat shell or break an e2e run.
+  }
+
+  render(): React.ReactNode {
+    if (this.state.failed) return null;
+    return this.props.children;
+  }
+}
 
 function DevToolsGate(): React.ReactElement | null {
   const [DevTools, setDevTools] = React.useState<DevToolsComponent | null>(null);
@@ -55,7 +97,12 @@ function DevToolsGate(): React.ReactElement | null {
     void import("@tanstack/react-router-devtools")
       .then((mod: { TanStackRouterDevtools: DevToolsComponent }): void => {
         if (cancelled) return;
-        setDevTools(mod.TanStackRouterDevtools);
+        // Wrap in an arrow updater: React treats a function-valued setState
+        // payload as a state updater, so passing the component directly would
+        // invoke it with the previous state (null) — the very throw this gate
+        // originally caused. The arrow returns the component as the next
+        // state value rather than calling it.
+        setDevTools(() => mod.TanStackRouterDevtools);
       })
       .catch((): void => {
         // best-effort; devtools are non-functional chrome.
@@ -67,7 +114,11 @@ function DevToolsGate(): React.ReactElement | null {
 
   if (!import.meta.env.DEV) return null;
   if (DevTools === null) return null;
-  return <DevTools position="bottom-right" />;
+  return (
+    <DevToolsBoundary>
+      <DevTools position="bottom-right" />
+    </DevToolsBoundary>
+  );
 }
 
 function RootDocument() {

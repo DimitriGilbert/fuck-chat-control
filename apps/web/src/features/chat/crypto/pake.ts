@@ -74,8 +74,19 @@ export interface PakeStateHandle {
  * Path to the committed WASM module. Kept as a string constant so the
  * dynamic-import expression below does not trip the `no-string-arg import`
  * lint and so this is the single place to update if the pkg relocates.
+ *
+ * The specifier is resolved relative to THIS file
+ * (`src/features/chat/crypto/pake.ts`), so three `../` segments climb from
+ * `crypto/` → `chat/` → `features/` → `src/`, then `wasm/spake2/pkg/...`
+ * lands at the committed `src/wasm/spake2/pkg/` artifacts in dev. In the
+ * production bundle this module's chunk is emitted at `/assets/<hash>.js`;
+ * URL resolution of `../../../wasm/spake2/pkg/fck_spake2.js` against that
+ * URL walks up through `/assets/` to the site root and back down to
+ * `/wasm/spake2/pkg/fck_spake2.js` — exactly the path the
+ * `emit-spake2-pkg` vite plugin emits the pkg files to in
+ * `vite.config.ts`. Both environments resolve to a real file.
  */
-const SPAKE2_WASM_MODULE_ID = "../wasm/spake2/pkg/fck_spake2.js";
+const SPAKE2_WASM_MODULE_ID = "../../../wasm/spake2/pkg/fck_spake2.js";
 
 let wasmModulePromise: Promise<PakeWasmModule> | null = null;
 

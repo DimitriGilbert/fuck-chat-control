@@ -131,6 +131,26 @@ describe("createChatController / multi-session", () => {
     expect(ids).toContain(idB);
   });
 
+  it("startConversation({ code }) produces a coded invitation link in the snapshot", async () => {
+    // The uncoded baseline: a bare hex fragment after the #.
+    const { invitation: bare } = await controller.startConversation();
+    expect(bare).toMatch(/^https:\/\/app\.example#[0-9a-f]{32}$/);
+    // Leaving the active session frees the broker room so the next start can
+    // begin fresh.
+    controller.leaveConversation();
+
+    // The coded form: same hex shape but with the `~<code>` suffix. The code
+    // rides in the URL fragment, which browsers do not send to the server.
+    const { invitation: coded } = await controller.startConversation({ code: "123456" });
+    expect(coded).toMatch(/^https:\/\/app\.example#[0-9a-f]{32}~123456$/);
+
+    // An empty/whitespace code falls back to the bare form (the orchestrator
+    // treats an empty code as no-PAKE).
+    controller.leaveConversation();
+    const { invitation: trimmed } = await controller.startConversation({ code: "   " });
+    expect(trimmed).toMatch(/^https:\/\/app\.example#[0-9a-f]{32}$/);
+  });
+
   it("a message delivered to session A does NOT bleed into session B", async () => {
     await controller.startConversation();
     const idA = controller.getActiveConversationId() as ConversationId;

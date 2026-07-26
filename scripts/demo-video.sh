@@ -188,8 +188,8 @@ wait_for_text alice "Start a conversation" 15 || log "WARN: sidebar start button
 sleep 5   # let the shell settle on camera
 
 # ============================================================================
-# BEAT 2 -- ALICE STARTS (SIDEBAR)     caption: 6.0s - 12.0s
-#   "Alice starts a chat in the sidebar. The link is just a random ID."
+# BEAT 2 -- ALICE STARTS + PAKE        caption: 6.0s - 14.0s
+#   "Alice starts a chat and protects it with a 6-digit PAKE code."
 # ============================================================================
 log "Alice: click 'Start a conversation' in the sidebar"
 # The snapshot lists the sidebar aside before the empty-state card; ref_for
@@ -205,38 +205,54 @@ npx agent-browser --session alice click "@${START_REF}" >/dev/null
 # The invitation input appears in the chat-view banner once a conversation is
 # active.
 wait_for_text alice "Invitation link" 10 || log "WARN: invitation input not found"
+sleep 2
+
+# Enable PAKE protection: check the "Protect with a 6-digit code" checkbox in
+# the InvitationBanner. This tears down the uncoded conversation and starts a
+# fresh one with a CSPRNG-generated 6-digit code appended to the invitation
+# link as ~<code>. The code rides in the URL hash, which never reaches the
+# server -- the broker only sees the bare conversation id.
+log "Alice: enabling PAKE protection (6-digit code)"
+PAKE_REF="$(ref_for alice 'Protect.*PAKE|6-digit PAKE')"
+if [[ -n "$PAKE_REF" ]]; then
+  npx agent-browser --session alice click "@${PAKE_REF}" >/dev/null 2>&1 || true
+  # Wait for the PAKE code panel to render so the code is visible on camera.
+  wait_for_text alice "PAKE code" 8 || log "WARN: PAKE code panel not found"
+else
+  log "WARN: could not find PAKE checkbox ref (continuing with uncoded invitation)"
+fi
 sleep 3
 
-# Read the invitation URL Alice generated.
+# Read the (now coded) invitation URL Alice generated.
 INVITATION="$(npx agent-browser --session alice get value 'input[aria-label="Invitation link"]' 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 if [[ -z "$INVITATION" ]]; then
   echo "FATAL: invitation link is empty" >&2
   exit 5
 fi
-log "Alice: invitation = $INVITATION"
+log "Alice: coded invitation = $INVITATION"
 
 # ============================================================================
-# BEAT 3 -- BOB JOINS                  caption: 12.0s - 18.0s
-#   "Bob opens it. The broker relays only the encrypted handshake."
+# BEAT 3 -- BOB JOINS (CODED)          caption: 14.0s - 20.0s
+#   "Bob opens the coded link. The code authenticates the handshake via PAKE."
 # ============================================================================
-log "Bob: opening invitation URL"
+log "Bob: opening coded invitation URL"
 npx agent-browser --session bob open "$INVITATION" >/dev/null
 npx agent-browser --session bob set viewport 1920 1080 >/dev/null
 sleep 4
 
 # ============================================================================
-# BEAT 4 -- CONNECTED                  caption: 18.0s - 23.0s
-#   "WebRTC data channel open -- the server is now out of the path."
+# BEAT 4 -- CONNECTED (PAKE)           caption: 20.0s - 26.0s
+#   "PAKE authenticates the handshake -- a malicious broker cannot MITM it."
 # ============================================================================
-log "waiting for both sessions to reach Connected"
-if ! wait_for_connected 2 25; then
-  log "WARN: did not reach Connected on both sides in 25s (continuing anyway)"
+log "waiting for both sessions to reach Connected (PAKE)"
+if ! wait_for_connected 2 30; then
+  log "WARN: did not reach Connected on both sides in 30s (continuing anyway)"
 fi
 sleep 2
 
 # ============================================================================
-# BEAT 5 -- MESSAGE EXCHANGE           caption: 23.0s - 29.0s
-#   "Messages are end-to-end encrypted. The server never sees them."
+# BEAT 5 -- MESSAGE EXCHANGE           caption: 26.0s - 32.0s
+#   "Messages are end-to-end encrypted with per-frame AEAD + replay protection."
 # ============================================================================
 log "Alice: sending a message"
 # Match the textarea whose aria-label is exactly "Message", not "Send message".
@@ -263,7 +279,7 @@ sleep 3
 npx agent-browser --session alice snapshot -i >/dev/null 2>&1 || true
 
 # ============================================================================
-# BEAT 6 -- SECOND CONVERSATION        caption: 29.0s - 35.0s
+# BEAT 6 -- SECOND CONVERSATION        caption: 32.0s - 38.0s
 #   "Alice starts a second chat. Multiple chats, each isolated."
 # ============================================================================
 log "Alice: starting a second conversation from the sidebar"
@@ -299,7 +315,7 @@ if [[ -n "$FIRST_REF" ]]; then
 fi
 
 # ============================================================================
-# BEAT 7 -- FILE TRANSFER              caption: 35.0s - 41.0s
+# BEAT 7 -- FILE TRANSFER              caption: 38.0s - 44.0s
 #   "Files too. Dropped here, sent end-to-end, never stored."
 # ============================================================================
 log "Alice: sending a small file via synthetic drop"
@@ -313,7 +329,7 @@ fi
 sleep 5   # let the attachment card render on camera
 
 # ============================================================================
-# BEAT 8 -- SAFETY NUMBER              caption: 41.0s - 47.0s
+# BEAT 8 -- SAFETY NUMBER              caption: 44.0s - 50.0s
 #   "Both sides show the same safety number -- verify it out-of-band."
 # ============================================================================
 log "Alice: opening safety number dialog"
@@ -339,13 +355,13 @@ log "raw recording: ${RAW_DUR}s"
 build_drawtext() {
   local captions=(
     "1|6|Private chat, no account. Sidebar, conversations, one window."
-    "6|12|Alice starts a chat in the sidebar. The link is just a random ID."
-    "12|18|Bob opens it. The broker relays only the encrypted handshake."
-    "18|23|WebRTC data channel open -- the server is now out of the path."
-    "23|29|Messages are end-to-end encrypted. The server never sees them."
-    "29|35|Alice starts a second chat. Multiple chats, each isolated."
-    "35|41|Files too. Dropped here, sent end-to-end, never stored."
-    "41|47|Both sides show the same safety number -- verify it out-of-band."
+    "6|14|Alice starts a chat and protects it with a 6-digit PAKE code."
+    "14|20|Bob opens the coded link. The code authenticates the handshake via PAKE."
+    "20|26|PAKE authenticates the handshake -- a malicious broker cannot MITM it."
+    "26|32|Messages are end-to-end encrypted with per-frame AEAD + replay protection."
+    "32|38|Alice starts a second chat. Multiple chats, each isolated."
+    "38|44|Files too. Dropped here, sent end-to-end, never stored."
+    "44|50|Both sides show the same safety number -- verify it out-of-band."
   )
   local filter="" first=1 seg
   for entry in "${captions[@]}"; do

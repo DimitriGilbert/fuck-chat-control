@@ -12,6 +12,8 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from "@fuck-eu-chat-control/ui/components/input-group";
+import { Input } from "@fuck-eu-chat-control/ui/components/input";
+import { Label } from "@fuck-eu-chat-control/ui/components/label";
 import { Marker, MarkerContent } from "@fuck-eu-chat-control/ui/components/marker";
 import { Message, MessageContent } from "@fuck-eu-chat-control/ui/components/message";
 import {
@@ -28,10 +30,11 @@ import {
   TooltipTrigger,
 } from "@fuck-eu-chat-control/ui/components/tooltip";
 import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
-import { CopyIcon, PaperclipIcon, SendIcon } from "lucide-react";
+import { CopyIcon, PaperclipIcon, SendIcon, ShieldIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { randomBytes } from "@/features/chat/crypto/primitives";
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { MessageDirection } from "@/features/chat/store";
@@ -393,10 +396,42 @@ function StatusPill({ variant, label }: StatusPillProps): React.ReactElement {
  * is created). Without this banner the inviter has no way to copy the link they
  * just generated. Shows the invitation link plus a Copy button until the peer
  * connects.
+ *
+ * Phase 10 — PAKE affordance: a "Protect with PAKE" control lets the inviter
+ * attach a 6-digit code to the invitation. Selecting it tears down the current
+ * (uncoded) conversation and starts a fresh one with a CSPRNG-generated code;
+ * the new invitation link carries `~<code>` in the hash so the responder's
+ * `parseInvitation` runs SPAKE2 against it. The code is also shown on its own
+ * line with explicit "share out-of-band" copy: an attacker who intercepts the
+ * link gets the code too, so for full MITM protection the code should travel
+ * a different channel than the link.
  */
 function InvitationBanner(): React.ReactElement | null {
-  const { state } = useChat();
-  if (state.invitation === null) return null;
+  const { state, controller } = useChat();
+  // Local input lets the inviter type a custom code (6 digits). Empty means
+  // we will generate a fresh CSPRNG code on toggle. Held in component state so
+  // the typing experience stays responsive independent of the controller's
+  // snapshot cadence.
+  const [pakeEnabled, setPakeEnabled] = React.useState(false);
+  const [codeDraft, setCodeDraft] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+
+  const invitation = state.invitation;
+  // Pull the active code out of the invitation BEFORE any early return so the
+  // useEffect below always sees the right value (no conditional hooks).
+  const hashIndex = invitation?.lastIndexOf("#") ?? -1;
+  const bare = hashIndex >= 0 ? (invitation as string).slice(hashIndex + 1) : (invitation ?? "");
+  const tildeIdx = bare.indexOf("~");
+  const activeCode = tildeIdx >= 0 ? bare.slice(tildeIdx + 1) : null;
+
+  // Sync the local toggle to whatever the active invitation is shaped like.
+  // This keeps the banner honest if the conversation is replaced externally.
+  React.useEffect(() => {
+    setPakeEnabled(activeCode !== null);
+    if (activeCode !== null) setCodeDraft(activeCode);
+  }, [activeCode]);
+
+  if (invitation === null) return null;
   // Hide once the peer is connected or the session has dropped.
   if (
     state.connectionState === ConnectionState.Connected ||
@@ -404,16 +439,114 @@ function InvitationBanner(): React.ReactElement | null {
   ) {
     return null;
   }
+  // After the null/hidden guards above, `invitation` is non-null and the
+  // session is still waiting/handshaking. Bind a narrowed alias so the
+  // closure handlers below get a `string` type.
+  const activeInvitation: string = invitation;
 
   async function handleCopy(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(state.invitation as string);
+      await navigator.clipboard.writeText(activeInvitation);
       toast.success("Invitation link copied");
     } catch {
       toast.error("Clipboard unavailable", {
         description: "Copy the link from the address bar or select it manually.",
       });
     }
+  }
+
+  async function copyCode(code: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(code);
+      toast.success("PAKE code copied");
+    } catch {
+      // Non-fatal: the code is short enough to type by hand.
+    }
+  }
+
+  /**
+   * Generate a fresh 6-digit code using the same CSPRNG the rest of the
+   * crypto layer uses (randomBytes -> crypto.getRandomValues). Math.random
+   * is explicitly forbidden for security-relevant values.
+   *
+   * 6 digits -> [000000, 999999]. We sample 4 bytes (32 bits) and reduce mod
+   * 1e6; the bias is under 1e-3 of a digit and well below the 20-bit entropy
+   * ceiling the PRD calls out for the 6-digit code (PRD ~:262).
+   */
+  function generateCode(): string {
+    const bytes = randomBytes(4);
+    // Compose a uint32 in unsigned-arithmetic-safe order. Each byte is at most
+    // 0xff; multiplying and adding in this order keeps the running total under
+    // 2^32 (no sign-bit / int32 wrap surprise).
+    const n =
+      bytes[0]! * 0x1000000 + bytes[1]! * 0x10000 + bytes[2]! * 0x100 + bytes[3]!;
+    return (n % 1_000_000).toString().padStart(6, "0");
+  }
+
+  /**
+   * Apply the user's PAKE choice: leave the current uncoded conversation and
+   * start a fresh one with the chosen code. The orchestrator's `start()`
+   * requires the code up front (PAKE state must be ready before the peer
+   * arrives), so we cannot mutate the existing invitation in place.
+   *
+   * Removing PAKE reverses the flow: leave the coded conversation and start
+   * a fresh uncoded one.
+   */
+  async function applyPakeChoice(next: boolean): Promise<void> {
+    if (controller === null || busy) return;
+    setBusy(true);
+    try {
+      const currentId = state.activeConversationId;
+      if (currentId !== null) {
+        controller.leaveConversation(currentId);
+      }
+      if (next) {
+        const code = codeDraft.trim().length === 6 ? codeDraft.trim() : generateCode();
+        setCodeDraft(code);
+        await controller.startConversation({ code });
+        toast.success("PAKE-protected invitation ready", {
+          description: "Share the code with your peer out-of-band.",
+        });
+      } else {
+        await controller.startConversation();
+        toast.success("Invitation ready");
+      }
+    } catch (err: unknown) {
+      toast.error("Could not update invitation", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleTogglePake(): void {
+    const next = !pakeEnabled;
+    setPakeEnabled(next);
+    void applyPakeChoice(next);
+  }
+
+  function handleRegenerateCode(): void {
+    if (busy) return;
+    const fresh = generateCode();
+    setCodeDraft(fresh);
+    // Apply immediately so the invitation reflects the new code.
+    void applyPakeChoice(true);
+  }
+
+  function handleCodeDraftChange(e: React.ChangeEvent<HTMLInputElement>): void {
+    // Accept only digits, cap at 6.
+    const cleaned = e.target.value.replace(/\D/g, "").slice(0, 6);
+    setCodeDraft(cleaned);
+  }
+
+  function handleApplyCustomCode(): void {
+    if (busy) return;
+    if (codeDraft.length !== 6) {
+      toast.error("Code must be 6 digits");
+      return;
+    }
+    void applyPakeChoice(true);
   }
 
   return (
@@ -425,7 +558,7 @@ function InvitationBanner(): React.ReactElement | null {
       <div className="flex items-stretch gap-2">
         <input
           readOnly
-          value={state.invitation}
+          value={activeInvitation}
           onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select()}
           className="min-w-0 flex-1 rounded-none border border-input bg-background px-2 py-1 font-mono text-xs"
           aria-label="Invitation link"
@@ -435,6 +568,157 @@ function InvitationBanner(): React.ReactElement | null {
           Copy link
         </Button>
       </div>
+
+      <PakeControl
+        enabled={pakeEnabled}
+        activeCode={activeCode}
+        codeDraft={codeDraft}
+        busy={busy}
+        onToggle={handleTogglePake}
+        onRegenerate={handleRegenerateCode}
+        onCodeDraftChange={handleCodeDraftChange}
+        onApplyCustomCode={handleApplyCustomCode}
+        onCopyCode={copyCode}
+      />
+    </div>
+  );
+}
+
+interface PakeControlProps {
+  readonly enabled: boolean;
+  readonly activeCode: string | null;
+  readonly codeDraft: string;
+  readonly busy: boolean;
+  readonly onToggle: () => void;
+  readonly onRegenerate: () => void;
+  readonly onCodeDraftChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  readonly onApplyCustomCode: () => void;
+  readonly onCopyCode: (code: string) => void;
+}
+
+/**
+ * The PAKE-protection affordance. Renders as a single inline strip below the
+ * invitation input, matching the existing borderless quiet-UI register: a
+ * checkbox + label, and a collapsible detail row that exposes the code,
+ * regenerate / custom-apply actions, and the out-of-band sharing note.
+ *
+ * Visual language follows the Lantern design system: the saffron-gold accent
+ * (bg-primary/text-primary) is reserved for the protected state's badge and
+ * the checkbox's checked fill. No teal/red-brown/green.
+ */
+function PakeControl(props: PakeControlProps): React.ReactElement {
+  const {
+    enabled,
+    activeCode,
+    codeDraft,
+    busy,
+    onToggle,
+    onRegenerate,
+    onCodeDraftChange,
+    onApplyCustomCode,
+    onCopyCode,
+  } = props;
+
+  // The 6-digit code currently carrying PAKE protection (displayed verbatim
+  // so the user can read/type it to their peer).
+  const displayCode = enabled ? (activeCode ?? codeDraft) : "";
+
+  return (
+    <div className="mt-2 flex flex-col gap-1.5">
+      <label className="flex cursor-pointer items-start gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={onToggle}
+          disabled={busy}
+          aria-label="Protect this conversation with a 6-digit PAKE code"
+          className="mt-0.5 size-3.5 accent-primary disabled:opacity-50"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-foreground inline-flex items-center gap-1 font-medium">
+            <ShieldIcon className="text-primary size-3.5" aria-hidden="true" />
+            Protect with a 6-digit code (PAKE)
+          </span>
+          <span className="text-muted-foreground leading-4">
+            Authenticates the handshake against a malicious broker. An attacker who intercepts the
+            link also gets the code — share it out-of-band for full protection.
+          </span>
+        </span>
+      </label>
+
+      {enabled && (
+        <div
+          className="bg-primary/5 border-primary/30 rounded-none border px-2 py-1.5"
+          data-slot="pake-code"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-muted-foreground text-[10px] font-medium uppercase tracking-wide">
+              PAKE code
+            </span>
+            {displayCode.length === 6 ? (
+              <code
+                className="text-primary text-sm font-semibold tabular-nums"
+                aria-label="PAKE code"
+              >
+                {displayCode}
+              </code>
+            ) : (
+              <span className="text-muted-foreground text-xs tabular-nums">generating…</span>
+            )}
+            {displayCode.length === 6 && (
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => onCopyCode(displayCode)}
+                disabled={busy}
+                aria-label="Copy PAKE code"
+              >
+                <CopyIcon className="size-3" />
+                Copy code
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="xs"
+              onClick={onRegenerate}
+              disabled={busy}
+              className="ml-auto"
+              aria-label="Regenerate PAKE code"
+            >
+              Regenerate
+            </Button>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <Label
+              htmlFor="pake-code-input"
+              className="text-muted-foreground text-[10px] font-medium uppercase tracking-wide"
+            >
+              Custom code
+            </Label>
+            <Input
+              id="pake-code-input"
+              type="text"
+              inputMode="numeric"
+              pattern="\d{6}"
+              maxLength={6}
+              value={codeDraft}
+              onChange={onCodeDraftChange}
+              disabled={busy}
+              placeholder="6 digits"
+              className="h-6 w-24 font-mono text-xs tabular-nums"
+              aria-label="Custom PAKE code"
+            />
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={onApplyCustomCode}
+              disabled={busy || codeDraft.length !== 6}
+            >
+              Apply
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
