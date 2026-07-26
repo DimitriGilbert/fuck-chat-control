@@ -1,12 +1,17 @@
 import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
 import type { AtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { createChatController } from "@/features/chat/runtime/chat-controller";
-import type { ChatController, ChatControllerState } from "@/features/chat/runtime/chat-controller";
+import {
+  createChatController,
+  initialChatControllerState,
+} from "@/features/chat/runtime/chat-controller";
+import type {
+  ChatController,
+  ChatControllerState,
+} from "@/features/chat/runtime/chat-controller";
 import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
 import type { IdentityManager } from "@/features/chat/runtime/identity-manager";
 import { InMemoryConversationRepository } from "@/features/chat/store";
 import type { ConversationRepository } from "@/features/chat/store";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type {
   SignalingSocket,
   SignalingSocketFactory,
@@ -68,20 +73,16 @@ function resolveBrowserDeps(): {
   return { brokerUrl, baseUrl: origin };
 }
 
-const initialControllerState: ChatControllerState = {
-  connectionState: ConnectionState.Idle,
-  conversationId: null,
-  invitation: null,
-  safetyNumber: null,
-  safetyNumberVerified: false,
-  messages: [],
-  conversations: [],
-  error: null,
-};
+const initialControllerState: ChatControllerState = initialChatControllerState;
 
 export interface ChatContextValue {
   readonly controller: ChatController | null;
   readonly state: ChatControllerState;
+  /**
+   * True once the controller finished constructing and subscribed. Mirrors
+   * `state.ready`; kept on the context value so consumers that read `useChat()`
+   * once can gate without destructuring.
+   */
   readonly ready: boolean;
 }
 

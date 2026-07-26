@@ -1,6 +1,7 @@
 # Plan v2 — Multi-chat, file transfer, real UI, fixed demo script
 
 This plan closes the gaps the user called out after v1 shipped:
+
 - **Multiple concurrent chats** with a sidebar (today: one active conversation, no sidebar).
 - **File transfer UI** (today: the protocol/framing/orchestrator already support it end-to-end; only the controller surface + UI are missing).
 - **A real app shell** — sidebar + main pane, responsive, designed colors (the centered single-column "trash" goes).
@@ -44,7 +45,7 @@ per dispatch.
   `packages/ui/src/components/*` consume tokens via `bg-*`/`text-*` classes.
 
 - **Gates (run from repo root, ALL must pass before any phase reports done):**
-  1. `cd apps/web && npx tsc --noEmit` → 0 errors  (the REAL type gate; `pnpm check` now includes it)
+  1. `cd apps/web && npx tsc --noEmit` → 0 errors (the REAL type gate; `pnpm check` now includes it)
   2. `pnpm --filter web test:unit` → green (currently 427)
   3. `pnpm --filter web test:integration` → 5 green
   4. `pnpm --filter web test:e2e -- --project=chromium` → green (24)
@@ -68,22 +69,24 @@ per dispatch.
    imports/vars; no `void`-hack silencers; `import type` for type-only imports
    (verbatimModuleSyntax); external imports first, blank line, then local.
 3. **Don't touch working layers.** Crypto/protocol/framing/signaling/broker/
-  orchestrator-core are DONE. This plan touches: `runtime/chat-controller.ts`,
-  `runtime/*` (new session manager), `ui/*` (shell, sidebar, chat-view, file
-  UI), `routes/index.tsx`, `routes/__root.tsx`, `packages/ui/src/styles/globals.css`
-  (tokens only), and tests + the demo script. If a primitive needs a token fix,
-  fix the token usage — don't rewrite component logic.
+   orchestrator-core are DONE. This plan touches: `runtime/chat-controller.ts`,
+   `runtime/*` (new session manager), `ui/*` (shell, sidebar, chat-view, file
+   UI), `routes/index.tsx`, `routes/__root.tsx`, `packages/ui/src/styles/globals.css`
+   (tokens only), and tests + the demo script. If a primitive needs a token fix,
+   fix the token usage — don't rewrite component logic.
 4. **Implementers run all 6 gates before reporting done.** Validators
    ACTUALLY READ the code + run gates; they do not just trust the report.
 5. **`design-taste-frontend` + `not-ai-writer` skills** load for any UI/copy
-  phase. Path: `/home/didi/.agents/skills/<name>/SKILL.md`.
+   phase. Path: `/home/didi/.agents/skills/<name>/SKILL.md`.
 
 ---
 
 ## Phase 1 — Multi-session controller (logic, no UI)
+
 **Type:** Sequential. TDD (RED → GREEN → refactor). Mock signaling/WebRTC, real crypto+framing+repo.
 
 **Requirements:**
+
 - Refactor `ChatController` from a single `(orchestrator, bridge, state)` triple
   to a **session map**: `Map<ConversationId, ChatSession>` where each session
   holds its own `orchestrator`, `bridge`, and per-session snapshot
@@ -112,6 +115,7 @@ per dispatch.
 `runtime/chat-provider.tsx`, `orchestrator/orchestrator.ts`, `store/types.ts`.
 
 **Outputs:**
+
 - Create `runtime/chat-session.ts` (the per-session record + its handler wiring),
   `runtime/types.ts` (`ChatSession`, `SessionSummary`).
 - Modify `runtime/chat-controller.ts` (session map), `runtime/chat-provider.tsx`
@@ -128,9 +132,11 @@ per dispatch.
 ---
 
 ## Phase 2 — App shell + sidebar (UI structure, responsive, designed)
+
 **Type:** Sequential. Loads `design-taste-frontend` + `not-ai-writer`.
 
 **Requirements:**
+
 - Replace the centered single-column shell with a real **app layout**:
   - **Desktop (≥768px):** persistent left **sidebar** (conversation list with
     active highlight, unread badges, connection-state dot, last-message preview,
@@ -160,6 +166,7 @@ shadcn primitives in `packages/ui/src/components/*` (especially `sheet`,
 `dialog`, `dropdown-menu`, `card`, `button`).
 
 **Outputs:**
+
 - Create `ui/app-shell.tsx` (layout), `ui/sidebar.tsx` (conversation list),
   `ui/empty-state.tsx`.
 - Modify `routes/index.tsx` (render the shell; shell decides sidebar vs chat),
@@ -177,9 +184,11 @@ still reads as cramped/templatey.
 ---
 
 ## Phase 3 — File transfer UI + controller surface
+
 **Type:** Sequential. TDD the controller surface; UI follows.
 
 **Requirements:**
+
 - **Controller:** expose `sendFile(id, file: File)` and per-session transfer
   state (`transfers: TransferState[]` with id, name, size, mimeType, direction,
   bytesTransferred, status: queued|sending|receiving|complete|cancelled|error).
@@ -209,6 +218,7 @@ still reads as cramped/templatey.
 `progress.tsx`.
 
 **Outputs:**
+
 - Modify `runtime/chat-controller.ts` (+ `chat-session.ts`) for `sendFile` +
   transfer state; `ui/chat-view.tsx` (composer attach, drag-drop, transfer
   cards); create `ui/file-transfer-card.tsx`, `runtime/transfer-state.ts`
@@ -225,9 +235,11 @@ still reads as cramped/templatey.
 ---
 
 ## Phase 4 — Polish pass + demo script fix
+
 **Type:** Sequential (small). Loads `design-taste-frontend`.
 
 **Requirements:**
+
 - **Demo script (`scripts/demo-video.sh`) emits the FINAL artifacts:** after
   capturing the raw WebM and burning captions, ALSO render the captioned
   animated GIF (`docs/media/chat-demo.gif`, ffmpeg two-pass palette, ≤ ~600 KB,
@@ -265,7 +277,7 @@ size, NOT by a subagent reading images). Vision-MCP QC of a sampled frame.
   validator → fixer loop (max 3) per the skill.
 - After Phase 2 and Phase 4, **I** (orchestrator) do the vision-MCP visual QC
   on a live screenshot — never delegate image reading to a subagent.
-- Keep the dev server as a `run_in_background` Bash task when *I* need it for
+- Keep the dev server as a `run_in_background` Bash task when _I_ need it for
   QC; never put server boot/stop inside a subagent's script or a reaped
   background task.
 - Commit per phase to `main` after gates pass; push. Commit messages end with
@@ -274,6 +286,7 @@ size, NOT by a subagent reading images). Vision-MCP QC of a sampled frame.
   validator's findings — do not paper over it.
 
 ## OUT OF SCOPE (v1.1 — not this plan)
+
 - TURN relay / symmetric-NAT fallback (still STUN-only).
 - OPFS / TanStack DB persistence (still InMemoryConversationRepository +
   localStorage at-rest key).
