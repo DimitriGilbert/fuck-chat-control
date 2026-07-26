@@ -162,7 +162,11 @@ export async function importBundle(
     for (const convo of validated) {
       await repo.createConversation(convo.id, convo.createdAt);
       if (convo.peer !== null) {
-        await repo.storePeerIdentity(convo.id, convo.peer.fingerprint, convo.peer.publicKey);
+        // Replace-mode runs after clearAll, so the conversation's peer is null
+        // here in practice — but use replacePeerIdentity so the intent is
+        // explicit and the call cannot trip the R8/F1 TOFU guard even if a
+        // future caller feeds this path a pre-existing conversation.
+        await repo.replacePeerIdentity(convo.id, convo.peer.fingerprint, convo.peer.publicKey);
       }
       if (convo.displayName !== null) {
         await repo.setDisplayName(convo.id, convo.displayName);

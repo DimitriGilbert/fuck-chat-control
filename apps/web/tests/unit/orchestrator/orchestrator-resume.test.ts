@@ -280,10 +280,13 @@ describe("ConversationOrchestrator — resume, signaling, drop/retry (slice 3c)"
 
       // Pre-seed the responder repo with a DIFFERENT peer identity (P2) than
       // the real initiator identity (P1). On reconnect, the stored key will
-      // not match the incoming identity.
+      // not match the incoming identity. The orchestrator already pinned the
+      // real initiator's key during the first handshake, so the test uses
+      // replacePeerIdentity (the R8/F1 trusted-overwrite seam) to overwrite
+      // it with the bogus key — storePeerIdentity would (correctly) refuse.
       const bogusIdentity = await generateIdentityKeyPair();
       const bogusKey = encodePublicKey(bogusIdentity.publicKey);
-      await responderRepo.storePeerIdentity(
+      await responderRepo.replacePeerIdentity(
         responder.orchestrator.conversationId!,
         "00 00 00 00 00 00",
         bogusKey,

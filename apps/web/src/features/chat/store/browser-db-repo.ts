@@ -56,6 +56,14 @@ export class BrowserDbConversationRepository implements ConversationRepository {
     throw this.notImplemented("storePeerIdentity");
   }
 
+  async replacePeerIdentity(
+    _id: ConversationId,
+    _fingerprint: string,
+    _publicKey: PublicKey,
+  ): Promise<void> {
+    throw this.notImplemented("replacePeerIdentity");
+  }
+
   async getPeerIdentity(_id: ConversationId): Promise<PeerIdentityRecord | null> {
     throw this.notImplemented("getPeerIdentity");
   }
@@ -66,6 +74,14 @@ export class BrowserDbConversationRepository implements ConversationRepository {
 
   async getDisplayName(_id: ConversationId): Promise<string | null> {
     throw this.notImplemented("getDisplayName");
+  }
+
+  async markAuthFailed(_id: ConversationId): Promise<void> {
+    throw this.notImplemented("markAuthFailed");
+  }
+
+  async getAuthFailed(_id: ConversationId): Promise<boolean> {
+    throw this.notImplemented("getAuthFailed");
   }
 
   async clearConversation(_id: ConversationId): Promise<void> {

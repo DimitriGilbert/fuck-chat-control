@@ -153,7 +153,13 @@ export class SignalingClient {
       }
       return;
     }
-    if (!this.peerPresent && isPeerOriginated(message)) {
+    // R6/F7: auto-promotion narrows the legacy "any peer-originated frame flips
+    // peerPresent" to "only a handshake initiation (offer/answer) flips it".
+    // ICE arriving without a prior offer/answer is suspicious — likely a third
+    // party injecting noise — so a pure-ICE frame from an unknown peer is
+    // ignored rather than promoting the sender to present. The join-reflection
+    // promotion above (line 140) still fires first and is unaffected.
+    if (!this.peerPresent && isHandshakeInitiation(message)) {
       this.peerPresent = true;
       this.handlers.onPeerJoin?.();
     }
@@ -203,8 +209,17 @@ export class SignalingClient {
   }
 }
 
-function isPeerOriginated(message: BrokerMessage): boolean {
-  return message.kind === "offer" || message.kind === "answer" || message.kind === "ice";
+/**
+ * A handshake initiation is an offer or answer — the SDP exchange that proves
+ * the peer intends to establish a session. ICE candidates may legitimately
+ * arrive before the answer completes (trickle ICE), but a *pure-ICE* frame
+ * with no prior offer/answer from this peer is treated as suspect (R6/F7) and
+ * does NOT auto-promote `peerPresent`. Kept distinct from a generic "peer
+ * originated" predicate so future relay-side gating can apply different rules
+ * to ICE vs SDP if needed.
+ */
+function isHandshakeInitiation(message: BrokerMessage): boolean {
+  return message.kind === "offer" || message.kind === "answer";
 }
 
 function defaultSocketFactory(url: string): SignalingSocket {

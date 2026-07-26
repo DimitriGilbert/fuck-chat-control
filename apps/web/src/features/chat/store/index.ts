@@ -1,4 +1,4 @@
-export { MessageDirection, MESSAGE_DIRECTION_VALUES, StoreError, StoreErrorCode } from "./types";
+export { MessageDirection, MESSAGE_DIRECTION_VALUES, AuthFailedRetryBlocked, StoreError, StoreErrorCode } from "./types";
 export type {
   ConversationMessage,
   ConversationRecord,

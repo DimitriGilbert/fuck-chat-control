@@ -24,6 +24,8 @@ interface InternalConversation {
   createdAt: number;
   displayName: string | null;
   peer: PeerIdentityRecord | null;
+  authFailed: boolean;
+  authFailedAt: number | null;
 }
 
 interface InternalMessage {
@@ -57,7 +59,13 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
   async createConversation(id: ConversationId, createdAt: number): Promise<ConversationRecord> {
     const key = idKey(id);
     if (!this.conversations.has(key)) {
-      this.conversations.set(key, { createdAt, displayName: null, peer: null });
+      this.conversations.set(key, {
+        createdAt,
+        displayName: null,
+        peer: null,
+        authFailed: false,
+        authFailedAt: null,
+      });
       this.keyById.set(key, cloneConversationId(id));
       this.messages.set(key, []);
     }
@@ -157,6 +165,43 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
         "cannot store peer identity for a conversation that does not exist",
       );
     }
+    // R8/F1: TOFU guard. Once a peer key is pinned, a caller that arrives with
+    // a DIFFERENT key must not silently overwrite it. Callers that intentionally
+    // replace the peer (the Replace-mode import path after clearAll) go through
+    // replacePeerIdentity. Re-pinning the SAME key is a no-op (safe).
+    if (internal.peer !== null) {
+      const sameKey = bytesEqual(internal.peer.publicKey, publicKey);
+      if (!sameKey) {
+        throw new StoreError(
+          StoreErrorCode.PeerIdentityAlreadyPinned,
+          "peer identity already pinned for this conversation; refusing to overwrite " +
+            "with a different key (TOFU). Use replacePeerIdentity for the trusted " +
+            "Replace-mode import path.",
+        );
+      }
+      // Same key re-pinned: refresh the fingerprint in case the caller's copy
+      // has an updated annotation, then no-op.
+      internal.peer = { fingerprint, publicKey: clonePublicKey(publicKey) };
+      return;
+    }
+    internal.peer = { fingerprint, publicKey: clonePublicKey(publicKey) };
+  }
+
+  async replacePeerIdentity(
+    id: ConversationId,
+    fingerprint: string,
+    publicKey: PublicKey,
+  ): Promise<void> {
+    const convoKey = idKey(id);
+    const internal = this.conversations.get(convoKey);
+    if (internal === undefined) {
+      throw new StoreError(
+        StoreErrorCode.ConversationNotFound,
+        "cannot replace peer identity for a conversation that does not exist",
+      );
+    }
+    // Intentional overwrite. Used by the Replace-mode import path after
+    // clearAll, where the incoming bundle is the source of truth.
     internal.peer = { fingerprint, publicKey: clonePublicKey(publicKey) };
   }
 
@@ -187,6 +232,27 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     const internal = this.conversations.get(convoKey);
     if (internal === undefined) return null;
     return internal.displayName;
+  }
+
+  async markAuthFailed(id: ConversationId): Promise<void> {
+    const convoKey = idKey(id);
+    const internal = this.conversations.get(convoKey);
+    if (internal === undefined) {
+      throw new StoreError(
+        StoreErrorCode.ConversationNotFound,
+        "cannot mark auth-failed for a conversation that does not exist",
+      );
+    }
+    // Idempotent: refresh the timestamp so the most recent failure is recorded.
+    internal.authFailed = true;
+    internal.authFailedAt = Date.now();
+  }
+
+  async getAuthFailed(id: ConversationId): Promise<boolean> {
+    const convoKey = idKey(id);
+    const internal = this.conversations.get(convoKey);
+    if (internal === undefined) return false;
+    return internal.authFailed;
   }
 
   async clearConversation(id: ConversationId): Promise<void> {
@@ -228,6 +294,10 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
         createdAt: convo.createdAt,
         displayName: convo.displayName,
         peer: convo.peer === null ? null : deserializePeer(convo.peer),
+        // Backward compat: older bundles predate the authFailed fields; treat
+        // their absence as false/null (no auth failure recorded).
+        authFailed: convo.authFailed === true,
+        authFailedAt: convo.authFailedAt ?? null,
       };
       const key = idKey(id);
       this.conversations.set(key, internal);
@@ -311,6 +381,8 @@ function toRecord(id: ConversationId, internal: InternalConversation): Conversat
             fingerprint: internal.peer.fingerprint,
             publicKey: clonePublicKey(internal.peer.publicKey),
           },
+    authFailed: internal.authFailed,
+    authFailedAt: internal.authFailedAt,
   };
 }
 
@@ -329,6 +401,8 @@ function serializeConversation(
             fingerprint: internal.peer.fingerprint,
             publicKey: bytesToBase64(internal.peer.publicKey),
           },
+    authFailed: internal.authFailed,
+    authFailedAt: internal.authFailedAt,
   };
 }
 
@@ -370,6 +444,15 @@ function assertDirection(value: string): MessageDirection {
     throw new StoreError(StoreErrorCode.MalformedBundle, `unknown message direction ${value}`);
   }
   return dir;
+}
+
+/** Constant-time-ish byte comparison used by the TOFU storePeerIdentity guard. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 function newMessageId(): string {

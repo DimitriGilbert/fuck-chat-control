@@ -72,6 +72,14 @@ export interface ChatSession {
    * without touching the orchestrator.
    */
   detached: boolean;
+  /**
+   * Durable auth-failed mirror (R7/F3). Set by the controller when the
+   * orchestrator's onError surfaces an IdentityChanged or PakeError failure,
+   * which durably wrote the flag via {@link ConversationRepository.markAuthFailed}.
+   * Surfaced on the snapshot so the UI shows a "create a fresh invitation"
+   * call-to-action and disables the retry affordance.
+   */
+  authFailed: boolean;
 }
 
 /**
@@ -90,6 +98,8 @@ export interface SessionSummary {
   readonly lastMessagePreview: string | null;
   readonly lastMessageAt: number | null;
   readonly safetyNumberVerified: boolean;
+  /** Durable auth-failed flag (R7/F3). When true, retry is blocked. */
+  readonly authFailed: boolean;
 }
 
 /**
@@ -111,6 +121,8 @@ export interface ActiveSessionState {
   readonly lastMessageAt: number | null;
   /** Live transfer list mirror of {@link ChatSession.transfers}. */
   readonly transfers: readonly TransferState[];
+  /** Durable auth-failed flag (R7/F3). When true, retry is blocked. */
+  readonly authFailed: boolean;
 }
 
 /**
@@ -152,6 +164,7 @@ export function summarizeSession(session: ChatSession): SessionSummary {
     lastMessagePreview: session.lastMessagePreview,
     lastMessageAt: session.lastMessageAt,
     safetyNumberVerified: session.safetyNumberVerified,
+    authFailed: session.authFailed,
   };
 }
 
@@ -173,5 +186,6 @@ export function activeSessionView(session: ChatSession | null): ActiveSessionSta
     lastMessagePreview: session.lastMessagePreview,
     lastMessageAt: session.lastMessageAt,
     transfers: session.transfers,
+    authFailed: session.authFailed,
   };
 }

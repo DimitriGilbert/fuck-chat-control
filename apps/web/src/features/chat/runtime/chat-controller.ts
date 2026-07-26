@@ -8,6 +8,7 @@ import {
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "@/features/chat/store";
+import { AuthFailedRetryBlocked } from "@/features/chat/store";
 import { LockableRepository } from "@/features/chat/store/lockable-repo";
 import type {
   ConversationMessage,
@@ -808,6 +809,19 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       try {
         session.orchestrator.retry();
       } catch (err) {
+        if (err instanceof AuthFailedRetryBlocked) {
+          // R7/F3: explicit "create a fresh invitation" copy per PRD TOFU.
+          // The snapshot's authFailed flag (mirrored from the record + the
+          // orchestrator's onError classification) is the UI affordance gate;
+          // this message tells the user why retry is disabled.
+          session.authFailed = true;
+          emit(
+            "Authentication previously failed for this conversation. " +
+              "Recovering requires creating a fresh invitation — start a new " +
+              "conversation to re-handshake.",
+          );
+          return;
+        }
         emitErrorMessage(err);
         return;
       }

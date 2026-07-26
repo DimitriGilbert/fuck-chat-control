@@ -1,3 +1,8 @@
+import {
+  BROKER_CLOSE_CODES,
+  BROKER_CLOSE_REASONS,
+  BrokerErrorCode,
+} from "./errors";
 import { formatMessage, forward, parseMessage } from "./protocol";
 import type { BrokerMessage } from "./protocol";
 import type { BrokerSocket } from "./room-registry";
@@ -40,9 +45,26 @@ export class BrokerConnection {
   }
 
   private handleJoin(roomId: string): void {
+    // R5/F1: reject a second `join` from a socket that is already seated in a
+    // room. The legitimate client always opens a fresh socket per join (the
+    // bridge's signaling client tears the socket down on `signalP2pOpen` and
+    // re-creates it for the next conversation), so a `join` on an already-seated
+    // socket is a non-conforming client. The previous behavior silently
+    // `registry.leave`-ed the old room and re-joined, which abandoned the prior
+    // partner without a `leave` notification — its `peerPresent` would stick
+    // `true` until ICE timed out. Rejecting the join (rather than silently
+    // abandoning) preserves the partner's `peerPresent`: the offender is hard-
+    // closed, the partner keeps its seat, and the only path forward is a fresh
+    // socket. We deliberately do NOT `notifyPeerLeft` here — the planned v2
+    // `signalP2pOpen → broker-leave` flow relies on the legitimate silent-leave
+    // semantics of `handleLeave`/onClose, and emitting a leave here would
+    // double-fire when the offender's socket close later runs onClose.
     if (this.roomId !== null) {
-      this.registry.leave(this.roomId, this.socket);
-      this.roomId = null;
+      this.socket.close(
+        BROKER_CLOSE_CODES[BrokerErrorCode.AlreadySeated],
+        BROKER_CLOSE_REASONS[BrokerErrorCode.AlreadySeated],
+      );
+      return;
     }
     const result = this.registry.join(roomId, this.socket);
     if (!result.joined) {

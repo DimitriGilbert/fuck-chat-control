@@ -34,7 +34,7 @@ import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { SignalingClient } from "@/features/chat/signaling/signaling-client";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import type { ConversationMessage, ConversationRepository } from "@/features/chat/store";
-import { MessageDirection } from "@/features/chat/store";
+import { AuthFailedRetryBlocked, MessageDirection } from "@/features/chat/store";
 
 import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 import {
@@ -199,6 +199,20 @@ export class ConversationOrchestrator {
   private safetyNumberValue: string | null = null;
   private safetyNumberVerified = false;
   /**
+   * In-memory mirror of the durable {@link ConversationRepository.getAuthFailed}
+   * flag (R7/F3). Set on two paths:
+   *   1. Hydrated from the durable repo flag at the end of {@link start}/
+   *      {@link join} (both async) — this closes the restart gap so a fresh
+   *      orchestrator on a previously-auth-failed conversation still gates
+   *      {@link retry}.
+   *   2. Flipped true synchronously by {@link failHandshake} right before the
+   *      repo write so a synchronous {@link retry} that races the async repo
+   *      write is still blocked.
+   * The repo is the source of truth; this cache only ever reflects the durable
+   * flag (or the in-session failure that is about to be persisted).
+   */
+  private authFailedCached = false;
+  /**
    * Tracks the most recently started send transfer's id, so a rejection from
    * the framing layer (which may not carry the id) can be correlated to the
    * right `onTransferError`/`onTransferCancelled` emission. Set per-call by
@@ -306,6 +320,12 @@ export class ConversationOrchestrator {
     const id = generateConversationId();
     this.conversation = id;
     await this.repository.createConversation(id, Date.now());
+    // R7/F3 durability: hydrate the in-memory cache from the durable repo flag
+    // so retry() (sync by contract) gates on the persisted truth, not just on
+    // in-session failures. start() always creates a fresh record (authFailed=
+    // false), but the read is cheap defense-in-depth and keeps start()/join()
+    // symmetric.
+    this.authFailedCached = await this.repository.getAuthFailed(id);
     const invitation = formatInvitation(id, this.baseUrl);
     this.invitationLink = invitation;
     this.connectSignaling();
@@ -330,6 +350,13 @@ export class ConversationOrchestrator {
     const parsed = parseInvitation(bare.startsWith("#") ? bare : `#${bare}`);
     this.conversation = parsed.conversationId;
     await this.repository.createConversation(parsed.conversationId, Date.now());
+    // R7/F3 durability: hydrate the in-memory cache from the durable repo flag.
+    // The controller's resumeConversation path re-enters via join() with an
+    // existing conversation id (createConversation is idempotent and preserves
+    // the existing authFailed flag), so this closes the restart gap: a fresh
+    // orchestrator on a previously-auth-failed conversation reads the durable
+    // truth and retry() correctly throws AuthFailedRetryBlocked.
+    this.authFailedCached = await this.repository.getAuthFailed(parsed.conversationId);
     this.connectSignaling();
     this.setState(ConnectionState.Waiting);
   }
@@ -530,7 +557,8 @@ export class ConversationOrchestrator {
    * broker room and waits for the peer again. The caller must re-attach a
    * transport via {@link attachTransport} once the data channel reopens.
    * Throws if called from a state where retry is illegal (anything other than
-   * Disconnected).
+   * Disconnected), or if the conversation has a durable auth-failed flag set
+   * (R7/F3 — recovering requires a NEW invitation).
    */
   retry(): void {
     if (this.currentState !== ConnectionState.Disconnected) {
@@ -543,6 +571,23 @@ export class ConversationOrchestrator {
       throw new OrchestratorError(
         OrchestratorErrorCode.HandshakeFailed,
         "retry called before start()/join()",
+      );
+    }
+    // R7/F3: the durable auth-failed flag is set in failHandshake when an
+    // IdentityChanged or PakeError occurred. The PRD TOFU clause (fuck-eu-chat-
+    // control.md:264) requires that recovering requires a NEW invitation; a
+    // retry on the same conversation must not re-attempt the handshake.
+    // getAuthFailed is an async repo call, but retry is synchronous by contract
+    // (it throws to reject the caller). authFailedCached is hydrated from the
+    // durable repo flag at the end of start()/join() (closing the restart gap
+    // for a fresh orchestrator on a previously-auth-failed conversation) AND
+    // set synchronously by failHandshake before the repo write so a synchronous
+    // retry that races the write is still blocked.
+    if (this.authFailedCached) {
+      throw new AuthFailedRetryBlocked(
+        "retry blocked: this conversation previously failed authentication " +
+          "(identity change or PAKE failure). Recovering requires creating a " +
+          "fresh invitation — start a new conversation to re-handshake.",
       );
     }
     // Connect signaling synchronously; role derivation reads the stored peer
@@ -998,6 +1043,25 @@ export class ConversationOrchestrator {
   private failHandshake(err: unknown): void {
     if (this.handshakeError !== null) return;
     this.handshakeError = err;
+    // R7/F3: an IdentityChanged or PAKE failure is a durable auth failure.
+    // Per the PRD TOFU clause, recovering requires a NEW invitation — record
+    // the flag in the repo BEFORE tearing the session down so retry() can gate
+    // on it. The synchronous cache is set first so a synchronous retry() that
+    // races the async repo write is still blocked.
+    if (isAuthFailureError(err)) {
+      this.authFailedCached = true;
+      const conversationId = this.conversation;
+      if (conversationId !== null) {
+        // Fire-and-forget: failHandshake is synchronous by contract (its caller
+        // is the .catch on the handshake promise). The repo write runs in the
+        // background; teardown proceeds in parallel.
+        void this.repository.markAuthFailed(conversationId).catch(() => {
+          // best-effort: the cache flag above is the authoritative gate for
+          // the synchronous retry() call; a failed repo write only means the
+          // flag will not survive a process restart.
+        });
+      }
+    }
     this.handlers.onError?.(err);
     this.teardownSession();
     // Stay in Handshaking/Disconnected — do NOT reach Connected.
@@ -1152,6 +1216,24 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+/**
+ * R7/F3: classify a handshake error as a durable auth failure. An
+ * {@link OrchestratorErrorCode.IdentityChanged} or any {@link PakeError}
+ * indicates the peer's identity did not verify (either the TOFU key changed
+ * or the PAKE confirmation tag mismatched). Per the PRD TOFU clause, recovery
+ * requires a fresh invitation; the orchestrator durably records the flag so
+ * retry() can block the caller from re-attempting on the same conversation.
+ */
+function isAuthFailureError(err: unknown): boolean {
+  if (err instanceof OrchestratorError && err.code === OrchestratorErrorCode.IdentityChanged) {
+    return true;
+  }
+  if (err instanceof PakeError) {
+    return true;
+  }
+  return false;
 }
 
 function randomBytes(length: number): Uint8Array {

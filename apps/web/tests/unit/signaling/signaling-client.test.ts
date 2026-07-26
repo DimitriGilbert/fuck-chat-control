@@ -111,7 +111,7 @@ describe("SignalingClient — relay both ways", () => {
     clientB.close();
   });
 
-  it("fires onPeerJoin on the first peer-originated message", () => {
+  it("fires onPeerJoin on the first handshake initiation (offer/answer)", () => {
     const a = new MockSignalingSocket();
     const b = new MockSignalingSocket();
     const ha = recordingHandlers();
@@ -124,8 +124,17 @@ describe("SignalingClient — relay both ways", () => {
     expect(hb.events).toContain("join");
     expect(clientA.isPeerPresent()).toBe(false);
 
+    // A pure-ICE frame on a side that has not yet seen offer/answer must NOT
+    // auto-promote peerPresent (R6/F7). Previously any peer-originated message
+    // flipped presence, which let a third party spoof presence with bare ICE.
     a.deliver(JSON.stringify({ t: "ice", candidate: { candidate: "x" } }));
+    expect(ha.events).not.toContain("join");
+    expect(clientA.isPeerPresent()).toBe(false);
+
+    // The legitimate path — an answer from the peer — still promotes.
+    a.deliver(JSON.stringify({ t: "answer", sdp: { type: "answer", sdp: "y" } }));
     expect(ha.events).toContain("join");
+    expect(clientA.isPeerPresent()).toBe(true);
     clientA.close();
   });
 });

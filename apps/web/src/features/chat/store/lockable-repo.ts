@@ -87,6 +87,15 @@ export class LockableRepository implements ConversationRepository {
     await this.inner.storePeerIdentity(id, fingerprint, publicKey);
   }
 
+  async replacePeerIdentity(
+    id: ConversationId,
+    fingerprint: string,
+    publicKey: PublicKey,
+  ): Promise<void> {
+    this.assertUnlocked();
+    await this.inner.replacePeerIdentity(id, fingerprint, publicKey);
+  }
+
   async getPeerIdentity(id: ConversationId): Promise<PeerIdentityRecord | null> {
     this.assertUnlocked();
     return await this.inner.getPeerIdentity(id);
@@ -100,6 +109,16 @@ export class LockableRepository implements ConversationRepository {
   async getDisplayName(id: ConversationId): Promise<string | null> {
     this.assertUnlocked();
     return await this.inner.getDisplayName(id);
+  }
+
+  async markAuthFailed(id: ConversationId): Promise<void> {
+    this.assertUnlocked();
+    await this.inner.markAuthFailed(id);
+  }
+
+  async getAuthFailed(id: ConversationId): Promise<boolean> {
+    this.assertUnlocked();
+    return await this.inner.getAuthFailed(id);
   }
 
   async clearConversation(id: ConversationId): Promise<void> {

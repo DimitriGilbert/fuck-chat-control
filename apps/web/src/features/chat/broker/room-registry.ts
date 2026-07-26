@@ -4,6 +4,12 @@ const ROOM_ID_HEX_LENGTH = CONVERSATION_ID_BYTES * 2;
 const ROOM_ID_PATTERN = new RegExp(`^[0-9a-f]{${ROOM_ID_HEX_LENGTH}}$`);
 
 export interface BrokerSocket {
+  /**
+   * WebSocket ready state. Mirrors the standard values: 0=CONNECTING,
+   * 1=OPEN, 2=CLOSING, 3=CLOSED. The zombie sweep treats `> 1` as a dead
+   * socket that the runtime failed to deliver an `onClose` for.
+   */
+  readonly readyState: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
 }

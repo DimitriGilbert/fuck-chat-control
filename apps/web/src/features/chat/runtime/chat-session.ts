@@ -6,6 +6,8 @@ import type {
   TransferSummary,
 } from "@/features/chat/orchestrator/orchestrator";
 import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
+import { PakeError } from "@/features/chat/crypto";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import type {
@@ -19,6 +21,21 @@ import type { ReceivedFile } from "@/features/chat/framing";
 import type { ChatSession } from "./types";
 import { applyTransferEvent, type TransferEvent } from "./transfer-state";
 import { WebRtcBridge } from "./webrtc-bridge";
+
+/**
+ * R7/F3: classify a handshake error as a durable auth failure. Mirrors the
+ * orchestrator's own classifier so the snapshot flag and the repo flag stay in
+ * sync. An IdentityChanged error or any PakeError marks the session.
+ */
+function isAuthFailureError(err: unknown): boolean {
+  if (err instanceof OrchestratorError && err.code === OrchestratorErrorCode.IdentityChanged) {
+    return true;
+  }
+  if (err instanceof PakeError) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Inputs needed to build a session. The controller owns the singletons
@@ -107,8 +124,12 @@ export function buildOrchestrator(
     onError: (error: unknown): void => {
       // The controller surfaces errors at the top level; we still notify so a
       // future derivation can attach the error to the active session.
-      void error;
+      // R7/F3: mirror the durable authFailed flag into the snapshot so the UI
+      // shows a "create a fresh invitation" call-to-action and disables retry.
       if (holder.session !== null) {
+        if (isAuthFailureError(error)) {
+          holder.session.authFailed = true;
+        }
         onChange(holder.session);
       }
     },
@@ -223,6 +244,7 @@ export function wireBridge(params: {
     transfers: [],
     receivedFiles: new Map<number, ReceivedFile>(),
     detached: false,
+    authFailed: false,
   };
 
   // Populate the holder BEFORE the caller starts the bridge so any synchronous
@@ -243,6 +265,9 @@ export function seedSessionFromHistory(
 ): void {
   session.record = record;
   session.messages = history.slice();
+  // R7/F3: mirror the durable authFailed flag from the record so a resumed
+  // conversation still surfaces the "create a fresh invitation" affordance.
+  session.authFailed = record?.authFailed === true;
   if (history.length > 0) {
     const last = history[history.length - 1] as ConversationMessage;
     session.lastMessagePreview = previewOf(last.text);

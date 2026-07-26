@@ -18,6 +18,7 @@ function makeSummary(
     lastMessagePreview: overrides.lastMessagePreview ?? null,
     lastMessageAt: overrides.lastMessageAt ?? null,
     safetyNumberVerified: overrides.safetyNumberVerified ?? false,
+    authFailed: overrides.authFailed ?? false,
     id: overrides.id,
   };
 }

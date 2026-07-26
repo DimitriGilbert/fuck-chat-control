@@ -30,6 +30,15 @@ export interface ConversationRecord {
   readonly createdAt: number;
   readonly displayName: string | null;
   readonly peer: PeerIdentityRecord | null;
+  /**
+   * Durable auth-failed flag (R7/F3). Set by the orchestrator's failHandshake
+   * when the failure was an identity-change or a PAKE failure; cleared only by
+   * creating a fresh conversation (a new invitation). When true, retry() on the
+   * same conversation is rejected with {@link AuthFailedRetryBlocked}.
+   */
+  readonly authFailed: boolean;
+  /** Epoch-ms when {@link authFailed} was last set; null when never set. */
+  readonly authFailedAt: number | null;
 }
 
 export interface IdentityConflict {
@@ -53,6 +62,13 @@ export const StoreErrorCode = {
   UnsupportedBundleVersion: "unsupported_bundle_version",
   NotInitialized: "not_initialized",
   NotImplemented: "not_implemented",
+  /**
+   * RAII guard for the storePeerIdentity primitive (R8/F1): the conversation
+   * already has a pinned peer identity and the incoming key differs. Callers
+   * that intentionally replace the peer (e.g. the Replace-mode import path
+   * after clearAll) use {@link ConversationRepository.replacePeerIdentity}.
+   */
+  PeerIdentityAlreadyPinned: "peer_identity_already_pinned",
 } as const;
 
 export type StoreErrorCode = (typeof StoreErrorCode)[keyof typeof StoreErrorCode];
@@ -67,6 +83,19 @@ export class StoreError extends Error {
   }
 }
 
+/**
+ * R7/F3: thrown by retry() when the conversation has a durable auth-failed
+ * flag set. Per the PRD TOFU clause, recovery requires a fresh invitation — a
+ * retry on the same conversation must not re-attempt the handshake. Mirrors
+ * the typed-error precedent of {@link StoreError} / {@link PakeError}.
+ */
+export class AuthFailedRetryBlocked extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthFailedRetryBlocked";
+  }
+}
+
 export interface SerializedState {
   readonly conversations: readonly SerializedConversation[];
   readonly messages: readonly SerializedConversationMessages[];
@@ -77,6 +106,13 @@ export interface SerializedConversation {
   readonly createdAt: number;
   readonly displayName: string | null;
   readonly peer: SerializedPeerIdentity | null;
+  /**
+   * Durable auth-failed flag (R7/F3), mirrored from
+   * {@link ConversationRecord.authFailed}. Older bundles that predate the field
+   * are treated as `false` on load (see {@link InMemoryConversationRepository.reload}).
+   */
+  readonly authFailed?: boolean;
+  readonly authFailedAt?: number | null;
 }
 
 export interface SerializedPeerIdentity {
@@ -117,9 +153,33 @@ export interface ConversationRepository {
   ): Promise<ConversationMessage>;
   getMessages(id: ConversationId): Promise<ConversationMessage[]>;
   storePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void>;
+  /**
+   * Replace the peer identity even if one is already pinned. Used only by the
+   * Replace-mode import path (which runs after {@link clearAll} and is
+   * repopulating from a trusted bundle). All other callers must go through
+   * {@link storePeerIdentity}, which now refuses to overwrite a pinned key.
+   */
+  replacePeerIdentity(
+    id: ConversationId,
+    fingerprint: string,
+    publicKey: PublicKey,
+  ): Promise<void>;
   getPeerIdentity(id: ConversationId): Promise<PeerIdentityRecord | null>;
   setDisplayName(id: ConversationId, name: string): Promise<void>;
   getDisplayName(id: ConversationId): Promise<string | null>;
+  /**
+   * Durably mark the conversation as auth-failed (R7/F3). Idempotent; once set
+   * the flag is only cleared by creating a fresh conversation. Records the
+   * epoch-ms timestamp of the failure on {@link ConversationRecord.authFailedAt}.
+   */
+  markAuthFailed(id: ConversationId): Promise<void>;
+  /**
+   * True iff the conversation's durable auth-failed flag is set. The
+   * orchestrator gates {@link retry} on this; the UI surfaces it via the
+   * session snapshot so the user sees an explicit "create a fresh invitation"
+   * call-to-action instead of a retry affordance.
+   */
+  getAuthFailed(id: ConversationId): Promise<boolean>;
   clearConversation(id: ConversationId): Promise<void>;
   clearAll(): Promise<void>;
 }
