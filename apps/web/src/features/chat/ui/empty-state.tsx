@@ -1,0 +1,147 @@
+import { Button } from "@fuck-eu-chat-control/ui/components/button";
+import {
+  Empty,
+  EmptyContent,
+  EmptyHeader,
+  EmptyTitle,
+} from "@fuck-eu-chat-control/ui/components/empty";
+import { PlusIcon } from "lucide-react";
+import * as React from "react";
+import { toast } from "sonner";
+
+import { useChat } from "@/features/chat/runtime/chat-provider";
+import type { ConversationRecord } from "@/features/chat/store";
+
+/**
+ * Shown when no conversation is active. A quiet, on-brand prompt: one short
+ * stance line, one primary action, one security footnote. Deliberately NOT
+ * the old centered marketing wall, NOT a hero, NOT three feature cards.
+ *
+ * If persisted conversations exist in the repository (and none are live), a
+ * compact list offers to resume each one. This is the home base; the sidebar
+ * stays focused on currently-live sessions.
+ */
+export interface EmptyStateProps {
+  /**
+   * Invoked when the user wants to start a new conversation from the empty
+   * state. On desktop the sidebar's Start button is already visible, so this
+   * is primarily for mobile where the sidebar lives inside a closed drawer.
+   * The AppShell wires this to "open the drawer."
+   */
+  readonly onStart: () => void;
+}
+
+export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
+  const { state, controller } = useChat();
+  // Show persisted conversations that have no live session. Live ones are
+  // already in the sidebar; duplicating them here would split attention.
+  // ConversationId is a branded Uint8Array, so byte-wise comparison is required
+  // (reference identity is not guaranteed across the repo and session map).
+  const resumable = React.useMemo(() => {
+    const live = state.sessions;
+    return state.conversations.filter((c) => !live.some((s) => idEquals(s.id, c.id)));
+  }, [state.sessions, state.conversations]);
+
+  function handleResume(record: ConversationRecord): void {
+    if (controller === null) return;
+    void controller.resumeConversation(record.id).catch((err: unknown) => {
+      toast.error("Could not resume", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  return (
+    <Empty className="justify-center">
+      {/* Composed container: one card-like surface holding the headline, copy,
+          and primary CTA. Turns the surrounding negative space into deliberate
+          framing instead of a void, without clustering the pane with cards. */}
+      <div className="bg-card border-border mx-auto flex w-full max-w-[480px] flex-col items-center gap-5 rounded-xl border p-8 text-center shadow-sm">
+        <EmptyHeader className="max-w-none gap-2">
+          <EmptyTitle className="text-foreground text-2xl font-semibold tracking-tight">
+            Private chat, no account.
+          </EmptyTitle>
+        </EmptyHeader>
+        <EmptyContent className="max-w-[40ch] gap-3">
+          <p className="text-muted-foreground text-sm leading-6">
+            Start a 1:1 conversation and share the link. End-to-end encrypted; the server only
+            relays the handshake.
+          </p>
+          <p className="text-muted-foreground text-xs leading-5">
+            Read the{" "}
+            <a
+              href="/docs/security"
+              className="text-primary underline underline-offset-4 hover:opacity-80"
+            >
+              security notes
+            </a>{" "}
+            before relying on it for anything sensitive.
+          </p>
+        </EmptyContent>
+
+        {/* Primary CTA. Visible at all sizes: the empty state is the home base
+            and should invite action everywhere. On mobile it also opens the
+            drawer where the sidebar's Start flow lives. */}
+        <Button variant="default" size="default" className="mt-1 w-full" onClick={onStart}>
+          <PlusIcon />
+          Start a conversation
+        </Button>
+      </div>
+
+      {resumable.length > 0 && (
+        <div className="mt-2 w-full max-w-[480px]">
+          <h2 className="text-muted-foreground mb-2 px-1 text-xs font-medium uppercase tracking-wide">
+            Previous conversations
+          </h2>
+          <ul className="flex flex-col gap-1">
+            {resumable.map((record) => (
+              <li key={resumeKey(record)}>
+                <ResumeRow record={record} onResume={() => handleResume(record)} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Empty>
+  );
+}
+
+interface ResumeRowProps {
+  readonly record: ConversationRecord;
+  readonly onResume: () => void;
+}
+
+function ResumeRow({ record, onResume }: ResumeRowProps): React.ReactElement {
+  const label = record.displayName ?? "Untitled conversation";
+  const when = new Date(record.createdAt).toLocaleString();
+  return (
+    <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-medium">{label}</div>
+        <div className="text-muted-foreground text-xs">{when}</div>
+      </div>
+      <Button variant="outline" size="sm" onClick={onResume}>
+        Resume
+      </Button>
+    </div>
+  );
+}
+
+function resumeKey(record: ConversationRecord): string {
+  // ConversationId is a Uint8Array; convert to hex for React keys.
+  const id = record.id;
+  let hex = "";
+  for (let i = 0; i < id.length; i++) {
+    hex += id[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+/** Byte-wise comparison of two ConversationIds (both are Uint8Array). */
+function idEquals(a: ConversationRecord["id"], b: ConversationRecord["id"]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}

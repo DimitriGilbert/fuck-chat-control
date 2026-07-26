@@ -4,10 +4,7 @@ import {
   createChatController,
   initialChatControllerState,
 } from "@/features/chat/runtime/chat-controller";
-import type {
-  ChatController,
-  ChatControllerState,
-} from "@/features/chat/runtime/chat-controller";
+import type { ChatController, ChatControllerState } from "@/features/chat/runtime/chat-controller";
 import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
 import type { IdentityManager } from "@/features/chat/runtime/identity-manager";
 import { InMemoryConversationRepository } from "@/features/chat/store";

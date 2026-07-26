@@ -40,9 +40,14 @@ export async function establishPeerPair(browser: Browser): Promise<PeerPair> {
   const pageB = await contextB.newPage();
 
   // Wait for the start button to be enabled (controller ready) on A, then
-  // start a conversation and read the generated invitation link.
+  // start a conversation and read the generated invitation link. Scope to the
+  // sidebar (<aside> / complementary): the empty state also exposes a Start
+  // affordance on all viewports, so the sidebar's button is the canonical one.
   await pageA.goto("/");
-  await pageA.getByRole("button", { name: /Start a conversation/ }).click();
+  await pageA
+    .getByRole("complementary")
+    .getByRole("button", { name: /Start a conversation/ })
+    .click();
   const invitation = (await pageA.getByLabel("Invitation link").inputValue()) as string;
 
   // B opens the invitation URL fresh (its own context; the hash never reaches

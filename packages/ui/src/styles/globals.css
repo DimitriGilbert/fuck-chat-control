@@ -7,116 +7,116 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Palette direction: a single confident spruce-teal accent over a cool
- * slate base. Teal reads as "considered, private, calm" without sliding
- * into enterprise-blue (clinical) or AI-purple (cliche). Neutrals share
- * the accent's hue family at very low chroma so the whole UI feels like
- * one system instead of "greyscale plus a button".
+ * Lantern palette - a warm graphite canvas (cool enough to read as a real
+ * dark product surface, warm enough to never feel like clinical slate) lit
+ * by a single luminous saffron-gold accent. Image: a quiet room with one
+ * lamp on, private, calm, trustworthy. Not teal, not AI-purple, not the
+ * beige/brass/oxblood premium-consumer default, not green, not red-brown.
  *
- * Lightness/chroma curves:
- *   - Foreground text on background in both modes clears WCAG AA (>= 7:1
- *     target for body, the primary-on-white combo lands >= 4.5:1).
- *   --primary in dark mode is a tinted light teal so primary buttons stay
- *   visible without a neon glow.
+ * One accent is locked across the whole shell: primary, ring, focus,
+ * active sidebar item, unread badge, connection dot all draw from --primary.
+ *
+ * Contrast targets: foreground-on-background clears 7:1 (AAA body) in both
+ * modes; primary-on-foreground and foreground-on-primary clear AA easily.
+ * The app hard-codes `<html className="dark">` (see routes/__root.tsx); the
+ * light token block is correct and tested so a future light mode just flips
+ * the class.
  */
 
 :root {
-  /* Surfaces - very faint cool tilt, never flat white. */
-  --background: oklch(0.985 0.005 200);
-  --foreground: oklch(0.21 0.022 230);
+  /* Light mode: warm paper, not flat white. Faint warm tilt. */
+  --background: oklch(0.985 0.006 75);
+  --foreground: oklch(0.26 0.012 60);
 
-  --card: oklch(1 0.004 200);
-  --card-foreground: oklch(0.21 0.022 230);
+  --card: oklch(0.997 0.004 75);
+  --card-foreground: oklch(0.26 0.012 60);
 
-  --popover: oklch(1 0.004 200);
-  --popover-foreground: oklch(0.21 0.022 230);
+  --popover: oklch(0.997 0.004 75);
+  --popover-foreground: oklch(0.26 0.012 60);
 
-  /* Primary: deep spruce teal. Confident, inviting, secure-feeling. */
-  --primary: oklch(0.46 0.09 195);
-  --primary-foreground: oklch(0.985 0.005 200);
+  /* Primary: deep warm amber. Confident and inviting. */
+  --primary: oklch(0.62 0.13 65);
+  --primary-foreground: oklch(0.99 0.01 75);
 
-  /* Secondary: cool pebble, used sparingly for quiet surfaces. */
-  --secondary: oklch(0.95 0.008 210);
-  --secondary-foreground: oklch(0.28 0.025 230);
+  --secondary: oklch(0.95 0.008 70);
+  --secondary-foreground: oklch(0.32 0.014 60);
 
-  --muted: oklch(0.96 0.006 210);
-  --muted-foreground: oklch(0.52 0.018 225);
+  --muted: oklch(0.96 0.006 70);
+  --muted-foreground: oklch(0.52 0.012 65);
 
-  /* Accent: brighter lift of the primary hue, used for hovers/highlights. */
-  --accent: oklch(0.93 0.022 195);
-  --accent-foreground: oklch(0.32 0.06 195);
+  --accent: oklch(0.93 0.028 70);
+  --accent-foreground: oklch(0.34 0.05 60);
 
-  --destructive: oklch(0.58 0.18 27);
-  --destructive-foreground: oklch(0.985 0.005 200);
+  --destructive: oklch(0.58 0.18 25);
+  --destructive-foreground: oklch(0.985 0.006 75);
 
-  --border: oklch(0.9 0.01 210);
-  --input: oklch(0.9 0.01 210);
-  --ring: oklch(0.55 0.09 195);
+  --border: oklch(0.9 0.008 70);
+  --input: oklch(0.9 0.008 70);
+  --ring: oklch(0.62 0.13 65);
 
-  /* Charts stay in the same hue family with one warm contrast. */
-  --chart-1: oklch(0.55 0.1 195);
-  --chart-2: oklch(0.62 0.12 220);
-  --chart-3: oklch(0.65 0.14 160);
-  --chart-4: oklch(0.7 0.13 250);
-  --chart-5: oklch(0.62 0.16 40);
+  --chart-1: oklch(0.62 0.13 65);
+  --chart-2: oklch(0.6 0.1 45);
+  --chart-3: oklch(0.66 0.09 90);
+  --chart-4: oklch(0.58 0.08 250);
+  --chart-5: oklch(0.64 0.12 305);
 
-  --radius: 0.625rem;
+  --radius: 0.75rem;
 
-  --sidebar: oklch(0.97 0.006 210);
-  --sidebar-foreground: oklch(0.21 0.022 230);
-  --sidebar-primary: oklch(0.46 0.09 195);
-  --sidebar-primary-foreground: oklch(0.985 0.005 200);
-  --sidebar-accent: oklch(0.93 0.022 195);
-  --sidebar-accent-foreground: oklch(0.32 0.06 195);
-  --sidebar-border: oklch(0.9 0.01 210);
-  --sidebar-ring: oklch(0.55 0.09 195);
+  --sidebar: oklch(0.975 0.006 70);
+  --sidebar-foreground: oklch(0.26 0.012 60);
+  --sidebar-primary: oklch(0.62 0.13 65);
+  --sidebar-primary-foreground: oklch(0.99 0.01 75);
+  --sidebar-accent: oklch(0.93 0.028 70);
+  --sidebar-accent-foreground: oklch(0.34 0.05 60);
+  --sidebar-border: oklch(0.9 0.008 70);
+  --sidebar-ring: oklch(0.62 0.13 65);
 }
 
 .dark {
-  /* Dark base: deep cool charcoal, not pure black. */
-  --background: oklch(0.17 0.012 235);
-  --foreground: oklch(0.96 0.006 210);
+  /* Warm graphite: deep but not cold, never pure black. */
+  --background: oklch(0.185 0.008 65);
+  --foreground: oklch(0.955 0.006 75);
 
-  --card: oklch(0.205 0.014 235);
-  --card-foreground: oklch(0.96 0.006 210);
+  --card: oklch(0.218 0.01 65);
+  --card-foreground: oklch(0.955 0.006 75);
 
-  --popover: oklch(0.205 0.014 235);
-  --popover-foreground: oklch(0.96 0.006 210);
+  --popover: oklch(0.22 0.01 65);
+  --popover-foreground: oklch(0.955 0.006 75);
 
-  /* Primary: tinted light teal so it pops on dark without glowing. */
-  --primary: oklch(0.78 0.1 185);
-  --primary-foreground: oklch(0.18 0.03 220);
+  /* Primary: luminous saffron, the lamp in the room. Pops without glowing. */
+  --primary: oklch(0.81 0.13 75);
+  --primary-foreground: oklch(0.2 0.025 60);
 
-  --secondary: oklch(0.26 0.016 235);
-  --secondary-foreground: oklch(0.96 0.006 210);
+  --secondary: oklch(0.265 0.012 65);
+  --secondary-foreground: oklch(0.955 0.006 75);
 
-  --muted: oklch(0.23 0.014 235);
-  --muted-foreground: oklch(0.71 0.018 220);
+  --muted: oklch(0.24 0.01 65);
+  --muted-foreground: oklch(0.7 0.014 70);
 
-  --accent: oklch(0.32 0.05 195);
-  --accent-foreground: oklch(0.95 0.02 195);
+  --accent: oklch(0.33 0.045 70);
+  --accent-foreground: oklch(0.93 0.025 75);
 
   --destructive: oklch(0.68 0.18 25);
-  --destructive-foreground: oklch(0.985 0.005 200);
+  --destructive-foreground: oklch(0.985 0.006 75);
 
-  --border: oklch(1 0.006 210 / 10%);
-  --input: oklch(1 0.006 210 / 14%);
-  --ring: oklch(0.7 0.1 185);
+  --border: oklch(1 0.008 75 / 9%);
+  --input: oklch(1 0.008 75 / 13%);
+  --ring: oklch(0.81 0.13 75);
 
-  --chart-1: oklch(0.7 0.1 185);
-  --chart-2: oklch(0.65 0.12 220);
-  --chart-3: oklch(0.68 0.14 160);
-  --chart-4: oklch(0.7 0.13 250);
-  --chart-5: oklch(0.7 0.16 40);
+  --chart-1: oklch(0.81 0.13 75);
+  --chart-2: oklch(0.72 0.11 45);
+  --chart-3: oklch(0.78 0.1 90);
+  --chart-4: oklch(0.7 0.09 250);
+  --chart-5: oklch(0.74 0.12 305);
 
-  --sidebar: oklch(0.205 0.014 235);
-  --sidebar-foreground: oklch(0.96 0.006 210);
-  --sidebar-primary: oklch(0.78 0.1 185);
-  --sidebar-primary-foreground: oklch(0.18 0.03 220);
-  --sidebar-accent: oklch(0.32 0.05 195);
-  --sidebar-accent-foreground: oklch(0.95 0.02 195);
-  --sidebar-border: oklch(1 0.006 210 / 10%);
-  --sidebar-ring: oklch(0.7 0.1 185);
+  --sidebar: oklch(0.215 0.01 65);
+  --sidebar-foreground: oklch(0.955 0.006 75);
+  --sidebar-primary: oklch(0.81 0.13 75);
+  --sidebar-primary-foreground: oklch(0.2 0.025 60);
+  --sidebar-accent: oklch(0.3 0.045 70);
+  --sidebar-accent-foreground: oklch(0.93 0.025 75);
+  --sidebar-border: oklch(1 0.008 75 / 9%);
+  --sidebar-ring: oklch(0.81 0.13 75);
 }
 
 @theme inline {

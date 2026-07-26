@@ -23,10 +23,10 @@ test.describe("two-context P2P", () => {
       // Both peers should reach Connected. This is THE proof the handshake
       // completed over a real RTCPeerConnection.
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
       await expect(
-        pair.pageB.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
     } finally {
       await pair.close();
@@ -41,10 +41,10 @@ test.describe("two-context P2P", () => {
       // Wait for connected first; the safety number only appears after the
       // handshake completes.
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
       await expect(
-        pair.pageB.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
 
       // Each side renders a compact "Unverified" badge that opens the safety
@@ -85,10 +85,10 @@ test.describe("two-context P2P", () => {
 
     try {
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
       await expect(
-        pair.pageB.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toBeVisible({ timeout: 45_000 });
 
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });
@@ -102,10 +102,10 @@ test.describe("two-context P2P", () => {
 
       // Enter sends. A's own transcript shows the sent bubble; B receives it.
       await composer.press("Enter");
-      await expect(pair.pageA.getByText("first line\nsecond line")).toBeVisible({
+      await expect(pair.pageA.getByRole("main").getByText("first line\nsecond line")).toBeVisible({
         timeout: 10_000,
       });
-      await expect(pair.pageB.getByText("first line\nsecond line")).toBeVisible({
+      await expect(pair.pageB.getByRole("main").getByText("first line\nsecond line")).toBeVisible({
         timeout: 10_000,
       });
 
@@ -116,11 +116,20 @@ test.describe("two-context P2P", () => {
       await composerB.fill("reply two");
       await composerB.press("Enter");
 
-      await expect(pair.pageA.getByText("reply one")).toBeVisible({ timeout: 10_000 });
-      await expect(pair.pageA.getByText("reply two")).toBeVisible({ timeout: 10_000 });
+      await expect(pair.pageA.getByRole("main").getByText("reply one")).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(pair.pageA.getByRole("main").getByText("reply two")).toBeVisible({
+        timeout: 10_000,
+      });
 
-      // Ordering: "reply one" must appear before "reply two" in the DOM.
-      const aText = (await pair.pageA.evaluate(() => document.body.innerText)) as string;
+      // Ordering: "reply one" must appear before "reply two" in the transcript.
+      // Scope to the main pane so the sidebar's last-message preview (which
+      // always shows the most recent message and so collapses to "reply two")
+      // does not invert the order check.
+      const aText = (await pair.pageA
+        .getByRole("main")
+        .evaluate((el) => (el as HTMLElement).innerText)) as string;
       expect(aText.indexOf("reply one")).toBeLessThan(aText.indexOf("reply two"));
     } finally {
       await pair.close();

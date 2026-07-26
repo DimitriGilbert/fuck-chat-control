@@ -43,7 +43,6 @@ import {
 } from "@/features/chat/ui/chat-status";
 import type { ConnectionStateVariant } from "@/features/chat/ui/chat-status";
 import { SafetyNumberDialog } from "@/features/chat/ui/safety-number-dialog";
-import { SettingsSheetTrigger } from "@/features/chat/ui/settings-sheet";
 
 /**
  * The active conversation view. Rendered whenever the controller has a
@@ -214,7 +213,6 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
         <Button variant="outline" size="sm" onClick={onLeave}>
           Leave
         </Button>
-        <SettingsSheetTrigger />
       </div>
     </div>
   );
@@ -241,8 +239,8 @@ function StatusPill({ variant, label }: StatusPillProps): React.ReactElement {
  * While the initiator waits for a peer, the route has already flipped to
  * ChatView (because `state.conversationId` is set as soon as the conversation
  * is created). Without this banner the inviter has no way to copy the link they
- * just generated — the Landing's StartConversationPanel is no longer mounted.
- * Shows the invitation link plus a Copy button until the peer connects.
+ * just generated. Shows the invitation link plus a Copy button until the peer
+ * connects.
  */
 function InvitationBanner(): React.ReactElement | null {
   const { state } = useChat();

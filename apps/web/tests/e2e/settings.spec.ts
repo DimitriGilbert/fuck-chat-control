@@ -17,14 +17,20 @@ test.describe("settings sheet", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(pair.pageA.getByText("Connected", { exact: true })).toBeVisible({
+      await expect(
+        pair.pageA.getByRole("main").getByText("Connected", { exact: true }),
+      ).toBeVisible({
         timeout: 45_000,
       });
       // Send a message so "clear current conversation" has something to clear.
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });
       await composer.fill("to be cleared");
       await composer.press("Enter");
-      await expect(pair.pageA.getByText("to be cleared")).toBeVisible({ timeout: 10_000 });
+      // Scope to the transcript so the sidebar's last-message preview does not
+      // trigger a strict-mode violation.
+      await expect(pair.pageA.getByRole("main").getByText("to be cleared")).toBeVisible({
+        timeout: 10_000,
+      });
 
       // Open settings.
       await pair.pageA.getByRole("button", { name: "Open settings" }).click();
@@ -61,7 +67,9 @@ test.describe("settings sheet", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(pair.pageA.getByText("Connected", { exact: true })).toBeVisible({
+      await expect(
+        pair.pageA.getByRole("main").getByText("Connected", { exact: true }),
+      ).toBeVisible({
         timeout: 45_000,
       });
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });

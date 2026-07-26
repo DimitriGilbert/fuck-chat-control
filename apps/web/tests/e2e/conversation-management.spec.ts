@@ -17,7 +17,9 @@ test.describe("conversation management", () => {
 
     try {
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, {
+          exact: true,
+        }),
       ).toBeVisible({ timeout: 45_000 });
 
       // Exchange at least one message so the conversation has persisted
@@ -25,16 +27,21 @@ test.describe("conversation management", () => {
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });
       await composer.fill("persist this");
       await composer.press("Enter");
-      await expect(pair.pageB.getByText("persist this")).toBeVisible({ timeout: 10_000 });
+      // Scope to B's transcript so the sidebar's last-message preview (which
+      // also contains the text) does not trigger a strict-mode violation.
+      await expect(pair.pageB.getByRole("main").getByText("persist this")).toBeVisible({
+        timeout: 10_000,
+      });
 
-      // Leave returns to the landing (clears the active conversation); the
-      // conversation must now be listed there with a Resume affordance.
+      // Leave returns the user to the empty state (no active conversation).
+      // The empty state surfaces persisted-but-not-live conversations so the
+      // exchange can be resumed.
       await pair.pageA.getByRole("button", { name: "Leave" }).click();
-      await expect(
-        pair.pageA.getByRole("heading", { name: "fck-chat-control", level: 1 }),
-      ).toBeVisible({ timeout: 10_000 });
 
-      await expect(pair.pageA.getByText("Conversations in this browser")).toBeVisible();
+      // The previous-conversations list appears in the empty state.
+      await expect(pair.pageA.getByRole("heading", { name: "Previous conversations" })).toBeVisible(
+        { timeout: 10_000 },
+      );
       await expect(pair.pageA.getByRole("button", { name: "Resume" })).toBeVisible();
     } finally {
       await pair.close();
@@ -47,14 +54,18 @@ test.describe("conversation management", () => {
 
     try {
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, {
+          exact: true,
+        }),
       ).toBeVisible({ timeout: 45_000 });
 
       // B leaves (returns to its own landing). A observes the drop: its
       // ChatView flips to Disconnected and exposes a Retry affordance.
       await pair.pageB.getByRole("button", { name: "Leave" }).click();
       await expect(
-        pair.pageA.getByText(CONNECTION_STATE_TEXT.disconnected, { exact: true }),
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.disconnected, {
+          exact: true,
+        }),
       ).toBeVisible({ timeout: 15_000 });
       await expect(pair.pageA.getByRole("button", { name: "Retry" })).toBeVisible();
     } finally {

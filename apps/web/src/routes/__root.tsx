@@ -3,7 +3,6 @@ import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from "@tanst
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 
 import { ChatProvider } from "@/features/chat/runtime/chat-provider";
-import Header from "../components/header";
 
 import appCss from "../index.css?url";
 
@@ -42,13 +41,15 @@ function RootDocument() {
       </head>
       <body>
         <ChatProvider>
-          <div className="grid h-svh grid-rows-[auto_1fr]">
-            <Header />
-            <Outlet />
-          </div>
+          {/* The shell (routes/index.tsx) and the docs routes each own their
+              own full-viewport layout; the root just provides the outlet. No
+              wrapping chrome here, or docs pages would inherit a chat sidebar. */}
+          <Outlet />
         </ChatProvider>
         <Toaster richColors />
-        <TanStackRouterDevtools position="bottom-left" />
+        {/* bottom-right so the devtools bubble does not overlap the sidebar's
+            bottom-left Settings entry (the e2e dev server keeps devtools visible). */}
+        <TanStackRouterDevtools position="bottom-right" />
         <Scripts />
       </body>
     </html>

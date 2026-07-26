@@ -21,11 +21,7 @@ import {
   type SessionHolder,
 } from "./chat-session";
 import type { IdentityManager } from "./identity-manager";
-import type {
-  ActiveSessionState,
-  ChatSession,
-  SessionSummary,
-} from "./types";
+import type { ActiveSessionState, ChatSession, SessionSummary } from "./types";
 import { activeSessionView, summarizeSession } from "./types";
 
 export { ImportMode };
@@ -217,7 +213,8 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     const summaries = sessionList
       .map((session) => summarizeSession(session))
       .sort(compareSummaries);
-    const active = activeConversationId !== null ? sessions.get(activeConversationId) ?? null : null;
+    const active =
+      activeConversationId !== null ? (sessions.get(activeConversationId) ?? null) : null;
     const activeView = activeSessionView(active);
     return {
       activeConversationId,

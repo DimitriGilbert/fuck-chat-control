@@ -1,10 +1,7 @@
 import type { ConversationId } from "@/features/chat/protocol/types";
 import type { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
-import type {
-  ConversationMessage,
-  ConversationRecord,
-} from "@/features/chat/store";
+import type { ConversationMessage, ConversationRecord } from "@/features/chat/store";
 
 import type { WebRtcBridge } from "./webrtc-bridge";
 
@@ -97,11 +94,7 @@ export function deriveSessionLabel(
   if (record !== null && record.displayName !== null && record.displayName.length > 0) {
     return record.displayName;
   }
-  if (
-    record !== null &&
-    record.peer !== null &&
-    record.peer.fingerprint.length > 0
-  ) {
+  if (record !== null && record.peer !== null && record.peer.fingerprint.length > 0) {
     return truncateFingerprint(record.peer.fingerprint);
   }
   if (fallbackPeerFingerprint !== null && fallbackPeerFingerprint.length > 0) {

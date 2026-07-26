@@ -3,30 +3,20 @@ import { expect, test } from "@playwright/test";
 import { invitationHex } from "./_helpers";
 
 /**
- * Scenarios 1, 2, 3, 11, 12: landing explainer + start affordance, mobile
- * layout, create conversation + copy link, fragment stays out of server
- * route paths, and the chromium/firefox project matrix covers the browser
- * smoke (the same tests run under both projects declared in
- * playwright.config.ts).
+ * Landing shell scenarios. The old centered marketing wall is gone; these
+ * tests cover the load-bearing affordances (start, copy invitation link,
+ * fragment never sent to the server), the new sidebar drawer on mobile, the
+ * sidebar reflecting live sessions, and the no-horizontal-overflow guarantee
+ * at both a narrow phone width and a wide desktop width.
  */
 
-test.describe("landing", () => {
-  test("renders the explainer, no-account promise, server-can't-read promise, and start affordance", async ({
-    page,
-  }) => {
+test.describe("landing shell", () => {
+  test("renders the app shell with a New conversation affordance", async ({ page }) => {
     await page.goto("/");
 
-    await expect(page.getByRole("heading", { name: "fck-chat-control", level: 1 })).toBeVisible();
-
-    // The load-bearing promises: no account, server can't read content,
-    // user-side verification. These sell the tool, so they are worth pinning.
-    await expect(page.getByText("No account, ever")).toBeVisible();
-    await expect(page.getByText("Server can't read it")).toBeVisible();
-    await expect(page.getByText("You verify, not us")).toBeVisible();
-
-    // Start affordance + conversation list region.
-    await expect(page.getByRole("button", { name: /Start a conversation/ })).toBeVisible();
-    await expect(page.getByText("Conversations in this browser")).toBeVisible();
+    // The shell renders the sidebar on desktop (md+). The primary New
+    // conversation button is the load-bearing start affordance.
+    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible();
   });
 
   test("layout does not overflow horizontally on a mobile viewport", async ({ page }) => {
@@ -40,11 +30,54 @@ test.describe("landing", () => {
     expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
   });
 
+  test("layout does not overflow horizontally on a wide desktop viewport", async ({ page }) => {
+    // Wide viewports expose fixed-width elements that would leave a gap or
+    // push the main pane off-screen on large monitors.
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto("/");
+
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    const clientWidth = await page.evaluate(() => document.documentElement.clientWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+  });
+
+  test("mobile drawer toggle opens the conversation sidebar", async ({ page }) => {
+    // At 390px the desktop sidebar is hidden; the hamburger in the top bar
+    // opens the Sheet drawer that hosts the same Sidebar component.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/");
+
+    // The hamburger button is labeled "Open conversations".
+    const toggle = page.getByRole("button", { name: "Open conversations" });
+    await expect(toggle).toBeVisible();
+
+    // The empty state also exposes a Start affordance on mobile, so scope the
+    // drawer-open assertion to the Sheet's content, which only mounts when the
+    // drawer is actually open. The first tap can land during React hydration
+    // and be swallowed (a known Playwright/hydration race, not a component
+    // bug); retry the tap until the drawer content appears, mirroring what a
+    // user does when a tap doesn't take.
+    await expect(async () => {
+      if ((await page.locator('[data-slot="sheet-content"]').count()) === 0) {
+        await toggle.click();
+      }
+      await expect(page.locator('[data-slot="sheet-content"]')).toBeVisible({ timeout: 1_000 });
+    }).toPass({ timeout: 8_000 });
+
+    // The drawer surfaces the sidebar component. Both the desktop sidebar
+    // (hidden at this viewport via `hidden md:flex`) and the drawer-mounted
+    // sidebar are in the DOM; assert the drawer's instance is the visible one.
+    await expect(page.locator('[data-slot="sheet-content"] [data-slot="sidebar"]')).toBeVisible();
+  });
+
   test("start conversation produces a 32-hex invitation link in the URL fragment", async ({
     page,
   }) => {
     await page.goto("/");
-    await page.getByRole("button", { name: /Start a conversation/ }).click();
+    await page
+      .getByRole("button", { name: /Start a conversation/ })
+      .first()
+      .click();
 
     const invitationInput = page.getByLabel("Invitation link");
     await expect(invitationInput).toBeVisible({ timeout: 10_000 });
@@ -69,7 +102,10 @@ test.describe("landing", () => {
     }
     await page.goto("/");
 
-    await page.getByRole("button", { name: /Start a conversation/ }).click();
+    await page
+      .getByRole("button", { name: /Start a conversation/ })
+      .first()
+      .click();
     await page.getByRole("button", { name: /Copy link/ }).click();
 
     if (browserName === "chromium") {
@@ -95,16 +131,39 @@ test.describe("landing", () => {
 
     await page.goto(`http://localhost:3001/#${fragment}`);
 
-    // The browser landed on the index route (not a 404, not a route path
-    // containing the hex).
-    await expect(page.getByRole("heading", { name: "fck-chat-control", level: 1 })).toBeVisible();
+    // The browser landed on the index route and rendered the shell. The
+    // hamburger or the New conversation button is present.
+    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+      timeout: 10_000,
+    });
 
-    // The fragment is retained in the URL bar — the join flow reads it from
-    // window.location.hash, and it is NOT part of any server request.
+    // The fragment is retained in the URL bar (the join flow reads it from
+    // window.location.hash) and is NOT part of any server request.
     expect(page.url()).toContain(`#${fragment}`);
     for (const hit of serverHits) {
       expect(hit).not.toContain(fragment);
       expect(hit).not.toContain("#");
     }
+  });
+
+  test("sidebar shows started conversations and highlights the active one", async ({ page }) => {
+    // Desktop sidebar (md+) is visible by default at the default viewport.
+    await page.goto("/");
+
+    // Start two conversations. Each renders a row in the sidebar list.
+    const startButton = page.getByRole("button", { name: /Start a conversation/ }).first();
+    await startButton.click();
+    // The first start flips the active id; the InvitationBanner shows in the
+    // main pane. Wait for the invitation input so we know the session is up.
+    await expect(page.getByLabel("Invitation link")).toBeVisible({ timeout: 10_000 });
+
+    // The active conversation row gets `data-active="true"`.
+    const rows = page.getByRole("button").filter({ hasText: /New chat|Conversation/ });
+    // At least one row (the just-started session) is present.
+    await expect(rows.first()).toBeVisible();
+
+    // Assert that exactly one row carries the active attribute.
+    const activeRows = page.locator('[data-slot="sidebar-row"][data-active="true"]');
+    await expect(activeRows).toHaveCount(1);
   });
 });

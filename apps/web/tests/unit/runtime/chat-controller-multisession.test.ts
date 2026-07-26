@@ -162,16 +162,12 @@ describe("createChatController / multi-session", () => {
     // Switch to A; both sessions remain.
     controller.selectConversation(idA);
     expect(controller.getActiveConversationId()).toEqual(idA);
-    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(
-      sortIds([idA, idB]),
-    );
+    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(sortIds([idA, idB]));
 
     // Switch back to B.
     controller.selectConversation(idB);
     expect(controller.getActiveConversationId()).toEqual(idB);
-    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(
-      sortIds([idA, idB]),
-    );
+    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(sortIds([idA, idB]));
   });
 
   it("background receive on a non-active session increments unread and leaves active id unchanged", async () => {
@@ -199,19 +195,13 @@ describe("createChatController / multi-session", () => {
 
     await deliverBackgroundMessage(controller, idA, "background 1");
     await deliverBackgroundMessage(controller, idA, "background 2");
-    expect(
-      controller.getState().sessions.find((s) => s.id === idA)?.unread,
-    ).toBe(2);
+    expect(controller.getState().sessions.find((s) => s.id === idA)?.unread).toBe(2);
 
     controller.selectConversation(idA);
     expect(controller.getActiveConversationId()).toEqual(idA);
-    expect(
-      controller.getState().sessions.find((s) => s.id === idA)?.unread,
-    ).toBe(0);
+    expect(controller.getState().sessions.find((s) => s.id === idA)?.unread).toBe(0);
     // B's unread is still 0.
-    expect(
-      controller.getState().sessions.find((s) => s.id === idB)?.unread,
-    ).toBe(0);
+    expect(controller.getState().sessions.find((s) => s.id === idB)?.unread).toBe(0);
   });
 
   it("leaveConversation(id) tears down ONLY that session; others remain live", async () => {
@@ -225,9 +215,7 @@ describe("createChatController / multi-session", () => {
     // Leave the middle session. C remains active; A is untouched.
     controller.leaveConversation(idB);
 
-    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(
-      sortIds([idA, idC]),
-    );
+    expect(sortIds(controller.getState().sessions.map((s) => s.id))).toEqual(sortIds([idA, idC]));
     expect(controller.getActiveConversationId()).toEqual(idC);
 
     // A's history is still readable.
