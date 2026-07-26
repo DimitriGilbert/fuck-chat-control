@@ -50,16 +50,37 @@ export async function decryptAtRest(
   return aesGcmDecrypt(key, nonce, EMPTY_AAD, ciphertext);
 }
 
+/**
+ * Argon2id KDF parameters. When undefined, the module constants below are
+ * used. The export/import bundle path passes the envelope's m/t/p (after
+ * validation) so that bundles encrypted with different costs decrypt
+ * correctly; the at-rest key wrap/unwrap path leaves this undefined to keep
+ * the historical defaults.
+ *
+ * NOTE on units: {@link memorySizeKiB} is in KiB (hash-wasm's units). The
+ * bundle envelope writes m in BYTES; the export-bundle caller converts
+ * bytes→KiB (m / 1024) before constructing this object.
+ */
+export interface KdfParams {
+  readonly memorySizeKiB: number;
+  readonly iterations: number;
+  readonly parallelism: number;
+}
+
 export async function deriveKeyFromPassphrase(
   passphrase: string,
   salt: Uint8Array,
+  params?: KdfParams,
 ): Promise<AtRestKey> {
+  const memorySize = params?.memorySizeKiB ?? ARGON2_MEMORY_KIB;
+  const iterations = params?.iterations ?? ARGON2_ITERATIONS;
+  const parallelism = params?.parallelism ?? ARGON2_PARALLELISM;
   const raw = await argon2id({
     password: passphrase,
     salt,
-    memorySize: ARGON2_MEMORY_KIB,
-    iterations: ARGON2_ITERATIONS,
-    parallelism: ARGON2_PARALLELISM,
+    memorySize,
+    iterations,
+    parallelism,
     hashLength: AES_KEY_BYTES,
     outputType: "binary",
   });

@@ -59,7 +59,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
   return result;
 }
 
-export function base64ToBytes(base64: string): Uint8Array {
+export function base64ToBytes(base64: string, maxBytes?: number): Uint8Array {
   const input = base64.replace(/\s/g, "");
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(input) || input.length % 4 !== 0) {
     throw new Error(`malformed base64 input (length ${input.length})`);
@@ -67,6 +67,15 @@ export function base64ToBytes(base64: string): Uint8Array {
   const lookup = buildBase64Lookup();
   const padding = input.endsWith("==") ? 2 : input.endsWith("=") ? 1 : 0;
   const outLength = (input.length / 4) * 3 - padding;
+  // Pre-allocation guard (R8/F3): when the caller passes a max-decoded-length
+  // budget, refuse the bundle BEFORE allocating the Uint8Array so a hostile
+  // base64 string cannot wedge the device in a memory blow-up. The decoded
+  // length is fully determined by the input length and padding.
+  if (maxBytes !== undefined && outLength > maxBytes) {
+    throw new Error(
+      `base64 input decodes to ${outLength} bytes, exceeding the limit of ${maxBytes}`,
+    );
+  }
   const out = new Uint8Array(outLength);
   let outIndex = 0;
   for (let i = 0; i < input.length; i += 4) {

@@ -105,7 +105,12 @@ export async function decryptFrame(
       "nonce does not match the derived nonce for this sender session id and sequence",
     );
   }
-  replayWindow.observe(aad.senderSequence);
+  // Observe the replay window ONLY after AEAD authentication succeeds. Mutating
+  // it before aesGcmDecrypt would let an unauthenticated frame (wrong key,
+  // tampered ciphertext) advance `highest` and silently drop future legit
+  // frames whose sequences now fall behind (R1/F1 + R3/F1).
   const aadBytes = encodeAad(aad);
-  return aesGcmDecrypt(key, nonce, aadBytes, ciphertext);
+  const plaintext = await aesGcmDecrypt(key, nonce, aadBytes, ciphertext);
+  replayWindow.observe(aad.senderSequence);
+  return plaintext;
 }

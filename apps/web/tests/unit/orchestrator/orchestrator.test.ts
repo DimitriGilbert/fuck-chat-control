@@ -274,6 +274,27 @@ describe("ConversationOrchestrator", () => {
 
       expect(initiator.spies.onSafetyNumber.calls[0]![1]).toBe(false);
     });
+
+    it("enters Verifying after the peer signature verifies and exits to Connected", async () => {
+      // R7/F2: the Verifying state must be surfaced between Handshaking and
+      // Connected so the UI can show "Verifying" while TOFU + key derivation
+      // (and PAKE confirmation, when negotiated) run.
+      const { initiator, responder } = await makeHandshakePair();
+
+      const initStates = initiator.spies.onStateChange.calls.map((c) => c[0]);
+      const respStates = responder.spies.onStateChange.calls.map((c) => c[0]);
+      // Both sides must have entered Verifying at least once during the
+      // handshake and then advanced to Connected.
+      expect(initStates).toContain(ConnectionState.Verifying);
+      expect(respStates).toContain(ConnectionState.Verifying);
+      expect(initiator.orchestrator.state).toBe(ConnectionState.Connected);
+      expect(responder.orchestrator.state).toBe(ConnectionState.Connected);
+      // Verifying must appear before Connected in the emission order.
+      const initVerifyingIdx = initStates.indexOf(ConnectionState.Verifying);
+      const initConnectedIdx = initStates.indexOf(ConnectionState.Connected);
+      expect(initVerifyingIdx).toBeGreaterThanOrEqual(0);
+      expect(initConnectedIdx).toBeGreaterThan(initVerifyingIdx);
+    });
   });
 
   describe("text round-trip", () => {

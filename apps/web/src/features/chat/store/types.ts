@@ -69,6 +69,19 @@ export const StoreErrorCode = {
    * after clearAll) use {@link ConversationRepository.replacePeerIdentity}.
    */
   PeerIdentityAlreadyPinned: "peer_identity_already_pinned",
+  /**
+   * Pre-auth size bound hit (R8/F3). Thrown when a bundle envelope or payload
+   * exceeds the caps defined in {@link ./limits.ts} BEFORE the AEAD tag is
+   * verified, so a hostile bundle cannot wedge the device in a pre-auth
+   * memory blow-up.
+   */
+  SizeLimitExceeded: "size_limit_exceeded",
+  /**
+   * Argon2id KDF envelope parameters out of range (R8/F4). Thrown when the
+   * bundle envelope's m/t/p/version values fall outside the allowed ranges
+   * (see {@link ./limits.ts}) on the import path.
+   */
+  InvalidKdfParams: "invalid_kdf_params",
 } as const;
 
 export type StoreErrorCode = (typeof StoreErrorCode)[keyof typeof StoreErrorCode];

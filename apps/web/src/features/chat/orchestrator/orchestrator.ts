@@ -30,7 +30,7 @@ import type { ConversationId, Signature, Transcript } from "@/features/chat/prot
 import { FrameReceiver } from "@/features/chat/framing";
 import { FrameSender } from "@/features/chat/framing";
 import type { FrameTransport, ReceivedFile } from "@/features/chat/framing";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { ConnectionState, ConnectionStateMachine } from "@/features/chat/signaling/state-machine";
 import { SignalingClient } from "@/features/chat/signaling/signaling-client";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import type { ConversationMessage, ConversationRepository } from "@/features/chat/store";
@@ -147,6 +147,14 @@ export class ConversationOrchestrator {
   private readonly handlers: OrchestratorHandlers;
   private readonly useInternalSignaling: boolean;
 
+  /**
+   * Authoritative transition validator (R6/F6 + R7/F2). All state changes
+   * route through {@link setState} → {@link ConnectionStateMachine.transition},
+   * which throws {@link InvalidTransitionError} on illegal edges instead of
+   * silently corrupting state. The field stays in lock-step with
+   * {@link currentState} so direct state getters remain O(1).
+   */
+  private readonly stateMachine = new ConnectionStateMachine();
   private currentState: ConnectionState = ConnectionState.Idle;
   private conversation: ConversationId | null = null;
   private invitationLink: string | null = null;
@@ -611,9 +619,15 @@ export class ConversationOrchestrator {
   /**
    * External signaling seam: the bridge observed the peer leave. Tears down the
    * session and surfaces the drop as Disconnected so the UI can offer retry.
+   * No-op when already Disconnected or never started (Idle) — the transition
+   * validator rejects Idle→Disconnected, and a peer-leave before start is
+   * semantically meaningless.
    */
   notifyPeerLeft(): void {
-    if (this.currentState !== ConnectionState.Disconnected) {
+    if (
+      this.currentState !== ConnectionState.Disconnected &&
+      this.currentState !== ConnectionState.Idle
+    ) {
       this.teardownSession();
       this.setState(ConnectionState.Disconnected);
     }
@@ -624,7 +638,10 @@ export class ConversationOrchestrator {
    * broker restart). Behaves like notifyPeerLeft.
    */
   notifySignalingClosed(): void {
-    if (this.currentState !== ConnectionState.Disconnected) {
+    if (
+      this.currentState !== ConnectionState.Disconnected &&
+      this.currentState !== ConnectionState.Idle
+    ) {
       this.teardownSession();
       this.setState(ConnectionState.Disconnected);
     }
@@ -662,8 +679,14 @@ export class ConversationOrchestrator {
       await receiver.ingest(bytes);
       return;
     }
-    if (this.currentState !== ConnectionState.Handshaking) {
-      // Ignore stray bytes after teardown.
+    // PAKE shares/confirmations arrive AFTER the peer's transcript signature
+    // verifies, i.e. while we are in the Verifying phase (TOFU + PAKE + key
+    // derivation). Accept inbound handshake bytes in both Handshaking and
+    // Verifying; anything else is a stray post-teardown delivery and is dropped.
+    if (
+      this.currentState !== ConnectionState.Handshaking &&
+      this.currentState !== ConnectionState.Verifying
+    ) {
       return;
     }
     if (bytes.length === HELLO_BYTES) {
@@ -745,6 +768,12 @@ export class ConversationOrchestrator {
         "peer signature does not verify against the canonical transcript",
       );
     }
+
+    // R7/F2: enter Verifying now that the peer's transcript signature verifies.
+    // From here through PAKE confirmation + TOFU + key derivation the session
+    // is authenticating the peer (Verifying), then transitions to Connected on
+    // success or Disconnected via failHandshake on any check failure.
+    this.setState(ConnectionState.Verifying);
 
     // TOFU: first contact stores, resume must match.
     const existing = await this.repository.getPeerIdentity(this.conversation);
@@ -1064,9 +1093,14 @@ export class ConversationOrchestrator {
     }
     this.handlers.onError?.(err);
     this.teardownSession();
-    // Stay in Handshaking/Disconnected — do NOT reach Connected.
+    // Surface the failure as Disconnected so the UI can offer retry. Covers
+    // Handshaking (early handshake error), Verifying (post-signature auth
+    // failure: TOFU mismatch, PAKE confirmation failure, key derivation), and
+    // Connected (a late transport error after the session was established).
+    // Any other state is left untouched — teardown already released resources.
     if (
       this.currentState === ConnectionState.Handshaking ||
+      this.currentState === ConnectionState.Verifying ||
       this.currentState === ConnectionState.Connected
     ) {
       this.setState(ConnectionState.Disconnected);
@@ -1122,6 +1156,22 @@ export class ConversationOrchestrator {
   }
 
   private setState(next: ConnectionState): void {
+    // Route through the transition validator (R6/F6 + R7/F2). Illegal edges
+    // throw InvalidTransitionError instead of silently corrupting state. The
+    // side-effect (onStateChange callback) fires only after the transition is
+    // validated AND the cached state is updated, preserving the prior
+    // observe-then-notify ordering.
+    //
+    // Self-transitions (next === currentState) are treated as no-ops: teardown
+    // paths (leave/notifyPeerLeft/notifySignalingClosed and the internal
+    // signaling onClose handler) can fire redundantly when a MockSignalingSocket
+    // closes synchronously inside teardownSession — the second call would
+    // otherwise throw Disconnected -> Disconnected. Skipping the no-op keeps the
+    // strict transition table intact without special-casing each call site.
+    if (next === this.currentState) {
+      return;
+    }
+    this.stateMachine.transition(next);
     this.currentState = next;
     this.handlers.onStateChange?.(next);
   }
@@ -1177,16 +1227,26 @@ export class ConversationOrchestrator {
         },
         onPeerLeave: () => {
           // The peer left the broker room. Tear down the session and move to
-          // Disconnected so the UI can surface the drop and offer retry.
-          if (this.currentState !== ConnectionState.Disconnected) {
+          // Disconnected so the UI can surface the drop and offer retry. Skip
+          // when already Disconnected or never started (Idle) — the transition
+          // validator rejects Idle→Disconnected, and a leave before start is
+          // semantically meaningless.
+          if (
+            this.currentState !== ConnectionState.Disconnected &&
+            this.currentState !== ConnectionState.Idle
+          ) {
             this.teardownSession();
             this.setState(ConnectionState.Disconnected);
           }
         },
         onClose: () => {
           // Socket closed without a peer-leave (e.g. broker restart). Surface
-          // as a drop unless we already tore down.
-          if (this.currentState !== ConnectionState.Disconnected) {
+          // as a drop unless we already tore down. Same Idle guard as
+          // onPeerLeave — a close before start is meaningless.
+          if (
+            this.currentState !== ConnectionState.Disconnected &&
+            this.currentState !== ConnectionState.Idle
+          ) {
             this.teardownSession();
             this.setState(ConnectionState.Disconnected);
           }

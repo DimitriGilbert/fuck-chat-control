@@ -1,10 +1,26 @@
 import { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } from "../crypto/at-rest";
+import type { KdfParams } from "../crypto/at-rest";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
 import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION } from "../protocol/limits";
 import type { ConversationId } from "../protocol/types";
 
 import { base64ToBytes, bytesToBase64, bytesToHex, hexToBytes } from "./encoding";
+import {
+  ARGON2_ITERATIONS_MAX,
+  ARGON2_ITERATIONS_MIN,
+  ARGON2_MEMORY_MAX_BYTES,
+  ARGON2_MEMORY_MIN_BYTES,
+  ARGON2_PARALLELISM_MAX,
+  ARGON2_PARALLELISM_MIN,
+  ARGON2_VERSION_ALLOWED,
+  MAX_BUNDLE_BYTES,
+  MAX_CONVERSATIONS,
+  MAX_ENVELOPE_CIPHERTEXT_BYTES,
+  MAX_MESSAGES_PER_CONVERSATION,
+  MAX_NONCE_BYTES,
+  MAX_SALT_BYTES,
+} from "./limits";
 import { MessageDirection, MESSAGE_DIRECTION_VALUES, StoreError, StoreErrorCode } from "./types";
 import type {
   ConversationMessage,
@@ -140,11 +156,29 @@ export async function importBundle(
   repo: ConversationRepository,
   mode: ImportMode,
 ): Promise<ImportResult> {
+  // R8/F3: cap the raw bundle length up front, before any parsing/allocation.
+  if (bundle.length > MAX_BUNDLE_BYTES) {
+    throw new StoreError(
+      StoreErrorCode.SizeLimitExceeded,
+      `bundle length ${bundle.length} exceeds max ${MAX_BUNDLE_BYTES}`,
+    );
+  }
   const envelope = parseEnvelope(bundle);
-  const salt = base64ToBytes(envelope.kdf.salt);
-  const nonce = base64ToBytes(envelope.aead.nonce);
-  const ciphertext = base64ToBytes(envelope.ciphertext);
-  const bundleKey = await deriveKeyFromPassphrase(passphrase, salt);
+  const salt = decodeBoundedBase64(envelope.kdf.salt, MAX_SALT_BYTES, "kdf.salt");
+  const nonce = decodeBoundedBase64(envelope.aead.nonce, MAX_NONCE_BYTES, "aead.nonce");
+  // R8/F3: cap the decoded ciphertext length BEFORE allocating the
+  // Uint8Array — base64ToBytes enforces maxBytes against the pre-decode
+  // length calculation, so a hostile envelope cannot wedge the device.
+  const ciphertext = decodeBoundedBase64(
+    envelope.ciphertext,
+    MAX_ENVELOPE_CIPHERTEXT_BYTES,
+    "aead.ciphertext",
+  );
+  // R8/F4: consume the envelope's KDF params (m/t/p/version) instead of
+  // silently falling back to module constants. Convert m from BYTES (envelope)
+  // to KiB (hash-wasm's memorySize unit) by dividing by 1024.
+  const kdfParams = envelopeKdfParams(envelope.kdf);
+  const bundleKey = await deriveKeyFromPassphrase(passphrase, salt, kdfParams);
   let payloadBytes: Uint8Array;
   try {
     payloadBytes = await decryptAtRest(bundleKey, nonce, ciphertext);
@@ -216,6 +250,11 @@ export async function importBundle(
           existing: existingPeer,
           incoming: convo.peer,
         });
+        // R8/F2: a peer-identity conflict means the incoming conversation is
+        // hostile (or at least untrusted). Surface the conflict for UI action
+        // but do NOT persist its display name or messages — `continue` skips
+        // the setDisplayName + message loop below.
+        continue;
       }
     }
     if (existing.displayName === null && convo.displayName !== null) {
@@ -297,18 +336,86 @@ function parseEnvelope(bundle: string): ExportBundle {
   if (typeof obj["ciphertext"] !== "string") {
     throw new StoreError(StoreErrorCode.MalformedBundle, "bundle ciphertext must be a string");
   }
+  // R8/F4: read m/t/p/version from the envelope (do NOT silently overwrite
+  // with module constants). Validation happens in {@link envelopeKdfParams};
+  // here we just enforce that they are finite integers so the type narrowing
+  // is sound and the validator can apply range checks.
+  const mRaw = kdf["m"];
+  const tRaw = kdf["t"];
+  const pRaw = kdf["p"];
+  const versionRaw = kdf["version"];
+  if (
+    typeof mRaw !== "number" ||
+    !Number.isFinite(mRaw) ||
+    !Number.isInteger(mRaw) ||
+    typeof tRaw !== "number" ||
+    !Number.isFinite(tRaw) ||
+    !Number.isInteger(tRaw) ||
+    typeof pRaw !== "number" ||
+    !Number.isFinite(pRaw) ||
+    !Number.isInteger(pRaw) ||
+    typeof versionRaw !== "number" ||
+    !Number.isFinite(versionRaw) ||
+    !Number.isInteger(versionRaw)
+  ) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      "bundle kdf.m, kdf.t, kdf.p, kdf.version must be integers",
+    );
+  }
   return {
     v: version,
     kdf: {
       algorithm: kdf["algorithm"] as string,
-      version: ARGON2_VERSION,
-      m: ARGON2_MEMORY_BYTES,
-      t: ARGON2_ITERATIONS,
-      p: ARGON2_PARALLELISM,
+      version: versionRaw,
+      m: mRaw,
+      t: tRaw,
+      p: pRaw,
       salt: kdf["salt"] as string,
     },
     aead: { algorithm: aead["algorithm"] as string, nonce: aead["nonce"] as string },
     ciphertext: obj["ciphertext"] as string,
+  };
+}
+
+/**
+ * Validate the envelope's Argon2id KDF params against the allowed ranges and
+ * return the {@link KdfParams} to feed into {@link deriveKeyFromPassphrase}.
+ *
+ * NOTE on units: the envelope's `m` is in BYTES (the export path writes
+ * ARGON2_MEMORY_BYTES=67108864). hash-wasm's `memorySize` is in KiB. Convert
+ * by dividing by 1024. The round-trip test in
+ * `bundle-size-limits.test.ts` proves the conversion is correct.
+ */
+function envelopeKdfParams(kdf: BundleKdf): KdfParams {
+  if (kdf.version !== ARGON2_VERSION_ALLOWED) {
+    throw new StoreError(
+      StoreErrorCode.InvalidKdfParams,
+      `unsupported argon2 version ${kdf.version}, expected ${ARGON2_VERSION_ALLOWED}`,
+    );
+  }
+  if (kdf.m < ARGON2_MEMORY_MIN_BYTES || kdf.m > ARGON2_MEMORY_MAX_BYTES) {
+    throw new StoreError(
+      StoreErrorCode.InvalidKdfParams,
+      `argon2 m=${kdf.m} out of range [${ARGON2_MEMORY_MIN_BYTES}, ${ARGON2_MEMORY_MAX_BYTES}]`,
+    );
+  }
+  if (kdf.t < ARGON2_ITERATIONS_MIN || kdf.t > ARGON2_ITERATIONS_MAX) {
+    throw new StoreError(
+      StoreErrorCode.InvalidKdfParams,
+      `argon2 t=${kdf.t} out of range [${ARGON2_ITERATIONS_MIN}, ${ARGON2_ITERATIONS_MAX}]`,
+    );
+  }
+  if (kdf.p < ARGON2_PARALLELISM_MIN || kdf.p > ARGON2_PARALLELISM_MAX) {
+    throw new StoreError(
+      StoreErrorCode.InvalidKdfParams,
+      `argon2 p=${kdf.p} out of range [${ARGON2_PARALLELISM_MIN}, ${ARGON2_PARALLELISM_MAX}]`,
+    );
+  }
+  return {
+    memorySizeKiB: Math.trunc(kdf.m / 1024),
+    iterations: kdf.t,
+    parallelism: kdf.p,
   };
 }
 
@@ -346,6 +453,21 @@ function parsePayload(bytes: Uint8Array): ParsedPayload {
 }
 
 function validateConversations(payload: ParsedPayload): ValidatedConversation[] {
+  // R8/F3: pre-auth count caps on payload structure. These run AFTER AEAD
+  // decryption but BEFORE any persistence, so a (post-auth) large payload is
+  // rejected cheaply rather than driving a long appendMessage loop.
+  if (payload.conversations.length > MAX_CONVERSATIONS) {
+    throw new StoreError(
+      StoreErrorCode.SizeLimitExceeded,
+      `payload has ${payload.conversations.length} conversations, max ${MAX_CONVERSATIONS}`,
+    );
+  }
+  if (payload.messages.length > MAX_CONVERSATIONS * MAX_MESSAGES_PER_CONVERSATION) {
+    throw new StoreError(
+      StoreErrorCode.SizeLimitExceeded,
+      `payload has ${payload.messages.length} messages, max ${MAX_CONVERSATIONS * MAX_MESSAGES_PER_CONVERSATION}`,
+    );
+  }
   const byHex = new Map<string, MutableConversation>();
   for (const raw of payload.conversations) {
     const id = decodeConversationIdHex(raw.id);
@@ -364,6 +486,13 @@ function validateConversations(payload: ParsedPayload): ValidatedConversation[] 
       throw new StoreError(
         StoreErrorCode.MalformedBundle,
         `payload message references unknown conversation ${raw.conversationId}`,
+      );
+    }
+    // R8/F3: per-conversation message cap.
+    if (owner.messages.length >= MAX_MESSAGES_PER_CONVERSATION) {
+      throw new StoreError(
+        StoreErrorCode.SizeLimitExceeded,
+        `conversation ${raw.conversationId} exceeds ${MAX_MESSAGES_PER_CONVERSATION} messages`,
       );
     }
     owner.messages.push({
@@ -465,4 +594,25 @@ function randomSalt(): Uint8Array {
   const salt = new Uint8Array(ARGON2_SALT_BYTES);
   globalThis.crypto.getRandomValues(salt);
   return salt;
+}
+
+/**
+ * Decode a base64 envelope field, enforcing a pre-allocation byte cap and
+ * surfacing both malformation and cap violations as typed StoreErrors. R8/F3
+ * requires SizeLimitExceeded on cap hits and MalformedBundle on bad base64,
+ * so the import path never produces an opaque Error from {@link base64ToBytes}.
+ */
+function decodeBoundedBase64(input: string, maxBytes: number, field: string): Uint8Array {
+  try {
+    return base64ToBytes(input, maxBytes);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("exceeding the limit of")) {
+      throw new StoreError(
+        StoreErrorCode.SizeLimitExceeded,
+        `bundle ${field} exceeds max ${maxBytes} bytes: ${message}`,
+      );
+    }
+    throw new StoreError(StoreErrorCode.MalformedBundle, `bundle ${field} is not valid base64: ${message}`);
+  }
 }

@@ -167,4 +167,34 @@ describe("decryptFrame replay rejection (NIST SP 800-38D + anti-replay)", () => 
       decryptFrame(key, window, textAad(sender, 100 - 8), stale.nonce, stale.ciphertext),
     ).rejects.toMatchObject({ code: CryptoErrorCode.ReplayStale });
   });
+
+  it("does NOT advance the replay window when AEAD auth fails (R1/F1 + R3/F1)", async () => {
+    // Discriminating variant. With a SMALL window (size 8), a forged frame at
+    // sequence 50 that fails AEAD auth must NOT advance `highest`. If observe()
+    // ran before aesGcmDecrypt (the bug), `highest` would jump to 50 and any
+    // subsequent legit frame whose sequence falls in [0, 50-size] would be
+    // rejected as replay_stale — silently dropping the next real frame.
+    // With the fix, `highest` stays -1, so the legit frame at sequence 0 is
+    // accepted as new.
+    const key = generateAtRestKey();
+    const other = generateAtRestKey();
+    const sender = sessionId(3);
+    const window = new ReplayWindow(8);
+    // Forge at sequence 50 with the correct key, then attempt decrypt with the
+    // WRONG key so AEAD authentication fails.
+    const forgedAad = textAad(sender, 50);
+    const forgedEnc = await encryptFrame(key, forgedAad, PLAINTEXT);
+    await expect(
+      decryptFrame(other, window, forgedAad, forgedEnc.nonce, forgedEnc.ciphertext),
+    ).rejects.toMatchObject({ code: CryptoErrorCode.AuthenticationFailed });
+    // Under the FIX: `highest` stayed -1, so observe(0) accepts sequence 0 as
+    // new and the frame decrypts cleanly.
+    // Under the BUG: `highest` was poisoned to 50, so observe(0) throws
+    // replay_stale (offset 50 >= size 8) and decryptFrame rejects — the assert
+    // below would fail with an unhandled replay_stale rejection.
+    const legitAad = textAad(sender, 0);
+    const legitEnc = await encryptFrame(key, legitAad, PLAINTEXT);
+    const dec = await decryptFrame(key, window, legitAad, legitEnc.nonce, legitEnc.ciphertext);
+    expect(bytesEqual(dec, PLAINTEXT)).toBe(true);
+  });
 });

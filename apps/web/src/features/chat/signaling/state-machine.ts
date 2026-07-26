@@ -23,6 +23,7 @@ const TRANSITIONS: Record<ConnectionState, ReadonlySet<ConnectionState>> = {
   ]),
   [ConnectionState.Waiting]: new Set<ConnectionState>([
     ConnectionState.Signaling,
+    ConnectionState.Handshaking,
     ConnectionState.Disconnected,
     ConnectionState.Idle,
   ]),
