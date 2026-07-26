@@ -4,31 +4,35 @@
 # Re-runnable demo video generator for fck-chat-control.
 #
 # Opens two isolated browser sessions (Alice + Bob) against an ALREADY-RUNNING
-# dev/preview server, walks through the full private-chat flow (start -> join ->
-# connect -> exchange messages -> verify safety number) while recording Alice's
-# window, then burns in timed captions with ffmpeg and writes a compressed WebM.
+# dev/preview server, walks through the full private-chat flow (sidebar shell ->
+# start -> join -> connect -> exchange messages -> start a 2nd chat -> send a
+# file -> verify safety number) while recording Alice's window, then burns in
+# timed captions with ffmpeg and writes BOTH a compressed WebM and an animated
+# GIF.
 #
 # It does NOT start or stop the dev server. Boot it yourself first:
 #   pnpm dev                                   # serves http://localhost:3001
 # then in another terminal:
-#   bash scripts/demo-video.sh                 # writes docs/media/chat-demo.webm
+#   bash scripts/demo-video.sh                 # writes docs/media/chat-demo.{webm,gif}
 #
-# Re-run any time the UI changes -- the output is overwritten in place.
+# Re-run any time the UI changes -- the outputs are overwritten in place.
 #
 # Usage:
 #   bash scripts/demo-video.sh
-#   BASE_URL=http://localhost:3001/ OUT=docs/media/chat-demo.webm bash scripts/demo-video.sh
+#   BASE_URL=http://localhost:3001/ OUT=docs/media/chat-demo.webm GIF=docs/media/chat-demo.gif bash scripts/demo-video.sh
 #
 # Env vars (all optional):
-#   BASE_URL   server URL to record against   (default http://localhost:3001/)
-#   OUT        output webm path               (default docs/media/chat-demo.webm)
-#   RAW        intermediate raw webm path     (default /tmp/chat-demo-raw.webm)
-#   KEEP_RAW   "1" to keep the raw recording  (default unset)
-#   FONT       ttf path for drawtext          (default auto-detected)
+#   BASE_URL   server URL to record against    (default http://localhost:3001/)
+#   OUT        output webm path                (default docs/media/chat-demo.webm)
+#   GIF        output gif path                 (default docs/media/chat-demo.gif)
+#   RAW        intermediate raw webm path      (default /tmp/chat-demo-raw.webm)
+#   PALETTE    temp palette png path           (default /tmp/chat-demo-palette.png)
+#   KEEP_RAW   "1" to keep the raw recording   (default unset)
+#   FONT       ttf path for drawtext           (default auto-detected)
 #
 # Prerequisites (install once):
 #   npm i -g agent-browser && agent-browser install      # Chrome for CDP
-#   ffmpeg                                                 # captions + compress
+#   ffmpeg                                                 # captions + compress + gif
 #   pnpm install                                           # repo deps
 #
 # Notes:
@@ -49,7 +53,9 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_URL="${BASE_URL:-http://localhost:3001/}"
 OUT="${OUT:-$REPO_ROOT/docs/media/chat-demo.webm}"
+GIF="${GIF:-$REPO_ROOT/docs/media/chat-demo.gif}"
 RAW="${RAW:-/tmp/chat-demo-raw.webm}"
+PALETTE="${PALETTE:-/tmp/chat-demo-palette.png}"
 KEEP_RAW="${KEEP_RAW:-0}"
 
 export PATH="$REPO_ROOT/node_modules/.bin:$PATH"
@@ -64,8 +70,8 @@ if [[ -z "$FONT" || ! -f "$FONT" ]]; then
   exit 2
 fi
 
-mkdir -p "$(dirname "$OUT")"
-rm -f "$RAW" "$OUT"
+mkdir -p "$(dirname "$OUT")" "$(dirname "$GIF")"
+rm -f "$RAW" "$OUT" "$GIF" "$PALETTE"
 
 # ---------- helpers ----------------------------------------------------------
 # Note: do NOT wrap "npx agent-browser" in a shell variable -- word-splitting
@@ -74,11 +80,15 @@ rm -f "$RAW" "$OUT"
 log() { printf '\n\033[1;36m[demo]\033[0m %s\n' "$*"; }
 
 # Close only the browser sessions this script opened. The dev server is the
-# caller's responsibility and is NEVER touched here.
+# caller's responsibility and is NEVER touched here. The palette temp file is
+# the only other artifact this script creates and is always removed on exit.
 teardown() {
+  local code=$?
   log "closing browser sessions"
   npx agent-browser --session alice record stop >/dev/null 2>&1 || true
   npx agent-browser close --all >/dev/null 2>&1 || true
+  rm -f "$PALETTE"
+  exit "$code"
 }
 trap teardown EXIT
 
@@ -122,6 +132,30 @@ wait_for_connected() {
   return 1
 }
 
+# Dispatch a synthetic drag-drop onto [data-drop-zone="chat"] carrying a tiny
+# in-memory File. Mirrors the e2e test at tests/e2e/p2p.spec.ts. Used for the
+# file-transfer beat: the native file picker is awkward to drive from CDP, but
+# a constructed DataTransfer + DragEvent reaches the same handleDrop handler.
+# Usage:  drop_file <session> <name> <mime> <contents>
+drop_file() {
+  local session="$1" name="$2" mime="$3" contents="$4"
+  npx agent-browser --session "$session" evaluate "$(
+    cat <<EOF
+(() => {
+  const file = new File(${contents}, ${name}, { type: ${mime} });
+  const zone = document.querySelector("[data-drop-zone='chat']");
+  if (!zone) throw new Error("chat drop zone not found");
+  const transfer = new DataTransfer();
+  Object.defineProperty(transfer, "files", { value: [file], configurable: true });
+  const evt = new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true });
+  Object.defineProperty(evt, "dataTransfer", { value: transfer, configurable: true });
+  zone.dispatchEvent(evt);
+  return true;
+})()
+EOF
+  )" 2>/dev/null
+}
+
 # ---------- 0. confirm the server is already up ------------------------------
 log "checking that the server is already up at $BASE_URL"
 if ! curl -sf -o /dev/null "$BASE_URL"; then
@@ -142,20 +176,25 @@ log "starting recorder on Alice's session"
 npx agent-browser --session alice record start "$RAW" >/dev/null
 RECORDING_STARTED=1
 
-# Wait for the landing button to render.
-wait_for_text alice "Start a conversation" 15 || log "WARN: landing button not found in 15s"
+# Wait for the sidebar's Start button to render. The new shell exposes two
+# Start affordances (sidebar + empty-state card); the sidebar is the persistent
+# one, so we scope to complementary/<aside> via the snapshot's role text.
+wait_for_text alice "Start a conversation" 15 || log "WARN: sidebar start button not found in 15s"
 
 # ============================================================================
-# BEAT 1 -- LANDING              caption: 1.0s - 6.0s
-#   "No account. No phone number. Open a link, talk."
+# BEAT 1 -- SHELL + LANDING            caption: 1.0s - 6.0s
+#   "Private chat, no account. Sidebar, conversations, one window."
 # ============================================================================
-sleep 5   # let the landing settle on camera
+sleep 5   # let the shell settle on camera
 
 # ============================================================================
-# BEAT 2 -- ALICE STARTS         caption: 6.0s - 12.0s
-#   "Alice starts the chat -- the link is just a random ID."
+# BEAT 2 -- ALICE STARTS (SIDEBAR)     caption: 6.0s - 12.0s
+#   "Alice starts a chat in the sidebar. The link is just a random ID."
 # ============================================================================
-log "Alice: click 'Start a conversation'"
+log "Alice: click 'Start a conversation' in the sidebar"
+# The snapshot lists the sidebar aside before the empty-state card; ref_for
+# returns the first match, which is the sidebar's button. If a future change
+# reorders them, scope the grep tighter (complementary.*Start).
 START_REF="$(ref_for alice 'Start a conversation')"
 if [[ -z "$START_REF" ]]; then
   echo "FATAL: could not find 'Start a conversation' ref" >&2
@@ -163,7 +202,8 @@ if [[ -z "$START_REF" ]]; then
 fi
 npx agent-browser --session alice click "@${START_REF}" >/dev/null
 
-# The invitation input should appear on the same panel.
+# The invitation input appears in the chat-view banner once a conversation is
+# active.
 wait_for_text alice "Invitation link" 10 || log "WARN: invitation input not found"
 sleep 3
 
@@ -176,7 +216,7 @@ fi
 log "Alice: invitation = $INVITATION"
 
 # ============================================================================
-# BEAT 3 -- BOB JOINS            caption: 12.0s - 18.0s
+# BEAT 3 -- BOB JOINS                  caption: 12.0s - 18.0s
 #   "Bob opens it. The broker relays only the encrypted handshake."
 # ============================================================================
 log "Bob: opening invitation URL"
@@ -185,7 +225,7 @@ npx agent-browser --session bob set viewport 1920 1080 >/dev/null
 sleep 4
 
 # ============================================================================
-# BEAT 4 -- WAIT FOR CONNECTED   caption: 18.0s - 23.0s
+# BEAT 4 -- CONNECTED                  caption: 18.0s - 23.0s
 #   "WebRTC data channel open -- the server is now out of the path."
 # ============================================================================
 log "waiting for both sessions to reach Connected"
@@ -195,7 +235,7 @@ fi
 sleep 2
 
 # ============================================================================
-# BEAT 5 -- MESSAGE EXCHANGE     caption: 23.0s - 32.0s
+# BEAT 5 -- MESSAGE EXCHANGE           caption: 23.0s - 29.0s
 #   "Messages are end-to-end encrypted. The server never sees them."
 # ============================================================================
 log "Alice: sending a message"
@@ -219,11 +259,61 @@ if [[ -n "$MSG_REF_BOB" ]]; then
 fi
 sleep 3
 
-# Bring Alice back into focus for the camera before the final beat.
+# Bring Alice back into focus for the camera before the multi-chat beat.
 npx agent-browser --session alice snapshot -i >/dev/null 2>&1 || true
 
 # ============================================================================
-# BEAT 6 -- SAFETY NUMBER        caption: 32.0s - 38.0s
+# BEAT 6 -- SECOND CONVERSATION        caption: 29.0s - 35.0s
+#   "Alice starts a second chat. Multiple chats, each isolated."
+# ============================================================================
+log "Alice: starting a second conversation from the sidebar"
+# The sidebar's Start button is still the canonical one. Click it again to
+# prove multi-chat: a second session appears in the sidebar and the main pane
+# flips to a fresh empty chat ( InvitationBanner reappears ).
+START_REF_2="$(ref_for alice 'Start a conversation')"
+if [[ -n "$START_REF_2" ]]; then
+  npx agent-browser --session alice click "@${START_REF_2}" >/dev/null 2>&1 || true
+fi
+# Wait for the new invitation banner so the new conversation is visibly active.
+wait_for_text alice "Invitation link" 8 || log "WARN: second invitation banner not found"
+sleep 4
+
+# Switch back to the first conversation so the file transfer lands on the
+# connected session. The sidebar lists sessions newest-first by default; the
+# first conversation is the SECOND row. Clicking by row text is brittle, so we
+# reuse the helper: snapshot the sidebar and click the row whose preview still
+# shows Bob's reply. We accept a best-effort click here -- if it misses, the
+# drop in BEAT 7 still dispatches on whatever chat is active.
+log "Alice: switching back to the first conversation"
+FIRST_REF="$(npx agent-browser --session alice snapshot -i 2>/dev/null \
+  | grep -iE 'server never sees this' \
+  | grep -oE 'ref=e[0-9]+' \
+  | head -1 \
+  | sed 's/ref=//')"
+if [[ -n "$FIRST_REF" ]]; then
+  # The match is inside the row's button; ref_for returned the inner text node's
+  # ref. Walk up to the clickable row by clicking the ref anyway -- agent-browser
+  # clicks the nearest interactive ancestor.
+  npx agent-browser --session alice click "@${FIRST_REF}" >/dev/null 2>&1 || true
+  sleep 2
+fi
+
+# ============================================================================
+# BEAT 7 -- FILE TRANSFER              caption: 35.0s - 41.0s
+#   "Files too. Dropped here, sent end-to-end, never stored."
+# ============================================================================
+log "Alice: sending a small file via synthetic drop"
+# Drive a File through handleDrop on [data-drop-zone="chat"]. The eval payload
+# is built as a JS expression string; the args are JSON-encoded so quoting is
+# safe (contents is a JS array-literal fragment of code units to avoid double
+# quoting issues inside the heredoc).
+if ! drop_file alice '"shared.txt"' '"text/plain"' '["hello from A"]'; then
+  log "WARN: synthetic drop did not return success (continuing anyway)"
+fi
+sleep 5   # let the attachment card render on camera
+
+# ============================================================================
+# BEAT 8 -- SAFETY NUMBER              caption: 41.0s - 47.0s
 #   "Both sides show the same safety number -- verify it out-of-band."
 # ============================================================================
 log "Alice: opening safety number dialog"
@@ -231,7 +321,7 @@ SAFETY_REF="$(ref_for alice 'Review safety number|Safety number')"
 if [[ -n "$SAFETY_REF" ]]; then
   npx agent-browser --session alice click "@${SAFETY_REF}" >/dev/null 2>&1 || true
 fi
-sleep 4
+sleep 5
 
 # Stop recording.
 log "stopping recorder"
@@ -248,12 +338,14 @@ log "raw recording: ${RAW_DUR}s"
 # inside the text -- use "--" instead, which drawtext renders fine).
 build_drawtext() {
   local captions=(
-    "1|6|No account. No phone number. Open a link, talk."
-    "6|12|Alice starts the chat -- the link is just a random ID."
+    "1|6|Private chat, no account. Sidebar, conversations, one window."
+    "6|12|Alice starts a chat in the sidebar. The link is just a random ID."
     "12|18|Bob opens it. The broker relays only the encrypted handshake."
     "18|23|WebRTC data channel open -- the server is now out of the path."
-    "23|32|Messages are end-to-end encrypted. The server never sees them."
-    "32|38|Both sides show the same safety number -- verify it out-of-band."
+    "23|29|Messages are end-to-end encrypted. The server never sees them."
+    "29|35|Alice starts a second chat. Multiple chats, each isolated."
+    "35|41|Files too. Dropped here, sent end-to-end, never stored."
+    "41|47|Both sides show the same safety number -- verify it out-of-band."
   )
   local filter="" first=1 seg
   for entry in "${captions[@]}"; do
@@ -281,20 +373,54 @@ ffmpeg -y -hide_banner -loglevel error \
   -c:v libvpx-vp9 -b:v 0 -crf 38 -row-mt 1 -threads 0 \
   "$OUT"
 
-# ---------- 3. verify --------------------------------------------------------
+# ---------- 3. render the animated GIF --------------------------------------
+# Two-pass palette for quality: pass 1 builds a per-frame diff palette, pass 2
+# maps it. 760px wide, 12 fps, no audio, dithered. Targets the README embed --
+# small enough to render inline on GitHub while staying legible at the demo's
+# ~67s length. The WebM is the canonical full-quality artifact; this GIF is the
+# inline preview.
+log "rendering animated gif -> $GIF"
+# Pass 1: palette from the captioned webm.
+ffmpeg -y -hide_banner -loglevel error \
+  -i "$OUT" \
+  -vf "scale=760:-1:flags=lanczos,palettegen=stats_mode=diff" \
+  "$PALETTE"
+
+# Pass 2: map the palette onto the captioned webm.
+ffmpeg -y -hide_banner -loglevel error \
+  -i "$OUT" -i "$PALETTE" \
+  -lavfi "scale=760:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5" \
+  -r 12 \
+  "$GIF"
+
+rm -f "$PALETTE"
+
+# ---------- 4. verify --------------------------------------------------------
 log "final stats:"
+log "  webm:"
 ffprobe -v error \
   -select_streams v:0 \
   -show_entries stream=codec_name,width,height \
   -show_entries format=duration,size \
   -of default=noprint_wrappers=1 "$OUT"
+log "  gif:"
+ffprobe -v error \
+  -select_streams v:0 \
+  -show_entries stream=codec_name,width,height \
+  -show_entries format=duration,size \
+  -of default=noprint_wrappers=1 "$GIF"
 
-SIZE_BYTES="$(stat -c %s "$OUT" 2>/dev/null || echo 0)"
-SIZE_KB=$(( SIZE_BYTES / 1024 ))
-DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUT")"
-log "wrote $OUT  (${SIZE_KB} KB, ${DUR}s)"
+OUT_SIZE_BYTES="$(stat -c %s "$OUT" 2>/dev/null || echo 0)"
+OUT_SIZE_KB=$(( OUT_SIZE_BYTES / 1024 ))
+OUT_DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$OUT")"
+GIF_SIZE_BYTES="$(stat -c %s "$GIF" 2>/dev/null || echo 0)"
+GIF_SIZE_KB=$(( GIF_SIZE_BYTES / 1024 ))
+GIF_DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$GIF")"
+log "wrote $OUT  (${OUT_SIZE_KB} KB, ${OUT_DUR}s)"
+log "wrote $GIF  (${GIF_SIZE_KB} KB, ${GIF_DUR}s)"
 
-# Clean up the raw recording unless asked to keep it.
+# Clean up the raw recording unless asked to keep it. The palette was already
+# removed right after pass 2 above.
 if [[ "$KEEP_RAW" != "1" ]]; then
   rm -f "$RAW"
 fi

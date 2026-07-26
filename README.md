@@ -14,19 +14,23 @@ broker only relays signaling bytes; identity is TOFU with a
 per-conversation safety number that the two humans must compare over an
 independent trusted channel (v1 has no PAKE and no six-digit code).
 The server holds no persistent state, no presence table, and no
-application logs. v1 is text-only chat; file transfer exists at the
-protocol level but has no UI yet.
+application logs. v1 ships multi-conversation chat (sidebar + main
+pane), text messaging, and end-to-end encrypted file transfer; received
+files are ephemeral and never persisted to disk by the client.
 
-**Status:** v1 is implemented and tested — two real browsers (chromium +
+**Status:** v1 is implemented and tested. Two real browsers (chromium +
 firefox) connect, complete the authenticated handshake, and exchange
-messages that match a shared safety number. 427 unit tests, 5 integration
-tests (broker over a real dev server), and 24 end-to-end tests pass. v1 is
-text-only; file transfer exists at the protocol/framing layer with no UI yet.
+messages that match a shared safety number. The sidebar holds multiple
+independent chats at once, text is end-to-end encrypted, and files
+transfer the same way (received files are not stored -- save them or lose
+them when the chat closes). 462 unit tests, 5 integration tests (broker
+over a real dev server), and 17 end-to-end tests pass.
 
 ## Demo
 
-Two isolated browser profiles connect over WebRTC, exchange messages the
-server can never see, and verify a matching safety number. Recorded live with
+Two isolated browser profiles connect over WebRTC, start a second chat in
+the sidebar to show multi-conversation isolation, send a file
+end-to-end, and verify a matching safety number. Recorded live with
 agent-browser driving real Chrome at 1080p; the captions are baked in:
 
 ![Two-browser live chat demo](docs/media/chat-demo.gif)
@@ -35,7 +39,7 @@ The full-quality WebM with soundless captions is also on the
 [`demo-v1` release](https://github.com/DimitriGilbert/fck-chat-control/releases/tag/demo-v1).
 
 The broker relays only the encrypted signaling handshake, then drops out of
-the data path — from that point the two browsers talk directly.
+the data path -- from that point the two browsers talk directly.
 
 For the security properties and their precise boundaries, read
 [`docs/architecture/threat-model.md`](docs/architecture/threat-model.md)
