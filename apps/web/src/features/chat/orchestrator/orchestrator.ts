@@ -8,12 +8,17 @@ import {
 } from "@/features/chat/crypto";
 import type { EphemeralKeyPair, IdentityKeyPair } from "@/features/chat/crypto";
 import { encodeSessionId } from "@/features/chat/protocol/codec";
-import { PROTOCOL_VERSION } from "@/features/chat/protocol/limits";
+import {
+  MAX_CONCURRENT_TRANSFERS,
+  MAX_MANIFEST_MIME_BYTES,
+  MAX_MANIFEST_NAME_BYTES,
+  PROTOCOL_VERSION,
+} from "@/features/chat/protocol/limits";
 import { AuthMode, ControlSubtype, Role } from "@/features/chat/protocol/types";
 import type { ConversationId, Signature, Transcript } from "@/features/chat/protocol/types";
 import { FrameReceiver } from "@/features/chat/framing";
 import { FrameSender } from "@/features/chat/framing";
-import type { FrameTransport } from "@/features/chat/framing";
+import type { FrameTransport, ReceivedFile } from "@/features/chat/framing";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { SignalingClient } from "@/features/chat/signaling/signaling-client";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
@@ -53,6 +58,32 @@ export interface OrchestratorHandlers {
   readonly onRemoteAnswer?: (sdp: unknown) => void;
   /** Fired when the broker relay delivers a peer's ICE candidate. */
   readonly onRemoteIce?: (candidate: unknown) => void;
+  /** Fired when a transfer starts (sender or receiver side). */
+  readonly onTransferStart?: (summary: TransferSummary) => void;
+  /** Fired as bytes flow; emitted from the sender's per-chunk loop. */
+  readonly onTransferProgress?: (summary: TransferSummary) => void;
+  /** Fired when a transfer reaches `complete` (sent or received). */
+  readonly onTransferComplete?: (summary: TransferSummary) => void;
+  /** Fired when a transfer is cancelled by either side. */
+  readonly onTransferCancelled?: (transferId: number) => void;
+  /** Fired when a transfer fails (sender rejection, transport error, etc). */
+  readonly onTransferError?: (transferId: number, error: unknown) => void;
+  /** Fired when a file is fully received and hash-verified. */
+  readonly onFileReceived?: (file: ReceivedFile) => void;
+}
+
+/**
+ * Coarse, UI-facing summary of one transfer. The orchestrator emits these at
+ * the framing layer's start/progress/complete seams so the controller + UI
+ * can render a card without reaching into framing internals.
+ */
+export interface TransferSummary {
+  readonly transferId: number;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly size: number;
+  readonly bytesTransferred: number;
+  readonly direction: "sent" | "received";
 }
 
 export interface OrchestratorDeps {
@@ -123,6 +154,23 @@ export class ConversationOrchestrator {
   private frameReceiver: FrameReceiver | null = null;
   private safetyNumberValue: string | null = null;
   private safetyNumberVerified = false;
+  /**
+   * Tracks the most recently started send transfer's id, so a rejection from
+   * the framing layer (which may not carry the id) can be correlated to the
+   * right `onTransferError`/`onTransferCancelled` emission. Set per-call by
+   * {@link sendFile} via the sender's onTransferStart hook.
+   */
+  private currentTransferIdTracker: ((transferId: number) => void) | null = null;
+  /**
+   * Per-transfer metadata for in-flight sends, so the framing layer's progress
+   * hook (which only carries id + byte counts) can emit a full summary with
+   * name/mimeType/size. Populated by {@link sendFile}, drained on
+   * complete/cancel/error.
+   */
+  private readonly sendTransferMetadata = new Map<
+    number,
+    { name: string; mimeType: string; size: number }
+  >();
 
   constructor(deps: OrchestratorDeps) {
     this.brokerUrl = deps.brokerUrl;
@@ -262,6 +310,105 @@ export class ConversationOrchestrator {
     await this.repository.appendMessage(this.conversation, text, MessageDirection.Sent, timestamp);
     const bytes = new TextEncoder().encode(text);
     await this.frameSender.sendText(bytes);
+  }
+
+  /**
+   * Send a binary file to the peer over the established session. Validates
+   * Connected + manifest limits, enforces the concurrent-transfer cap, and
+   * emits start/progress/complete (or error/cancelled) via the transfer
+   * handlers. Returns the new transfer id.
+   *
+   * The framing layer chunks, hashes, and backpressures internally. This
+   * method installs a per-call progress hook on the sender so the
+   * orchestrator can surface `onTransferStart`/`onTransferProgress` to the
+   * UI while the chunk loop runs.
+   */
+  async sendFile(data: Uint8Array, name: string, mimeType: string): Promise<number> {
+    if (this.currentState !== ConnectionState.Connected || this.frameSender === null) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.NotConnected,
+        "cannot sendFile before the handshake completes",
+      );
+    }
+    const nameBytes = new TextEncoder().encode(name);
+    if (nameBytes.length > MAX_MANIFEST_NAME_BYTES) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        `name length ${nameBytes.length} exceeds MAX_MANIFEST_NAME_BYTES (${MAX_MANIFEST_NAME_BYTES})`,
+      );
+    }
+    const mimeBytes = new TextEncoder().encode(mimeType);
+    if (mimeBytes.length > MAX_MANIFEST_MIME_BYTES) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        `mimeType length ${mimeBytes.length} exceeds MAX_MANIFEST_MIME_BYTES (${MAX_MANIFEST_MIME_BYTES})`,
+      );
+    }
+    if (this.frameSender.activeTransferCount >= MAX_CONCURRENT_TRANSFERS) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.NotConnected,
+        `concurrent transfer limit (${MAX_CONCURRENT_TRANSFERS}) reached`,
+      );
+    }
+    const sender = this.frameSender;
+    const total = data.length;
+
+    // The sender is constructed with onTransferStart/onProgress hooks that
+    // route every transfer through our handlers (the transferId disambiguates
+    // concurrent sends). To associate a rejection with its id when the sender
+    // throws before/after allocation, we track the latest started id locally
+    // for the duration of this call, and register its metadata so the
+    // progress hook can emit a full summary.
+    let allocatedId: number | null = null;
+    const prevIdTracker = this.currentTransferIdTracker;
+    this.currentTransferIdTracker = (transferId: number): void => {
+      allocatedId = transferId;
+      this.sendTransferMetadata.set(transferId, { name, mimeType, size: total });
+      prevIdTracker?.(transferId);
+    };
+
+    try {
+      const transferId = await sender.sendFile(data, name, mimeType);
+      this.handlers.onTransferComplete?.({
+        transferId,
+        name,
+        mimeType,
+        size: total,
+        bytesTransferred: total,
+        direction: "sent",
+      });
+      return transferId;
+    } catch (err: unknown) {
+      const id = allocatedId;
+      if (id !== null) {
+        if (this.isCancellationError(err)) {
+          this.handlers.onTransferCancelled?.(id);
+        } else {
+          this.handlers.onTransferError?.(id, err);
+        }
+      }
+      throw err;
+    } finally {
+      this.currentTransferIdTracker = prevIdTracker;
+      if (allocatedId !== null) {
+        this.sendTransferMetadata.delete(allocatedId);
+      }
+    }
+  }
+
+  /**
+   * Cancel an in-flight transfer on both sides: the sender stops the chunk
+   * loop and the receiver drops any buffered chunks. Either side is safe to
+   * call; an unknown id is a no-op. Emits {@link onTransferCancelled} once.
+   */
+  cancelTransfer(transferId: number): void {
+    if (this.frameSender !== null) {
+      this.frameSender.cancelTransfer(transferId);
+    }
+    if (this.frameReceiver !== null) {
+      this.frameReceiver.cancelTransfer(transferId);
+    }
+    this.handlers.onTransferCancelled?.(transferId);
   }
 
   /** Compare/accept safety number (user marked compared out-of-band). */
@@ -502,6 +649,28 @@ export class ConversationOrchestrator {
       localSessionId: this.localHello.sessionId,
       peerSessionId: remoteSessionId,
       transport: toFrameTransport(this.transport),
+      onTransferStart: (transferId: number, name: string, mimeType: string, size: number): void => {
+        this.currentTransferIdTracker?.(transferId);
+        this.handlers.onTransferStart?.({
+          transferId,
+          name,
+          mimeType,
+          size,
+          bytesTransferred: 0,
+          direction: "sent",
+        });
+      },
+      onProgress: (transferId: number, bytesTransferred: number, size: number): void => {
+        const meta = this.sendTransferMetadata.get(transferId);
+        this.handlers.onTransferProgress?.({
+          transferId,
+          name: meta?.name ?? "",
+          mimeType: meta?.mimeType ?? "",
+          size: meta?.size ?? size,
+          bytesTransferred,
+          direction: "sent",
+        });
+      },
     });
     const receiver = new FrameReceiver({
       sessionKeys,
@@ -510,10 +679,10 @@ export class ConversationOrchestrator {
         void this.handleReceivedText(plaintext);
       },
       onControl: (): void => {
-        // Control frames are not part of slice 3b's surface area.
+        // Control frames are not part of this slice's surface area.
       },
-      onFileComplete: (): void => {
-        // Files are not part of slice 3b's surface area.
+      onFileComplete: (file: ReceivedFile): void => {
+        this.handleReceivedFile(file);
       },
     });
     this.frameSender = sender;
@@ -521,6 +690,32 @@ export class ConversationOrchestrator {
 
     this.setState(ConnectionState.Connected);
     this.handlers.onSafetyNumber?.(safetyNumber, this.safetyNumberVerified);
+  }
+
+  private handleReceivedFile(file: ReceivedFile): void {
+    const summary: TransferSummary = {
+      transferId: file.manifest.transferId,
+      name: file.manifest.name,
+      mimeType: file.manifest.mimeType,
+      size: file.manifest.size,
+      bytesTransferred: file.manifest.size,
+      direction: "received",
+    };
+    this.handlers.onTransferStart?.({
+      ...summary,
+      bytesTransferred: 0,
+    });
+    this.handlers.onTransferComplete?.(summary);
+    this.handlers.onFileReceived?.(file);
+  }
+
+  private isCancellationError(err: unknown): boolean {
+    if (err instanceof Error) {
+      return (
+        /cancel/i.test(err.message) || (err.name === "FramingError" && /cancel/i.test(err.message))
+      );
+    }
+    return false;
   }
 
   private async handleReceivedText(plaintext: Uint8Array): Promise<void> {

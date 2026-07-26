@@ -27,7 +27,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@fuck-eu-chat-control/ui/components/tooltip";
-import { CopyIcon, SendIcon } from "lucide-react";
+import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
+import { CopyIcon, PaperclipIcon, SendIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -42,6 +43,7 @@ import {
   formatTime,
 } from "@/features/chat/ui/chat-status";
 import type { ConnectionStateVariant } from "@/features/chat/ui/chat-status";
+import { FileTransferCard } from "@/features/chat/ui/file-transfer-card";
 import { SafetyNumberDialog } from "@/features/chat/ui/safety-number-dialog";
 
 /**
@@ -52,7 +54,12 @@ import { SafetyNumberDialog } from "@/features/chat/ui/safety-number-dialog";
 export function ChatView(): React.ReactElement {
   const { controller, state } = useChat();
   const transcriptRef = React.useRef<HTMLDivElement | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = React.useState("");
+  const [isDragOver, setIsDragOver] = React.useState(false);
+
+  const activeId = state.activeConversationId;
+  const connected = state.connectionState === ConnectionState.Connected;
 
   // Auto-scroll to the newest message when the transcript grows.
   React.useEffect(() => {
@@ -63,10 +70,8 @@ export function ChatView(): React.ReactElement {
 
   const buckets = React.useMemo(() => bucketByDay(state.messages), [state.messages]);
 
-  const canSend =
-    controller !== null &&
-    state.connectionState === ConnectionState.Connected &&
-    draft.trim().length > 0;
+  const canSend = controller !== null && connected && draft.trim().length > 0;
+  const canAttach = controller !== null && connected && activeId !== null;
 
   function handleSend(): void {
     if (controller === null) return;
@@ -97,8 +102,61 @@ export function ChatView(): React.ReactElement {
     controller.leave();
   }
 
+  function sendFiles(files: FileList | readonly File[]): void {
+    if (controller === null || activeId === null) return;
+    for (const file of Array.from(files)) {
+      void controller.sendFile(activeId, file).catch((err: unknown) => {
+        toast.error("File send failed", {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  }
+
+  function handleAttachClick(): void {
+    fileInputRef.current?.click();
+  }
+
+  function handleFilePick(event: React.ChangeEvent<HTMLInputElement>): void {
+    if (event.target.files === null) return;
+    sendFiles(event.target.files);
+    // Reset so picking the same file twice fires change again.
+    event.target.value = "";
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLDivElement>): void {
+    event.preventDefault();
+    setIsDragOver(false);
+    if (!connected) return;
+    if (event.dataTransfer.files.length === 0) return;
+    sendFiles(event.dataTransfer.files);
+  }
+
+  function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
+    if (!connected) return;
+    event.preventDefault();
+    if (!isDragOver) setIsDragOver(true);
+  }
+
+  function handleDragLeave(event: React.DragEvent<HTMLDivElement>): void {
+    // Clear only when the pointer leaves the container entirely (the
+    // relatedTarget is outside, or null when leaving the window).
+    const next = event.relatedTarget;
+    if (next === null || !event.currentTarget.contains(next as Node | null)) {
+      setIsDragOver(false);
+    }
+  }
+
+  const transfers = state.active?.transfers ?? [];
+
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col">
+    <div
+      data-drop-zone="chat"
+      className="mx-auto flex h-full min-h-0 w-full max-w-3xl flex-col"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+    >
       <StatusBar
         connectionState={state.connectionState}
         safetyNumber={state.safetyNumber}
@@ -110,8 +168,13 @@ export function ChatView(): React.ReactElement {
 
       <InvitationBanner />
 
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {state.messages.length === 0 ? (
+      <div
+        className={cn(
+          "relative min-h-0 flex-1 overflow-hidden",
+          isDragOver && "ring-1 ring-inset ring-ring/40",
+        )}
+      >
+        {state.messages.length === 0 && transfers.length === 0 ? (
           <NoMessages />
         ) : (
           <MessageScrollerProvider>
@@ -130,25 +193,70 @@ export function ChatView(): React.ReactElement {
                       ))}
                     </React.Fragment>
                   ))}
+                  {transfers.length > 0 && (
+                    <MessageScrollerItem>
+                      <TransfersSection
+                        transfers={transfers}
+                        controller={controller}
+                        activeId={activeId}
+                      />
+                    </MessageScrollerItem>
+                  )}
                 </MessageScrollerContent>
               </MessageScrollerViewport>
             </MessageScroller>
           </MessageScrollerProvider>
         )}
+        {isDragOver && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <span className="bg-background text-foreground border-border rounded-none border px-3 py-1.5 text-xs">
+              Drop files to send end-to-end encrypted
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="border-t border-border p-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={handleFilePick}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
         <InputGroup>
+          <InputGroupAddon align="inline-start">
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <InputGroupButton
+                      size="icon-sm"
+                      variant={connected ? "outline" : "ghost"}
+                      onClick={handleAttachClick}
+                      disabled={!canAttach}
+                      aria-label="Attach files"
+                    />
+                  }
+                >
+                  <PaperclipIcon />
+                </TooltipTrigger>
+                <TooltipContent>Attach files</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </InputGroupAddon>
           <InputGroupTextarea
             value={draft}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDraft(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              state.connectionState === ConnectionState.Connected
+              connected
                 ? "Write a message…  (Enter to send, Shift+Enter for newline)"
                 : "Waiting to connect…"
             }
-            disabled={state.connectionState !== ConnectionState.Connected}
+            disabled={!connected}
             aria-label="Message"
             rows={1}
           />
@@ -159,9 +267,7 @@ export function ChatView(): React.ReactElement {
                   render={
                     <InputGroupButton
                       size="icon-sm"
-                      variant={
-                        state.connectionState === ConnectionState.Connected ? "default" : "ghost"
-                      }
+                      variant={connected ? "default" : "ghost"}
                       onClick={handleSend}
                       disabled={!canSend}
                       aria-label="Send message"
@@ -177,6 +283,52 @@ export function ChatView(): React.ReactElement {
         </InputGroup>
       </div>
     </div>
+  );
+}
+
+/**
+ * Render the session's transfer list as a stack of attachment cards. Sent
+ * transfers align to the trailing edge (matching sent bubbles); received
+ * transfers align to the leading edge and carry the ephemeral-storage
+ * warning.
+ */
+function TransfersSection(props: {
+  readonly transfers: readonly import("@/features/chat/runtime/transfer-state").TransferState[];
+  readonly controller: import("@/features/chat/runtime/chat-controller").ChatController | null;
+  readonly activeId: import("@/features/chat/protocol/types").ConversationId | null;
+}): React.ReactElement {
+  const { transfers, controller, activeId } = props;
+  return (
+    <Message align="start">
+      <MessageContent>
+        <div className="flex flex-col gap-1.5">
+          {transfers.map((t) => {
+            const receivedFile =
+              controller !== null && activeId !== null
+                ? controller.getReceivedFile(activeId, t.id)
+                : null;
+            return (
+              <FileTransferCard
+                key={t.id}
+                name={t.name}
+                mimeType={t.mimeType}
+                size={t.size}
+                bytesTransferred={t.bytesTransferred}
+                status={t.status}
+                direction={t.direction}
+                error={t.error}
+                file={receivedFile}
+                onCancel={
+                  controller !== null && activeId !== null
+                    ? (): void => controller.cancelTransfer(activeId, t.id)
+                    : undefined
+                }
+              />
+            );
+          })}
+        </div>
+      </MessageContent>
+    </Message>
   );
 }
 

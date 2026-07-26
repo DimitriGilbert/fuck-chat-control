@@ -80,6 +80,7 @@ export class FrameSender {
         transferId,
         0,
       );
+      this.config.onTransferStart?.(transferId, name, mimeType, data.length);
       for (let i = 0; i < chunkCount; i++) {
         this.assertNotTearingDown(transferId);
         await this.waitForDrain(transferId);
@@ -87,6 +88,7 @@ export class FrameSender {
         const { start, end } = chunkBoundaries(data.length, i);
         const chunk = data.subarray(start, end);
         await this.sendEncryptedFrame(FrameType.FileChunk, chunk, transferId, i);
+        this.config.onProgress?.(transferId, end, data.length);
       }
     } finally {
       this.activeTransfers.delete(transferId);

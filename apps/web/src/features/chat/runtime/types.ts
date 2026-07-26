@@ -2,7 +2,9 @@ import type { ConversationId } from "@/features/chat/protocol/types";
 import type { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
 import type { ConversationMessage, ConversationRecord } from "@/features/chat/store";
+import type { ReceivedFile } from "@/features/chat/framing";
 
+import type { TransferState } from "./transfer-state";
 import type { WebRtcBridge } from "./webrtc-bridge";
 
 /**
@@ -44,6 +46,19 @@ export interface ChatSession {
   lastMessagePreview: string | null;
   /** Timestamp of the most recent message; null when there are none. */
   lastMessageAt: number | null;
+  /**
+   * Live transfer state for this session: queued/sending/receiving/complete/
+   * cancelled/error entries for every file sent or received. The controller
+   * mutates this array (immutably) as the orchestrator emits transfer events.
+   */
+  transfers: readonly TransferState[];
+  /**
+   * Side-store (NOT in the React snapshot) of received file bytes keyed by
+   * transfer id. Populated by the orchestrator's onFileReceived handler; read
+   * by the controller's getReceivedFile for the UI's Save/thumbnail action.
+   * Bytes live in memory only and are cleared on teardown.
+   */
+  receivedFiles: Map<number, ReceivedFile>;
 }
 
 /**
@@ -81,6 +96,8 @@ export interface ActiveSessionState {
   readonly draft: string;
   readonly lastMessagePreview: string | null;
   readonly lastMessageAt: number | null;
+  /** Live transfer list mirror of {@link ChatSession.transfers}. */
+  readonly transfers: readonly TransferState[];
 }
 
 /**
@@ -142,5 +159,6 @@ export function activeSessionView(session: ChatSession | null): ActiveSessionSta
     draft: session.draft,
     lastMessagePreview: session.lastMessagePreview,
     lastMessageAt: session.lastMessageAt,
+    transfers: session.transfers,
   };
 }

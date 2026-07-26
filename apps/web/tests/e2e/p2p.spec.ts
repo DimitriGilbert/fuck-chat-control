@@ -135,4 +135,99 @@ test.describe("two-context P2P", () => {
       await pair.close();
     }
   });
+
+  test("a text file sent A->B renders an attachment card on B with a Save action", async ({
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const pair = await establishPeerPair(browser);
+
+    try {
+      await expect(
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      // Drive a file send through a synthetic drop on the chat drop zone. The
+      // native file picker is hard to drive from Playwright, so we dispatch a
+      // Drop event carrying a real File directly onto the chat-view container
+      // (marked with data-drop-zone="chat"). The component's handleDrop reads
+      // dataTransfer.files and calls controller.sendFile for each.
+      await pair.pageA.evaluate(async () => {
+        const file = new File(["hello from A"], "shared.txt", { type: "text/plain" });
+        const dropZone = document.querySelector("[data-drop-zone='chat']") as HTMLElement | null;
+        if (dropZone === null) throw new Error("chat drop zone not found");
+        const transfer = new DataTransfer();
+        // The drop handler reads .files; override it with our synthetic File
+        // list since DataTransfer constructed in JS cannot be populated via
+        // the usual drag gestures.
+        Object.defineProperty(transfer, "files", { value: [file], configurable: true });
+        const evt = new DragEvent("drop", {
+          dataTransfer: transfer,
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(evt, "dataTransfer", { value: transfer, configurable: true });
+        dropZone.dispatchEvent(evt);
+      });
+
+      // B's transcript shows the attachment card with the filename + a Save
+      // button. Scope to the main pane so the sidebar does not match.
+      await expect(
+        pair.pageB.getByRole("main").getByText("shared.txt", { exact: true }),
+      ).toBeVisible({ timeout: 15_000 });
+      await expect(
+        pair.pageB.getByRole("main").getByRole("button", { name: /Save shared\.txt/ }),
+      ).toBeVisible({ timeout: 10_000 });
+
+      // A's own transcript shows the sent card too.
+      await expect(
+        pair.pageA.getByRole("main").getByText("shared.txt", { exact: true }),
+      ).toBeVisible({ timeout: 5_000 });
+    } finally {
+      await pair.close();
+    }
+  });
+
+  test("an image sent A->B renders a thumbnail on B's attachment card", async ({ browser }) => {
+    test.setTimeout(90_000);
+    const pair = await establishPeerPair(browser);
+
+    try {
+      await expect(
+        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+      ).toBeVisible({ timeout: 45_000 });
+
+      // 1x1 PNG bytes.
+      const pngBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
+      await pair.pageA.evaluate(async (base64) => {
+        const bin = atob(base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const file = new File([bytes], "pixel.png", { type: "image/png" });
+        const dropZone = document.querySelector("[data-drop-zone='chat']") as HTMLElement | null;
+        if (dropZone === null) throw new Error("chat drop zone not found");
+        const transfer = new DataTransfer();
+        Object.defineProperty(transfer, "files", { value: [file], configurable: true });
+        const evt = new DragEvent("drop", {
+          dataTransfer: transfer,
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(evt, "dataTransfer", { value: transfer, configurable: true });
+        dropZone.dispatchEvent(evt);
+      }, pngBase64);
+
+      // B's card shows the image filename and a thumbnail <img>.
+      await expect(
+        pair.pageB.getByRole("main").getByText("pixel.png", { exact: true }),
+      ).toBeVisible({ timeout: 15_000 });
+      // The thumbnail is an <img> inside the attachment media slot.
+      await expect(pair.pageB.getByRole("main").locator("img").first()).toBeVisible({
+        timeout: 10_000,
+      });
+    } finally {
+      await pair.close();
+    }
+  });
 });

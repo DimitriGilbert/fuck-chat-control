@@ -27,6 +27,23 @@ export interface FrameSenderConfig {
   readonly localSessionId: SessionId;
   readonly peerSessionId: SessionId;
   readonly transport: FrameTransport;
+  /**
+   * Fired once after the transfer id is allocated and the manifest has been
+   * sent, before the chunk loop begins. Additive: callers that omit it see no
+   * change. Used by the orchestrator to surface `onTransferStart`.
+   */
+  readonly onTransferStart?: (
+    transferId: number,
+    name: string,
+    mimeType: string,
+    size: number,
+  ) => void;
+  /**
+   * Optional per-chunk progress signal. Invoked inside the chunk loop with the
+   * transfer id, the cumulative plaintext bytes sent so far, and the total
+   * size. Additive: existing callers that omit it see no change.
+   */
+  readonly onProgress?: (transferId: number, bytesTransferred: number, total: number) => void;
 }
 
 export interface FrameReceiverHandlers {

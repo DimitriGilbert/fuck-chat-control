@@ -1,5 +1,10 @@
 import { Role } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
+import {
+  MAX_CONCURRENT_TRANSFERS,
+  MAX_MANIFEST_MIME_BYTES,
+  MAX_MANIFEST_NAME_BYTES,
+} from "@/features/chat/protocol/limits";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "@/features/chat/store";
@@ -9,6 +14,8 @@ import type {
   ConversationRepository,
   ImportResult,
 } from "@/features/chat/store";
+import type { ReceivedFile } from "@/features/chat/framing";
+import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
 
 import type { AtRestKeyManager } from "./at-rest-key-manager";
 import type { AtRestKey } from "@/features/chat/crypto";
@@ -109,6 +116,26 @@ export interface ChatController {
   sendText(id: ConversationId, text: string): Promise<void>;
   sendText(text: string): Promise<void>;
   /**
+   * Per-session file send. Reads the File into memory, then drives the
+   * orchestrator's sendFile. Respects the concurrent-transfer cap and the
+   * buffered-byte limit: if sending now would exceed either, the file is
+   * queued (status `queued`) and starts when a slot frees.
+   *
+   * Returns the transfer id (allocated immediately for in-flight starts, or
+   * assigned later for queued ones — callers should not assume the id is
+   * non-null for queue ordering; the snapshot is the source of truth).
+   */
+  sendFile(id: ConversationId, file: File): Promise<number>;
+  /** Cancel an in-flight or queued transfer on a session. */
+  cancelTransfer(id: ConversationId, transferId: number): void;
+  /**
+   * Fetch a received file's bytes by transfer id. Returns null if the file is
+   * not present (e.g. already cleared, or not a received-direction transfer).
+   * The bytes live in memory for the session's lifetime; they are never
+   * persisted (per the threat model).
+   */
+  getReceivedFile(id: ConversationId, transferId: number): ReceivedFile | null;
+  /**
    * Per-session history. No-arg returns the active session's history (empty
    * when there is none); the id form returns that session's history.
    */
@@ -147,6 +174,13 @@ export interface ChatController {
    * receive would. NOT part of the public contract.
    */
   __receiveMessageForTest(id: ConversationId, text: string): Promise<void>;
+  /**
+   * Test seam: attach a loopback transport to a session's orchestrator so two
+   * controllers can run the real crypto handshake against each other without
+   * WebRTC. The caller cross-wires a pair via {@link linkLoopbackPair} and
+   * attaches each side. NOT part of the public contract.
+   */
+  __attachTransportForTest(id: ConversationId, transport: PeerTransport): void;
 }
 
 const EMPTY_STATE: ChatControllerState = {
@@ -279,11 +313,50 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       }
       session.unread = 0;
     }
+    // Drain queued sends whenever a session's transfer list changes: a
+    // just-finished send frees a slot. The drain is a no-op when the queue
+    // is empty or the cap is saturated.
+    drainSendQueue(session.id);
     emit(null);
   };
 
   // Read markers track "the user has seen up to this timestamp" per session.
   const readMarkers = new Map<ConversationId, number>();
+
+  /**
+   * Per-session registry of received file bytes, keyed by transfer id. The
+   * orchestrator's onFileReceived handler populates this; the UI reads it via
+   * {@link getReceivedFile} to render Save/thumbnail. Bytes live in memory
+   * only (per the threat model: files are never persisted). Cleared on
+   * teardown.
+   *
+   * Stored on the session object (not the snapshot) so it never reaches React
+   * state; the controller reads it from the live session.
+   */
+  /**
+   * Per-session transfer queue. When a send would exceed
+   * {@link MAX_CONCURRENT_TRANSFERS}, the request is appended here and
+   * started when an in-flight send completes. Each entry carries the
+   * pre-read bytes + metadata so the dequeue path is synchronous.
+   */
+  interface QueuedSend {
+    readonly data: Uint8Array;
+    readonly name: string;
+    readonly mimeType: string;
+    readonly size: number;
+    /**
+     * The synthetic id assigned at queue time so the snapshot has a stable
+     * handle before the real orchestrator id is allocated. The orchestrator's
+     * real id is recorded in the snapshot when the send eventually starts.
+     */
+    readonly queuedId: number;
+    /** Resolves with the orchestrator id once the send starts; null on drop. */
+    readonly resolve: (transferId: number) => void;
+    /** Resolves with null if the queued send is cancelled before start. */
+    readonly reject: (err: unknown) => void;
+  }
+  const sendQueues = new Map<ConversationId, QueuedSend[]>();
+  let nextQueuedId = 1;
 
   function syncActiveReadMarker(session: ChatSession): void {
     const latest = session.lastMessageAt ?? -Infinity;
@@ -393,6 +466,84 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     return session;
   }
 
+  /**
+   * Count transfers currently submitted to the orchestrator (sending or
+   * receiving). Queued entries are excluded: they have not entered the
+   * framing layer yet. Used by {@link drainSendQueue} to decide whether a
+   * slot is free for the next queued send.
+   */
+  function countInFlightTransfers(session: ChatSession): number {
+    let n = 0;
+    for (const t of session.transfers) {
+      if (t.status === "sending" || t.status === "receiving") {
+        n++;
+      }
+    }
+    return n;
+  }
+
+  /**
+   * Try to start the next queued send for a session (if any) now that a slot
+   * has freed. Idempotent: a no-op when the queue is empty or the cap is
+   * still saturated.
+   */
+  function drainSendQueue(id: ConversationId): void {
+    const session = sessions.get(id);
+    if (session === undefined) return;
+    const queue = sendQueues.get(id);
+    if (queue === undefined || queue.length === 0) return;
+    if (countInFlightTransfers(session) >= MAX_CONCURRENT_TRANSFERS) return;
+    const next = queue.shift()!;
+    if (queue.length === 0) {
+      sendQueues.delete(id);
+    }
+    void startSend(id, next).catch((err: unknown) => {
+      // The queued send's reject is handled inside startSend; this catch is
+      // for unexpected throws from startSend itself.
+      void err;
+    });
+  }
+
+  /**
+   * Drive one send through the orchestrator. Reads the bytes, calls
+   * sendFile, and reconciles the queued-id placeholder in the snapshot with
+   * the real orchestrator id once the send starts.
+   */
+  async function startSend(id: ConversationId, queued: QueuedSend): Promise<void> {
+    const session = sessions.get(id);
+    if (session === undefined) {
+      queued.reject(new Error(`no live session for conversation ${id}`));
+      return;
+    }
+    // Validate name/mime length up front for a clear error before involving
+    // the orchestrator (the orchestrator also enforces these, but surfacing
+    // the error here keeps queued sends from blocking on a late rejection).
+    const nameBytes = utf8Length(queued.name);
+    if (nameBytes > MAX_MANIFEST_NAME_BYTES) {
+      queued.reject(new Error(`name length ${nameBytes} exceeds ${MAX_MANIFEST_NAME_BYTES}`));
+      return;
+    }
+    const mimeBytes = utf8Length(queued.mimeType);
+    if (mimeBytes > MAX_MANIFEST_MIME_BYTES) {
+      queued.reject(new Error(`mimeType length ${mimeBytes} exceeds ${MAX_MANIFEST_MIME_BYTES}`));
+      return;
+    }
+    try {
+      // Remove the queued placeholder before starting so the snapshot tracks
+      // the real transfer via the orchestrator's onTransferStart. The queued
+      // entry was added in sendFile; we drop it here and let the start event
+      // re-introduce it with direction=sent + status=sending.
+      session.transfers = session.transfers.filter((t) => t.id !== queued.queuedId);
+      const realId = await session.orchestrator.sendFile(queued.data, queued.name, queued.mimeType);
+      queued.resolve(realId);
+    } catch (err: unknown) {
+      // Remove the queued placeholder if the start never happened.
+      session.transfers = session.transfers.filter((t) => t.id !== queued.queuedId);
+      onSessionChange(session);
+      queued.reject(err);
+    }
+  }
+
   return {
     async startConversation(): Promise<{ invitation: string }> {
       assertNotDisposed(disposed);
@@ -459,6 +610,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       sessions.delete(target);
       holders.delete(target);
       readMarkers.delete(target);
+      sendQueues.delete(target);
       if (activeConversationId === target) {
         // Do NOT auto-select another session — the caller decides what to
         // surface next. The empty state is a valid and expected outcome.
@@ -475,6 +627,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       sessions.clear();
       holders.clear();
       readMarkers.clear();
+      sendQueues.clear();
       activeConversationId = null;
       emit(null);
     },
@@ -496,6 +649,93 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         session.lastMessageAt = last.timestamp;
       }
       onSessionChange(session);
+    },
+
+    async sendFile(id: ConversationId, file: File): Promise<number> {
+      assertNotDisposed(disposed);
+      const session = findSessionOrThrow(id);
+      if (session.connectionState !== ConnectionState.Connected) {
+        throw new Error("cannot sendFile before the session is connected");
+      }
+      const buffer = await file.arrayBuffer();
+      const data = new Uint8Array(buffer);
+      const name = file.name === "" ? "file.bin" : file.name;
+      const mimeType = file.type === "" ? "application/octet-stream" : file.type;
+      const nameBytes = utf8Length(name);
+      if (nameBytes > MAX_MANIFEST_NAME_BYTES) {
+        throw new Error(`name length ${nameBytes} exceeds ${MAX_MANIFEST_NAME_BYTES}`);
+      }
+      const mimeBytes = utf8Length(mimeType);
+      if (mimeBytes > MAX_MANIFEST_MIME_BYTES) {
+        throw new Error(`mimeType length ${mimeBytes} exceeds ${MAX_MANIFEST_MIME_BYTES}`);
+      }
+      // Backpressure gate: the orchestrator is the authority on the
+      // concurrent-transfer cap (it tracks active sends synchronously). We
+      // attempt the send; if it rejects with the cap, we queue instead. This
+      // keeps the controller's view honest with the framing layer's actual
+      // in-flight count, even under burst sends.
+      try {
+        const transferId = await session.orchestrator.sendFile(data, name, mimeType);
+        return transferId;
+      } catch (err: unknown) {
+        if (!isConcurrentCapError(err)) throw err;
+        // Queue and start when a slot frees.
+        const queuedId = nextQueuedId++;
+        session.transfers = session.transfers.concat({
+          id: queuedId,
+          name,
+          mimeType,
+          size: data.length,
+          direction: "sent",
+          bytesTransferred: 0,
+          status: "queued",
+        });
+        onSessionChange(session);
+        const queue = sendQueues.get(id) ?? [];
+        const queued = new Promise<number>((resolve, reject): void => {
+          queue.push({ data, name, mimeType, size: data.length, queuedId, resolve, reject });
+        });
+        sendQueues.set(id, queue);
+        return queued;
+      }
+    },
+
+    cancelTransfer(id: ConversationId, transferId: number): void {
+      assertNotDisposed(disposed);
+      const session = sessions.get(id);
+      if (session === undefined) return;
+      // Cancel a queued send (never entered the orchestrator) by dropping it
+      // from the queue and rejecting its promise via a synthetic placeholder.
+      const queue = sendQueues.get(id);
+      if (queue !== undefined) {
+        const idx = queue.findIndex((q) => q.queuedId === transferId);
+        if (idx !== -1) {
+          const [removed] = queue.splice(idx, 1);
+          if (queue.length === 0) sendQueues.delete(id);
+          session.transfers = session.transfers
+            .filter((t) => t.id !== transferId)
+            .concat({
+              id: transferId,
+              name: removed!.name,
+              mimeType: removed!.mimeType,
+              size: removed!.size,
+              direction: "sent",
+              bytesTransferred: 0,
+              status: "cancelled",
+            });
+          onSessionChange(session);
+          removed!.reject(new Error("transfer cancelled"));
+          return;
+        }
+      }
+      // Otherwise delegate to the orchestrator (sender + receiver).
+      session.orchestrator.cancelTransfer(transferId);
+    },
+
+    getReceivedFile(id: ConversationId, transferId: number): ReceivedFile | null {
+      const session = sessions.get(id);
+      if (session === undefined) return null;
+      return session.receivedFiles.get(transferId) ?? null;
     },
 
     async getHistory(id?: ConversationId): Promise<ConversationMessage[]> {
@@ -638,6 +878,16 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       session.lastMessageAt = message.timestamp;
       onSessionChange(session);
     },
+
+    __attachTransportForTest(id: ConversationId, transport: PeerTransport): void {
+      const session = sessions.get(id);
+      if (session === undefined) return;
+      // Notify presence + attach: mirrors what the WebRTC bridge does once
+      // the data channel opens. Driving this from a test lets two controllers
+      // run the real crypto handshake over a loopback transport pair.
+      session.orchestrator.notifyPeerJoined();
+      session.orchestrator.attachTransport(transport);
+    },
   };
 
   function emitErrorMessage(err: unknown): void {
@@ -702,4 +952,23 @@ function hexFromId(id: ConversationId): string {
     hex += id[i].toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+/** UTF-8 byte length of a string (mirrors how the manifest encoder measures). */
+function utf8Length(value: string): number {
+  return TEXT_ENCODER.encode(value).length;
+}
+
+const TEXT_ENCODER = new TextEncoder();
+
+/**
+ * True if the orchestrator rejected because the concurrent-transfer cap was
+ * reached. The controller catches this to queue the send rather than surface
+ * the error to the caller.
+ */
+function isConcurrentCapError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return /concurrent transfer limit/i.test(err.message);
+  }
+  return false;
 }

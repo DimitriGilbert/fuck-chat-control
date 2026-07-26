@@ -1,7 +1,10 @@
 import { Role } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 import { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
-import type { OrchestratorHandlers } from "@/features/chat/orchestrator/orchestrator";
+import type {
+  OrchestratorHandlers,
+  TransferSummary,
+} from "@/features/chat/orchestrator/orchestrator";
 import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
@@ -11,8 +14,10 @@ import type {
   ConversationRepository,
 } from "@/features/chat/store";
 import type { IdentityKeyPair } from "@/features/chat/crypto";
+import type { ReceivedFile } from "@/features/chat/framing";
 
 import type { ChatSession } from "./types";
+import { applyTransferEvent, type TransferEvent } from "./transfer-state";
 import { WebRtcBridge } from "./webrtc-bridge";
 
 /**
@@ -58,6 +63,18 @@ export function buildOrchestrator(
   holder: SessionHolder,
   onChange: SessionChangeCallback,
 ): ConversationOrchestrator {
+  /**
+   * Apply a transfer event to the holder's session and notify. Late events
+   * (after the session was torn down) are dropped: holder.session is null'd
+   * on teardown.
+   */
+  function applyTransfer(event: TransferEvent): void {
+    const session = holder.session;
+    if (session === null) return;
+    session.transfers = applyTransferEvent(session.transfers, event);
+    onChange(session);
+  }
+
   const handlers: OrchestratorHandlers = {
     onStateChange: (next: ConnectionState): void => {
       if (holder.session !== null) {
@@ -85,6 +102,46 @@ export function buildOrchestrator(
       void error;
       if (holder.session !== null) {
         onChange(holder.session);
+      }
+    },
+    onTransferStart: (summary: TransferSummary): void => {
+      applyTransfer({
+        type: "start",
+        id: summary.transferId,
+        name: summary.name,
+        mimeType: summary.mimeType,
+        size: summary.size,
+        direction: summary.direction,
+      });
+    },
+    onTransferProgress: (summary: TransferSummary): void => {
+      applyTransfer({
+        type: "progress",
+        id: summary.transferId,
+        bytesTransferred: summary.bytesTransferred,
+      });
+    },
+    onTransferComplete: (summary: TransferSummary): void => {
+      applyTransfer({ type: "complete", id: summary.transferId });
+    },
+    onTransferCancelled: (transferId: number): void => {
+      applyTransfer({ type: "cancelled", id: transferId });
+    },
+    onTransferError: (transferId: number, error: unknown): void => {
+      applyTransfer({
+        type: "error",
+        id: transferId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    },
+    onFileReceived: (file: ReceivedFile): void => {
+      // The received-direction transfer is already mirrored via the start/
+      // complete summaries the orchestrator emits alongside onFileReceived.
+      // Stash the bytes on the session (NOT in the snapshot) so the UI can
+      // fetch them on demand via the controller's getReceivedFile.
+      const session = holder.session;
+      if (session !== null) {
+        session.receivedFiles.set(file.manifest.transferId, file);
       }
     },
   };
@@ -154,6 +211,8 @@ export function wireBridge(params: {
     record: null,
     lastMessagePreview: null,
     lastMessageAt: null,
+    transfers: [],
+    receivedFiles: new Map<number, ReceivedFile>(),
   };
 
   // Populate the holder BEFORE the caller starts the bridge so any synchronous
