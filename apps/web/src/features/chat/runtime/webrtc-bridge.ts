@@ -43,6 +43,9 @@ interface NegotiationState {
   transportReadyFired: boolean;
 }
 
+/** Grace window between data-channel open and broker-socket drop, per PRD. */
+const BROKER_TEARDOWN_GRACE_MS = 2_000;
+
 /**
  * Connects ONE conversation's orchestrator to real WebRTC + signaling. The
  * orchestrator owns the application-layer handshake; the bridge owns the
@@ -74,6 +77,14 @@ export class WebRtcBridge {
     transportReadyFired: false,
   };
   private closed = false;
+  /**
+   * Set once the P2P data channel has carried its first open event and the
+   * bridge has fired `transportReady`. While true, the broker socket's close
+   * is expected (it is the post-handshake teardown) and must not be surfaced
+   * to the orchestrator as a peer drop.
+   */
+  private suppressSignalingClose = false;
+  private brokerTeardownTimer: ReturnType<typeof setTimeout> | null = null;
 
   public constructor(options: WebRtcBridgeOptions) {
     this.options = options;
@@ -96,14 +107,33 @@ export class WebRtcBridge {
           void this.handleRemoteOffer(sdp);
         },
         onAnswer: (sdp: unknown): void => {
-          void this.adapter.setRemoteDescription(sdp as RTCSessionDescriptionInit);
+          // The matching answer to our in-flight offer arrived; the offer is
+          // no longer in flight. Release both the bridge's local flag and the
+          // glare resolver's flag so a subsequent remote offer is answered
+          // (rather than treated as a glare collision).
+          this.nego.localOfferInFlight = false;
+          this.signaling.endOffer();
+          void this.adapter
+            .setRemoteDescription(sdp as RTCSessionDescriptionInit)
+            .catch(() => {
+              // best-effort; the connection will fail and the orchestrator surfaces it
+            });
         },
         onIce: (candidate: unknown): void => {
-          void this.adapter.addIceCandidate(candidate as RTCIceCandidateInit);
+          // addIceCandidate resolves immediately when buffered pre-remote-desc;
+          // any rejection (late/invalid candidate surfacing through the drain
+          // path) is swallowed here so it never becomes an unhandled rejection.
+          void this.adapter.addIceCandidate(candidate as RTCIceCandidateInit).catch(() => {
+            // best-effort
+          });
         },
         onClose: (): void => {
-          // Signaling socket closed (peer dropped, navigated away, or broker
-          // restarted). Surface so the orchestrator can move to Disconnected.
+          // Signaling socket closed. If we tore it down ourselves after the P2P
+          // data channel opened, this is the expected post-handshake close — do
+          // NOT surface it as a peer drop. Otherwise (peer dropped, navigated
+          // away, broker restarted) surface so the orchestrator moves to
+          // Disconnected and offers retry.
+          if (this.suppressSignalingClose) return;
           this.options.onSignalingClosed?.();
         },
         onError: (): void => {
@@ -135,6 +165,10 @@ export class WebRtcBridge {
   public close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.brokerTeardownTimer !== null) {
+      clearTimeout(this.brokerTeardownTimer);
+      this.brokerTeardownTimer = null;
+    }
     try {
       this.signaling.close();
     } catch {
@@ -173,12 +207,17 @@ export class WebRtcBridge {
     try {
       const offer = await this.adapter.createOffer();
       await this.adapter.setLocalDescription(offer);
-      // beginOffer is implicit in sendOffer; endOffer after local desc settles.
+      // sendOffer marks the glare resolver's in-flight flag as true so a
+      // colliding remote offer is decided by the perfect-negotiation policy
+      // (impolite ignores, polite rolls back). The flag stays true until the
+      // matching answer arrives or we roll back — do NOT endOffer() here.
       this.signaling.sendOffer(offer);
-      this.signaling.endOffer();
     } catch {
       this.nego.localOfferInFlight = false;
       this.nego.channel = null;
+      // Reset the glare resolver's in-flight flag too so a later remote offer
+      // is answered rather than treated as a glare collision.
+      this.signaling.endOffer();
     }
   }
 
@@ -187,12 +226,27 @@ export class WebRtcBridge {
     const outcome = this.signaling.resolveRemoteOffer();
     if (outcome === "ignore") return;
     // We will answer. If we have a local offer in flight, the glare resolver
-    // said we are the polite side — roll back, then accept the remote offer.
+    // said we are the polite side — roll back the local SDP, then accept the
+    // remote offer. setLocalDescription({type:"rollback"}) is the
+    // perfect-negotiation primitive that returns the RTCPeerConnection to a
+    // stable state so setRemoteDescription succeeds.
     if (this.nego.localOfferInFlight) {
-      // Rollback: signal an empty local description to the adapter. The
-      // signaling glare resolver already transitioned; we just reset our
-      // local SDP so setRemoteDescription succeeds.
+      try {
+        await this.adapter.setLocalDescription({ type: "rollback" });
+      } catch {
+        // A failed rollback is fatal to the negotiation — the
+        // RTCPeerConnection is in an indeterminate state. Surface as a peer
+        // drop so the orchestrator moves to Disconnected; do NOT proceed to
+        // setRemoteDescription (it would fail with InvalidStateError).
+        this.nego.localOfferInFlight = false;
+        this.signaling.endOffer();
+        this.options.onPeerLeave?.();
+        return;
+      }
       this.nego.localOfferInFlight = false;
+      // The local offer is gone; release the glare resolver's in-flight flag
+      // so it answers (not ignores) the next remote offer.
+      this.signaling.endOffer();
     }
     try {
       await this.adapter.setRemoteDescription(sdp as RTCSessionDescriptionInit);
@@ -255,12 +309,27 @@ export class WebRtcBridge {
     }
     this.nego.transportReadyFired = true;
     this.options.transportReady(toPeerTransport(channel));
-    // v1 keeps the broker signaling socket open after the p2p data channel
-    // opens, so that a real peer-leave (broker socket close) is detected
-    // promptly and surfaces Disconnected + Retry. The data path is still
-    // purely p2p — the broker only relays SDP/ICE, never application bytes.
-    // (Dropping the broker from the signaling path post-handshake is tracked
-    // as scenario 10 / a follow-up; it requires a controllable broker and a
-    // distinct leave-detection mechanism.)
+    // Once the data channel is carrying bytes, the broker is out of the data
+    // path entirely (PRD: broker is signaling-only). Hold the socket open for
+    // a short grace window so a channel that drops instantly can re-signal
+    // without a fresh join race, then close it cleanly. The close is
+    // initiated locally, so the bridge suppresses the otherwise-spurious
+    // onSignalingClosed notification (see onClose above) — a real peer drop
+    // later is observed via the data channel's own `failed`/`closed`
+    // connection-state transition.
+    this.suppressSignalingClose = true;
+    this.brokerTeardownTimer = setTimeout(() => {
+      this.brokerTeardownTimer = null;
+      // The grace expired. signalP2pOpen tells the broker `leave` (the broker
+      // explicitly does NOT relay this as a peer-left — see
+      // BrokerConnection.handleLeave) and then closes the socket. The
+      // resulting socket `onclose` is suppressed by `suppressSignalingClose`
+      // so the orchestrator does not treat our own teardown as a drop.
+      try {
+        this.signaling.signalP2pOpen();
+      } catch {
+        // best-effort; the data channel is already open so the session is fine
+      }
+    }, BROKER_TEARDOWN_GRACE_MS);
   }
 }

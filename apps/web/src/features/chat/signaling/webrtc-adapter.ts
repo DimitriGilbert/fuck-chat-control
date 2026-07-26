@@ -116,6 +116,13 @@ export class WebRtcAdapter {
   private readonly peerConnection: RTCPeerConnection;
   private readonly handlers: WebRtcAdapterHandlers;
   private dataChannel: RTCDataChannel | null = null;
+  /**
+   * ICE candidates that arrived before the remote SDP was applied. The browser
+   * rejects `addIceCandidate` until `setRemoteDescription` has settled, so any
+   * candidate trickled during that window is buffered here and drained once the
+   * remote description is in place.
+   */
+  private pendingIceCandidates: RTCIceCandidateInit[] = [];
 
   public constructor(options: WebRtcAdapterOptions = {}) {
     this.handlers = options;
@@ -152,9 +159,28 @@ export class WebRtcAdapter {
     description: RTCSessionDescription | RTCSessionDescriptionInit,
   ): Promise<void> {
     await this.peerConnection.setRemoteDescription(description);
+    // Now that the remote description is set, any ICE candidates that arrived
+    // early can be applied. Late or invalid candidates (e.g. from a stale
+    // renegotiation) are swallowed so a bad candidate never fails the whole
+    // handshake — the ICE agent will simply keep gathering.
+    const buffered = this.pendingIceCandidates;
+    this.pendingIceCandidates = [];
+    for (const candidate of buffered) {
+      try {
+        await this.peerConnection.addIceCandidate(candidate);
+      } catch {
+        // Swallow: late/invalid candidates must not fail the handshake.
+      }
+    }
   }
 
   public async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    // If the remote description has not been applied yet, the browser will
+    // reject the candidate; buffer it and apply it from setRemoteDescription.
+    if (this.peerConnection.remoteDescription === null) {
+      this.pendingIceCandidates.push(candidate);
+      return;
+    }
     await this.peerConnection.addIceCandidate(candidate);
   }
 

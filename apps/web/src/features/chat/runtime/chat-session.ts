@@ -66,11 +66,14 @@ export function buildOrchestrator(
   /**
    * Apply a transfer event to the holder's session and notify. Late events
    * (after the session was torn down) are dropped: holder.session is null'd
-   * on teardown.
+   * on teardown. Events are also dropped while `session.detached` is true (set
+   * by clearConversation) so a late frame does not repopulate a cleared
+   * snapshot.
    */
   function applyTransfer(event: TransferEvent): void {
     const session = holder.session;
     if (session === null) return;
+    if (session.detached) return;
     session.transfers = applyTransferEvent(session.transfers, event);
     onChange(session);
   }
@@ -83,12 +86,17 @@ export function buildOrchestrator(
       }
     },
     onMessage: (message: ConversationMessage): void => {
-      if (holder.session === null) return;
-      // The orchestrator already persisted; mirror into the snapshot.
-      holder.session.messages = holder.session.messages.concat(message);
-      holder.session.lastMessagePreview = previewOf(message.text);
-      holder.session.lastMessageAt = message.timestamp;
-      onChange(holder.session);
+      const session = holder.session;
+      if (session === null) return;
+      // Detach gate: clearConversation sets `detached` so a frame arriving
+      // after the snapshot was wiped does NOT repopulate it. The orchestrator
+      // has already persisted by this point, but the snapshot mirror is
+      // skipped — the next send/resume re-arms the session.
+      if (session.detached) return;
+      session.messages = session.messages.concat(message);
+      session.lastMessagePreview = previewOf(message.text);
+      session.lastMessageAt = message.timestamp;
+      onChange(session);
     },
     onSafetyNumber: (safetyNumber: string, verified: boolean): void => {
       if (holder.session === null) return;
@@ -138,9 +146,10 @@ export function buildOrchestrator(
       // The received-direction transfer is already mirrored via the start/
       // complete summaries the orchestrator emits alongside onFileReceived.
       // Stash the bytes on the session (NOT in the snapshot) so the UI can
-      // fetch them on demand via the controller's getReceivedFile.
+      // fetch them on demand via the controller's getReceivedFile. Detach
+      // gate: skip if clearConversation just wiped the snapshot.
       const session = holder.session;
-      if (session !== null) {
+      if (session !== null && !session.detached) {
         session.receivedFiles.set(file.manifest.transferId, file);
       }
     },
@@ -213,6 +222,7 @@ export function wireBridge(params: {
     lastMessageAt: null,
     transfers: [],
     receivedFiles: new Map<number, ReceivedFile>(),
+    detached: false,
   };
 
   // Populate the holder BEFORE the caller starts the bridge so any synchronous

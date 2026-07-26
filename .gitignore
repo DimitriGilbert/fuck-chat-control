@@ -11,6 +11,11 @@ build
 # Generated files
 apps/web/src/routeTree.gen.ts
 
+# wasm-pack regenerates pkg/.gitignore on every build; the six built artifacts
+# inside pkg/ are force-tracked, so we must ignore only the regenerated
+# .gitignore itself to keep the tree clean across rebuilds.
+apps/web/src/wasm/spake2/pkg/.gitignore
+
 # Environment variables
 .env
 .env*.local

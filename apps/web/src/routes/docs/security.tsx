@@ -225,9 +225,15 @@ function SecurityComponent() {
         </ul>
 
         <p>
-          No PAKE in v1. Authentication is safety-number-only. A future SPAKE2 or OPAQUE mode could
-          be added behind a narrow adapter, but it must not be assumed by any v1 module &mdash; and
-          nothing about the current security claims depends on it existing. The full rationale is in{" "}
+          PAKE (SPAKE2, RFC 9383) is mandatory when an invitation link contains a <code>~code</code>;
+          it authenticates the key exchange against a malicious broker. The shared 6-digit code is
+          fed to the RustCrypto <code>spake2</code> implementation (compiled to WebAssembly) and
+          never crosses the wire &mdash; only the derived SPAKE2 shares do, and they are mixed into
+          the session&apos;s HKDF chain alongside the ECDH secret. A peer offering
+          safety-number-only against a <code>~code</code> invitation is rejected at transcript
+          binding. The 6-digit code carries roughly 20 bits of entropy, so it should be delivered
+          out-of-band (read aloud, not in the same channel as the link) and is no substitute for
+          comparing the safety number once connected. The full rationale is in{" "}
           <a href="/docs/threat-model">the threat model</a> and{" "}
           <a href="/docs/protocol">the protocol spec</a>.
         </p>

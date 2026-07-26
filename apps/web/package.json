@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vp build",
+    "build:wasm:spake2": "cd src/wasm/spake2 && wasm-pack build --target web",
     "serve": "vp preview",
     "dev": "vp dev",
     "check-types": "tsc --noEmit",

@@ -22,6 +22,7 @@ export const ControlSubtype = {
   IdentityAnnouncement: 0x02,
   Leave: 0x03,
   SafetyNumberAnnouncement: 0x04,
+  PakeShare: 0x05,
 } as const;
 export type ControlSubtype = (typeof ControlSubtype)[keyof typeof ControlSubtype];
 
@@ -30,6 +31,7 @@ export const CONTROL_SUBTYPE_VALUES: readonly ControlSubtype[] = [
   ControlSubtype.IdentityAnnouncement,
   ControlSubtype.Leave,
   ControlSubtype.SafetyNumberAnnouncement,
+  ControlSubtype.PakeShare,
 ];
 
 export const Role = {
@@ -40,10 +42,11 @@ export type Role = (typeof Role)[keyof typeof Role];
 
 export const AuthMode = {
   SafetyNumberOnly: 0x01,
+  Pake: 0x02,
 } as const;
 export type AuthMode = (typeof AuthMode)[keyof typeof AuthMode];
 
-export const AUTH_MODE_VALUES: readonly AuthMode[] = [AuthMode.SafetyNumberOnly];
+export const AUTH_MODE_VALUES: readonly AuthMode[] = [AuthMode.SafetyNumberOnly, AuthMode.Pake];
 
 declare const __brand: unique symbol;
 export type Brand<T, B extends string> = T & {

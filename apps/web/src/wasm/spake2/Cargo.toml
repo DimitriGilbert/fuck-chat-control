@@ -1,0 +1,31 @@
+[package]
+name = "fck-spake2"
+version = "0.1.0"
+edition = "2021"
+description = "SPAKE2 (RFC 9383) over Ed25519, compiled to WebAssembly for the fuck-eu-chat-control handshake."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# Disable wasm-opt post-processing: the wasm-pack-bundled wasm-opt rejects the
+# bulk-memory ops that recent rustc emits by default. The unoptimized release
+# build (compiled with opt-level="z", lto=true, codegen-units=1) is already
+# small; we ship it as-is.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+spake2 = { version = "=0.4.0", default-features = false, features = ["getrandom"] }
+wasm-bindgen = "0.2.100"
+js-sys = "0.3.77"
+zeroize = { version = "1.8", features = ["alloc"] }
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+codegen-units = 1
+strip = true

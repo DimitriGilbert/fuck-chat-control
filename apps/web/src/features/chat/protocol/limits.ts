@@ -35,3 +35,31 @@ export const HKDF_NONCE_BASE_BYTES = 12 as const;
 export const INIT_TO_RESP_LABEL = "fck-chat-v1/init->resp/traffic";
 export const RESP_TO_INIT_LABEL = "fck-chat-v1/resp->init/traffic";
 export const NONCE_BASE_LABEL = "fck-chat-v1/nonce-base";
+
+/**
+ * SPAKE2 (RFC 9383) wire constants for the in-band PAKE exchange. Shares are
+ * exchanged as cleartext handshake-length messages during the Handshaking
+ * phase (before the encrypted framing layer is stood up). Layout:
+ *   PROTOCOL_VERSION(1) | role(1) | share(33)
+ * The role byte is the SPAKE2 side the sender played ('A'=0x41 / 'B'=0x42) so
+ * each peer can confirm the two sides are complementary. The 6-digit code is
+ * the SPAKE2 password; it never crosses the wire.
+ */
+export const PAKE_SHARE_BYTES = 33 as const;
+export const PAKE_ROLE_A = 0x41 as const;
+export const PAKE_ROLE_B = 0x42 as const;
+export const PAKE_MESSAGE_BYTES = 35 as const;
+export const PAKE_PROTOCOL_ID = "fuck-eu-chat-control/v1";
+export const PAKE_SHARED_SECRET_BYTES = 32 as const;
+/**
+ * PAKE confirmation MAC. After both peers run `pakeFinish`, each derives a
+ * confirmation tag = HMAC-SHA256(HKDF(pakeSecret, "pake-confirm"), transcriptHash)
+ * and exchanges it. Because `pakeSecret` is identical iff the two codes match,
+ * a mismatched MAC proves a wrong-code attack and the handshake aborts — there
+ * is NO path to Connected under divergent traffic keys.
+ *
+ * Wire layout: PROTOCOL_VERSION(1) | role(1) | tag(32) = 34 bytes.
+ */
+export const PAKE_CONFIRM_TAG_BYTES = 32 as const;
+export const PAKE_CONFIRM_MESSAGE_BYTES = 34 as const;
+export const PAKE_CONFIRM_LABEL = "fck-chat-v1/pake-confirm";

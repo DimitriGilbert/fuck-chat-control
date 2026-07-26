@@ -62,6 +62,24 @@ export async function hkdfSha256(
   return new Uint8Array(bits);
 }
 
+/**
+ * HMAC-SHA256. Used for the PAKE confirmation MAC: the tag is computed over
+ * the transcript hash, keyed by an HKDF-derived confirmation key seeded with
+ * the SPAKE2 shared secret. Because the SPAKE2 secret is identical iff the two
+ * codes match, a tag mismatch proves a wrong-code attack.
+ */
+export async function hmacSha256(key: Uint8Array, message: Uint8Array): Promise<Uint8Array> {
+  const cryptoKey = await globalThis.crypto.subtle.importKey(
+    "raw",
+    toBuffer(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await globalThis.crypto.subtle.sign("HMAC", cryptoKey, toBuffer(message));
+  return new Uint8Array(sig);
+}
+
 async function importAesGcmKey(key: AESKey): Promise<CryptoKey> {
   return globalThis.crypto.subtle.importKey("raw", toBuffer(key), { name: "AES-GCM" }, false, [
     "encrypt",

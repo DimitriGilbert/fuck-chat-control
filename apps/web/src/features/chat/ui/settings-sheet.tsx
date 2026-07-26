@@ -185,11 +185,14 @@ function SecuritySection({ safetyNumber, verified }: SecuritySectionProps): Reac
       </div>
 
       <div className="space-y-2">
-        <h3 className="text-sm font-medium">No PAKE / no verification code</h3>
+        <h3 className="text-sm font-medium">PAKE when an invitation carries a code</h3>
         <p className="text-muted-foreground text-xs">
-          v1 has no password-authenticated key exchange. The invitation link carries the
-          conversation id; whoever joins first is accepted. Always verify the safety number
-          out-of-band before trusting a conversation.
+          When an invitation link contains a <code>~code</code>, a SPAKE2 password-authenticated key
+          exchange (RustCrypto&apos;s <code>spake2</code>, compiled to WebAssembly) runs over the
+          data channel before the session is established, authenticating the handshake against a
+          malicious broker. The 6-digit code carries roughly 20 bits of entropy &mdash; share it
+          out-of-band (read it aloud), and still compare the safety number once connected. Invitations
+          without a code fall back to safety-number-only.
         </p>
       </div>
     </div>

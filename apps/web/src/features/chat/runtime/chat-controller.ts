@@ -8,6 +8,7 @@ import {
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "@/features/chat/store";
+import { LockableRepository } from "@/features/chat/store/lockable-repo";
 import type {
   ConversationMessage,
   ConversationRecord,
@@ -154,6 +155,23 @@ export interface ChatController {
   /** Alias for {@link ChatController.leaveConversation} with no id (active). */
   leave(id?: ConversationId): void;
 
+  /**
+   * Lock the at-rest key. After this returns, every ciphertext-touching
+   * repository call (appendMessage, getHistory, clearConversation, ...) throws
+   * {@link AtRestLockedError} until {@link unlock} succeeds. In-memory session
+   * snapshots remain readable so the UI can render the sidebar, but no fresh
+   * seal/unseal may run.
+   */
+  lock(): void;
+  /**
+   * Repopulate the at-rest key from storage. Returns false on a wrong
+   * passphrase (passphrase mode) — in that case the controller stays locked.
+   * Auto-mode unlock always succeeds because the key is persisted in clear.
+   */
+  unlock(passphrase: string): Promise<boolean>;
+  /** True iff the at-rest key is currently locked. */
+  isLocked(): boolean;
+
   getActiveConversationId(): ConversationId | null;
   listConversations(): Promise<ConversationRecord[]>;
 
@@ -217,7 +235,14 @@ export const initialChatControllerState: ChatControllerState = EMPTY_STATE;
  */
 export function createChatController(deps: ChatControllerDeps): ChatController {
   const atRestKey = deps.atRestKeyManager.get();
-  const repository = deps.repositoryFactory(atRestKey);
+  const rawRepository = deps.repositoryFactory(atRestKey);
+  // Wrap the repository so every ciphertext-touching call gates on
+  // `manager.isLocked()`. This is the authoritative lock: lock() flips the
+  // manager flag, and any subsequent seal/unseal throws AtRestLockedError.
+  const repository: ConversationRepository = new LockableRepository(
+    rawRepository,
+    deps.atRestKeyManager,
+  );
   const listeners = new Set<(state: ChatControllerState) => void>();
   const sessions = new Map<ConversationId, ChatSession>();
   // Holders link each orchestrator's construction-time handlers to its session.
@@ -568,7 +593,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       if (sessions.has(conversationId)) {
         // Already live; just select it.
         activeConversationId = conversationId;
-        syncActiveReadMarker(sessions.get(conversationId) as ChatSession);
+        const existing = sessions.get(conversationId) as ChatSession;
+        syncActiveReadMarker(existing);
+        // Re-arm inbound handlers on resume.
+        existing.detached = false;
         emit(null);
         return;
       }
@@ -596,6 +624,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // Cheap swap: no re-handshake. Clear unread + advance the read marker.
       activeConversationId = conversationId;
       syncActiveReadMarker(session);
+      // Re-arm inbound handlers: selecting a cleared conversation re-opens it
+      // for live frames.
+      session.detached = false;
       emit(null);
     },
 
@@ -638,6 +669,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // sendText(id, text) targets a specific session.
       const { id, value } = resolveSessionArgPair(idOrText, maybeText, activeConversationId);
       const session = findSessionOrThrow(id);
+      // Re-arm inbound handlers: a send re-opens the conversation after a
+      // clearConversation, so subsequent inbound frames are mirrored again.
+      session.detached = false;
       await session.orchestrator.sendText(value);
       // The orchestrator persisted; onMessage fires only for received bytes,
       // so mirror the sent message into the snapshot manually.
@@ -785,12 +819,75 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       this.leaveConversation(id);
     },
 
+    lock(): void {
+      // Drop the in-memory key and flip the manager's locked flag. The
+      // LockableRepository wrapper observes isLocked() on the next seal/unseal
+      // and throws AtRestLockedError, which is the actual revocation.
+      deps.atRestKeyManager.lock();
+      emit(null);
+    },
+
+    async unlock(passphrase: string): Promise<boolean> {
+      const ok = await deps.atRestKeyManager.unlock(passphrase);
+      emit(null);
+      return ok;
+    },
+
+    isLocked(): boolean {
+      return deps.atRestKeyManager.isLocked();
+    },
+
     async clearConversation(id?: ConversationId): Promise<void> {
       const target = id ?? activeConversationId;
       if (target === null) return;
       await repository.clearConversation(target);
       const session = sessions.get(target);
       if (session !== undefined) {
+        // (5.2.1) Cancel every non-terminal transfer through the orchestrator
+        // (and the bridge if it grows a cancelSend seam). Queued sends never
+        // entered the orchestrator; they are dropped via the queue drain
+        // below, so we only need to cancel orchestrator-tracked ids here.
+        for (const transfer of session.transfers) {
+          if (
+            transfer.status === "queued" ||
+            transfer.status === "sending" ||
+            transfer.status === "receiving"
+          ) {
+            try {
+              session.orchestrator.cancelTransfer(transfer.id);
+            } catch {
+              // best-effort: the orchestrator may have already torn the
+              // transfer down (e.g. peer disconnect). The snapshot wipe below
+              // is authoritative regardless.
+            }
+            // Forward-compatible hook: if the WebRtcBridge ever exposes a
+            // cancelSend seam, invoke it. Optional-chained through a typed
+            // alias so absent methods do not throw or fail typecheck.
+            const bridge = session.bridge as BridgeWithOptionalCancelSend;
+            bridge.cancelSend?.(transfer.id);
+          }
+        }
+        // (5.2.2) Drop the transfer snapshot.
+        session.transfers = [];
+        // (5.2.3) Zero received-file byte buffers before clearing the map
+        // (PRD: files are transient; clearConversation releases them).
+        for (const file of session.receivedFiles.values()) {
+          file.data.fill(0);
+        }
+        session.receivedFiles.clear();
+        // (5.2.4) Drain the session's send queue. Mirrors leaveConversation's
+        // sendQueues.delete(target) and rejects any queued sends so their
+        // promises do not hang awaiting a slot that will never free.
+        const queue = sendQueues.get(target);
+        if (queue !== undefined) {
+          for (const queued of queue) {
+            queued.reject(new Error("conversation cleared"));
+          }
+          sendQueues.delete(target);
+        }
+        // (5.2.5) Detach inbound handlers so a late frame does not repopulate
+        // the snapshot. Re-armed on the next send/resume/select.
+        session.detached = true;
         session.messages = [];
         session.lastMessagePreview = null;
         session.lastMessageAt = null;
@@ -862,6 +959,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     async __receiveMessageForTest(id: ConversationId, text: string): Promise<void> {
       const session = sessions.get(id);
       if (session === undefined) return;
+      // Honor the detach gate so this seam faithfully simulates a real
+      // orchestrator onMessage (which is gated in chat-session.ts). A late
+      // frame arriving after clearConversation must not repopulate the
+      // snapshot.
+      if (session.detached) return;
       // Build a synthetic received message and persist it through the repo so
       // the snapshot reflects what a real orchestrator onMessage would have
       // produced. We do NOT drive the orchestrator's crypto path here.
@@ -972,3 +1074,14 @@ function isConcurrentCapError(err: unknown): boolean {
   }
   return false;
 }
+
+/**
+ * Forward-compatible alias for the WebRtcBridge's optional cancel-seam. The
+ * current bridge has no `cancelSend` method (cancellation is owned by the
+ * orchestrator's sender/receiver pair); declaring it here lets clearConversation
+ * optional-chain through the bridge without a cast at the call site, and keeps
+ * the call site correct if the bridge grows a cancelSend later.
+ */
+type BridgeWithOptionalCancelSend = {
+  cancelSend?(transferId: number): void;
+};

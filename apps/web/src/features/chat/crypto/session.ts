@@ -1,9 +1,13 @@
 import { p256 } from "@noble/curves/p256";
 
 import { deriveRole, encodePublicKey, encodeTranscript } from "../protocol/codec";
-import { HKDF_TRAFFIC_KEY_BYTES, INIT_TO_RESP_LABEL, RESP_TO_INIT_LABEL } from "../protocol/limits";
+import {
+  HKDF_TRAFFIC_KEY_BYTES,
+  INIT_TO_RESP_LABEL,
+  RESP_TO_INIT_LABEL,
+} from "../protocol/limits";
 import { ProtocolError, ProtocolErrorCode } from "../protocol/errors";
-import { Role } from "../protocol/types";
+import { AuthMode, Role } from "../protocol/types";
 import type { PublicKey, Transcript } from "../protocol/types";
 
 import { CryptoError, CryptoErrorCode } from "./errors";
@@ -60,17 +64,35 @@ export async function deriveSessionKeys(input: DeriveSessionKeysInput): Promise<
   );
   const ecdhSecret = sharedPoint.subarray(ECDH_X_OFFSET, ECDH_X_OFFSET + ECDH_X_BYTES);
 
+  // Defensive: a Pake session MUST contribute its SPAKE2 shared secret to the
+  // key schedule. If `pakeSecret` is null while the transcript authMode is
+  // Pake, refuse to derive — this prevents an accidental silent fallback to a
+  // safety-number-only key schedule under a Pake invitation.
+  const pakeSecret = input.pakeSecret ?? null;
+  if (pakeSecret === null && input.transcript.authMode === AuthMode.Pake) {
+    throw new CryptoError(
+      CryptoErrorCode.InvalidArgument,
+      "deriveSessionKeys: authMode is Pake but no pakeSecret was provided (refusing silent fallback)",
+    );
+  }
+
   const transcriptHash = await sha256(encodeTranscript(input.transcript));
+  // Bind the SPAKE2 shared secret into the HKDF info, alongside the ECDH
+  // secret (IKM) and transcript hash (salt). Mixing pakeSecret into the info
+  // string means a Pake session's traffic keys are inseparable from the
+  // password-derived secret without changing the salt/IKM contract.
+  const initInfo = buildTrafficKeyInfo(INIT_TO_RESP_LABEL, pakeSecret);
+  const respInfo = buildTrafficKeyInfo(RESP_TO_INIT_LABEL, pakeSecret);
   const initKeyBytes = await hkdfSha256(
     ecdhSecret,
     transcriptHash,
-    new TextEncoder().encode(INIT_TO_RESP_LABEL),
+    initInfo,
     HKDF_TRAFFIC_KEY_BYTES,
   );
   const respKeyBytes = await hkdfSha256(
     ecdhSecret,
     transcriptHash,
-    new TextEncoder().encode(RESP_TO_INIT_LABEL),
+    respInfo,
     HKDF_TRAFFIC_KEY_BYTES,
   );
 
@@ -78,4 +100,22 @@ export async function deriveSessionKeys(input: DeriveSessionKeysInput): Promise<
     return { sendKey: toAESKey(initKeyBytes), recvKey: toAESKey(respKeyBytes) };
   }
   return { sendKey: toAESKey(respKeyBytes), recvKey: toAESKey(initKeyBytes) };
+}
+
+/**
+ * Build the HKDF `info` buffer for a directional traffic-key label. When the
+ * session ran PAKE, the SPAKE2 shared secret is concatenated onto the label so
+ * the derived traffic keys are bound to the password as well as to the ECDH
+ * secret and transcript. A null `pakeSecret` (SafetyNumberOnly session) yields
+ * the bare label, preserving the pre-PAKE key schedule byte-for-byte.
+ */
+function buildTrafficKeyInfo(label: string, pakeSecret: Uint8Array | null): Uint8Array {
+  const labelBytes = new TextEncoder().encode(label);
+  if (pakeSecret === null) {
+    return labelBytes;
+  }
+  const out = new Uint8Array(labelBytes.length + pakeSecret.length);
+  out.set(labelBytes, 0);
+  out.set(pakeSecret, labelBytes.length);
+  return out;
 }

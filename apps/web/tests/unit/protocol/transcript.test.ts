@@ -108,7 +108,9 @@ describe("encodeTranscript / decodeTranscript (343 bytes, canonical order)", () 
 
   it("rejects an unknown auth mode on encode", () => {
     const t = sampleTranscript();
-    (t as { authMode: number }).authMode = 0x02;
+    // 0x01 (SafetyNumberOnly) and 0x02 (Pake) are both valid; use 0x03 which
+    // is genuinely outside the AUTH_MODE_VALUES set.
+    (t as { authMode: number }).authMode = 0x03;
     try {
       encodeTranscript(t);
       throw new Error("expected throw");

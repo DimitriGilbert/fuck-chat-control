@@ -27,6 +27,14 @@ export interface DeriveSessionKeysInput {
   readonly peerEcdhPublicKey: PublicKey;
   readonly transcript: Transcript;
   readonly localIdentityPublicKey: PublicKey;
+  /**
+   * Optional SPAKE2 shared secret. When the session ran PAKE (transcript
+   * `authMode === AuthMode.Pake`), this is mixed into the HKDF info so the
+   * traffic keys are bound to the password. When `null` AND the transcript
+   * authMode is `Pake`, {@link deriveSessionKeys} throws — there is no silent
+   * fallback to a safety-number-only key schedule under a PAKE invitation.
+   */
+  readonly pakeSecret?: Uint8Array;
 }
 
 export interface EncryptedFrame {

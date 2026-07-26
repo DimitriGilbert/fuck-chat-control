@@ -59,6 +59,19 @@ export interface ChatSession {
    * Bytes live in memory only and are cleared on teardown.
    */
   receivedFiles: Map<number, ReceivedFile>;
+  /**
+   * Inbound gate. Set to true by {@link ChatController.clearConversation} so a
+   * late orchestrator frame (onMessage/onFileReceived/transfer events) arriving
+   * after the snapshot was wiped does NOT repopulate it. Re-armed (set to
+   * false) when the user sends the next message or the conversation is
+   * resumed/selected.
+   *
+   * The orchestrator's handlers close over a {@link SessionHolder} that points
+   * at THIS session; checking `session.detached` inside the controller-level
+   * routing (rather than in orchestrator.ts) is what detaches inbound frames
+   * without touching the orchestrator.
+   */
+  detached: boolean;
 }
 
 /**

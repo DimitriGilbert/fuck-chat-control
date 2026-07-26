@@ -1,0 +1,17 @@
+{
+  "name": "fck-spake2",
+  "type": "module",
+  "description": "SPAKE2 (RFC 9383) over Ed25519, compiled to WebAssembly for the fuck-eu-chat-control handshake.",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "fck_spake2_bg.wasm",
+    "fck_spake2.js",
+    "fck_spake2.d.ts"
+  ],
+  "main": "fck_spake2.js",
+  "types": "fck_spake2.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

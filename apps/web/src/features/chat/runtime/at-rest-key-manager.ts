@@ -23,17 +23,39 @@ export class AtRestKeyLockedError extends Error {
   }
 }
 
+/**
+ * Raised by the {@link LockableRepository} wrapper (or any caller) when a
+ * ciphertext-touching repository method is invoked while the at-rest key is
+ * locked. Distinct from {@link AtRestKeyLockedError} (which the manager raises
+ * from `get()`) so callers can discriminate "key manager itself refused" from
+ * "repository blocked because the manager is locked".
+ */
+export class AtRestLockedError extends Error {
+  constructor() {
+    super("at-rest key is locked; call controller.unlock(passphrase) first");
+    this.name = "AtRestLockedError";
+  }
+}
+
 export interface AtRestKeyManager {
   /** Load (or generate) the auto key; has no effect on a passphrase lock. */
   ensureLoaded(): Promise<void>;
   /** Returns the auto at-rest key; throws if locked or unloaded. */
   get(): AtRestKey;
-  /** Drop the in-memory key. Auto-mode keys become inaccessible too. */
+  /**
+   * Drop the in-memory auto key and mark the manager locked. Auto-mode keys
+   * become inaccessible too (a subsequent `get()` throws). Note: in auto mode
+   * the key remains persisted to storage in the clear, so this drops the
+   * in-memory copy only — see the PRD's at-rest guarantee. Passphrase mode
+   * additionally requires the passphrase to repopulate the key on unlock.
+   */
   lock(): void;
   /** Unlock a passphrase-wrapped key; returns false on wrong passphrase. */
   unlock(passphrase: string): Promise<boolean>;
   /** Wrap the auto key under a passphrase and persist the wrapped form. */
   setPassphrase(passphrase: string): Promise<void>;
+  /** True once {@link lock} has been called and until a successful unlock. */
+  isLocked(): boolean;
 }
 
 const MODE_AUTO = "auto";
@@ -61,6 +83,14 @@ type StoredAtRest = StoredAutoKey | StoredWrappedKey;
  *
  * The auto key is what the conversation repository seals with; passphrase mode
  * only affects how the auto key is *itself* persisted.
+ *
+ * LOCK SEMANTICS: `lock()` drops the in-memory `autoKey` reference and flips
+ * the `locked` flag, so `get()` and any seal/unseal through a
+ * {@link LockableRepository} wrapper throw until the caller unlocks. In auto
+ * mode the key remains on disk in the clear, so lock() does NOT protect
+ * against an attacker who can read browser storage — the PRD's at-rest
+ * guarantee is explicit about this. Passphrase mode is what makes lock()
+ * meaningful: the wrapped form cannot be unsealed without the passphrase.
  */
 export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager {
   let autoKey: AtRestKey | null = null;
@@ -100,6 +130,12 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
     },
 
     lock(): void {
+      // Drop the in-memory key so a subsequent get() throws. The persisted
+      // form is unchanged (auto mode keeps the raw key on disk; passphrase
+      // mode keeps the wrapped form). The authoritative gate for repository
+      // access lives in the LockableRepository wrapper, but nulling autoKey
+      // here makes the manager's own lock() honest rather than cosmetic.
+      autoKey = null;
       locked = true;
     },
 
@@ -111,8 +147,9 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
       }
       const parsed = JSON.parse(raw) as StoredAtRest;
       if (parsed.mode !== MODE_PASSPHRASE) {
-        // Auto mode: there is no passphrase to verify. Treat as already
-        // unlocked (the auto key is available) and clear the lock.
+        // Auto mode: there is no passphrase to verify. Repopulate the
+        // in-memory key from storage and clear the lock.
+        autoKey = base64ToBytes(parsed.keyBase64) as unknown as AtRestKey;
         locked = false;
         return true;
       }
@@ -144,6 +181,10 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
       // The key is now backed by a wrapped form; the in-memory key remains
       // available (we just wrapped it, we did not forget it).
       locked = false;
+    },
+
+    isLocked(): boolean {
+      return locked;
     },
   };
 }

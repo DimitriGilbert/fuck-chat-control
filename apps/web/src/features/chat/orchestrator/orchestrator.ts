@@ -1,17 +1,28 @@
 import {
   computeSafetyNumber,
+  createPakeSession,
+  derivePakeConfirmationTag,
   deriveSessionKeys,
   generateEphemeralKeyPair,
   generateIdentityKeyPair,
+  pakeFinish,
+  pakeOutgoingShare,
+  PakeError,
+  PakeErrorCode,
+  sha256,
   signTranscript,
   verifyTranscript,
 } from "@/features/chat/crypto";
-import type { EphemeralKeyPair, IdentityKeyPair } from "@/features/chat/crypto";
-import { encodeSessionId } from "@/features/chat/protocol/codec";
+import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "@/features/chat/crypto";
+import { deriveRole, encodeSessionId, encodeTranscript } from "@/features/chat/protocol/codec";
 import {
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
+  PAKE_CONFIRM_MESSAGE_BYTES,
+  PAKE_MESSAGE_BYTES,
+  PAKE_ROLE_A,
+  PAKE_ROLE_B,
   PROTOCOL_VERSION,
 } from "@/features/chat/protocol/limits";
 import { AuthMode, ControlSubtype, Role } from "@/features/chat/protocol/types";
@@ -29,8 +40,12 @@ import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 import {
   buildTranscript,
   decodeHello,
+  decodePakeConfirm,
+  decodePakeShare,
   decodeSignatureMessage,
   encodeHello,
+  encodePakeConfirm,
+  encodePakeShare,
   encodeSignatureMessage,
   type HelloComponents,
 } from "./handshake-codec";
@@ -107,7 +122,6 @@ export interface OrchestratorDeps {
   readonly useInternalSignaling?: boolean;
 }
 
-const HANDSHAKE_AUTH_MODE = AuthMode.SafetyNumberOnly;
 const HELLO_BYTES = 163;
 const SIGNATURE_MESSAGE_BYTES = 65;
 
@@ -148,6 +162,36 @@ export class ConversationOrchestrator {
   private transcript: Transcript | null = null;
   private handshakeError: unknown = null;
   private handshakeCompleting = false;
+  /**
+   * Auth mode for this session. Defaults to {@link AuthMode.SafetyNumberOnly}.
+   * Becomes {@link AuthMode.Pake} when the parsed invitation carried a `~code`
+   * (Phase 8's fragment parser) or the caller sets one via {@link setPakeCode}
+   * (the path Phase 1's own tests use). Once a code is present, PAKE is
+   * mandatory: a peer offering `SafetyNumberOnly` against a `Pake` invitation
+   * aborts at transcript binding, and a PAKE exchange failure NEVER falls back
+   * to safety-number-only.
+   */
+  private authMode: AuthMode = AuthMode.SafetyNumberOnly;
+  /**
+   * The 6-digit PAKE code, or null when the session is safety-number-only.
+   * Never logged, never persisted. Phase 8's invitation fragment parser
+   * (`~code`) populates this; Phase 1's tests populate it directly.
+   */
+  private pakeCode: string | null = null;
+  /** In-flight PAKE session during the handshake; nulled after `pakeFinish`. */
+  private pakeSession: PakeSession | null = null;
+  /** Peer's SPAKE2 share, received during the handshake; nulled after consumption. */
+  private peerPakeShare: Uint8Array | null = null;
+  /** Peer's PAKE confirmation tag, received after the share exchange; nulled after verification. */
+  private peerPakeConfirm: Uint8Array | null = null;
+  /** Resolver for the peer-confirm promise; set by `runPakeConfirmation`. */
+  private pakeConfirmResolve: ((tag: Uint8Array) => void) | null = null;
+  /**
+   * The local SPAKE2 side byte ('A'=0x41 / 'B'=0x42). Recorded when the local
+   * share is sent so the confirmation handler can validate the peer's role
+   * byte even after `pakeSession` has been consumed by `pakeFinish`.
+   */
+  private pakeLocalSideByte: number | null = null;
 
   // Connected session state.
   private frameSender: FrameSender | null = null;
@@ -196,6 +240,43 @@ export class ConversationOrchestrator {
 
   get conversationId(): ConversationId | null {
     return this.conversation;
+  }
+
+  /**
+   * The negotiated auth mode for the current session. Defaults to
+   * {@link AuthMode.SafetyNumberOnly}; becomes {@link AuthMode.Pake} once a
+   * PAKE code is supplied via {@link setPakeCode} (or, in Phase 8, parsed from
+   * the invitation fragment).
+   */
+  get handshakeAuthMode(): AuthMode {
+    return this.authMode;
+  }
+
+  /**
+   * Supply the 6-digit PAKE code for this session, switching the negotiated
+   * auth mode to {@link AuthMode.Pake}. This is the seam Phase 8's invitation
+   * fragment parser (`~code`) will call; Phase 1's own tests call it directly.
+   *
+   * Must be called before {@link attachTransport} (i.e. before the handshake
+   * begins). Once set, PAKE is mandatory: a peer offering `SafetyNumberOnly`
+   * against this invitation aborts at transcript binding, and a PAKE failure
+   * never falls back to safety-number-only.
+   */
+  setPakeCode(code: string): void {
+    if (this.started) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.AlreadyStarted,
+        "setPakeCode must be called before start()/join()",
+      );
+    }
+    if (code.length === 0) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        "PAKE code must be non-empty",
+      );
+    }
+    this.pakeCode = code;
+    this.authMode = AuthMode.Pake;
   }
 
   /**
@@ -552,6 +633,16 @@ export class ConversationOrchestrator {
       await this.verifyPeerAndComplete(signature);
       return;
     }
+    if (bytes.length === PAKE_MESSAGE_BYTES) {
+      const msg = decodePakeShare(bytes);
+      await this.handlePakeShare(msg.role, msg.share);
+      return;
+    }
+    if (bytes.length === PAKE_CONFIRM_MESSAGE_BYTES) {
+      const msg = decodePakeConfirm(bytes);
+      await this.handlePakeConfirm(msg.role, msg.tag);
+      return;
+    }
     throw new OrchestratorError(
       OrchestratorErrorCode.MalformedHandshakeMessage,
       `inbound handshake message has unexpected length ${bytes.length}`,
@@ -567,7 +658,7 @@ export class ConversationOrchestrator {
       conversationId: this.conversation,
       local: this.localHello,
       remote: this.remoteHello,
-      authMode: HANDSHAKE_AUTH_MODE,
+      authMode: this.authMode,
     });
     this.transcript = transcript;
     const signature = await signTranscript(this.identity.privateKey, transcript);
@@ -623,12 +714,50 @@ export class ConversationOrchestrator {
     }
 
     this.handshakeCompleting = true;
-    // Derive session keys.
+
+    // If this session negotiated PAKE, run the SPAKE2 exchange over the data
+    // channel before deriving session keys. The shared secret is mixed into the
+    // HKDF chain via `deriveSessionKeys`. A PAKE failure is fatal: there is NO
+    // silent fallback to safety-number-only.
+    let pakeSecret: Uint8Array | null = null;
+    if (this.authMode === AuthMode.Pake) {
+      const code = this.pakeCode;
+      if (code === null) {
+        throw new PakeError(
+          PakeErrorCode.Abort,
+          "authMode is Pake but no PAKE code is set",
+        );
+      }
+      const role = deriveRole(this.identity.publicKey, remoteIdentityKey);
+      const session = await createPakeSession(code, role);
+      this.pakeSession = session;
+      // Send the local SPAKE2 share to the peer (cleartext, as with the Hello).
+      const localShare = pakeOutgoingShare(session);
+      const sideByte = role === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
+      this.pakeLocalSideByte = sideByte;
+      this.transport.send(encodePakeShare(sideByte, localShare));
+      // Await the peer's share; handlePakeShare stashes it and completes the
+      // exchange when both shares are present.
+      pakeSecret = await this.awaitPakeFinish();
+      // Confirmation: SPAKE2 does not itself detect a wrong password (both
+      // sides complete `pakeFinish` with divergent secrets). Each side derives
+      // a role-bound MAC tag over the transcript hash keyed by the SPAKE2
+      // secret, exchanges it, and verifies. A mismatch proves a wrong-code
+      // attack and aborts — there is NO path to Connected under divergent
+      // traffic keys.
+      await this.runPakeConfirmation(pakeSecret, role);
+    }
+
+    // Derive session keys. For a Pake session the SPAKE2 shared secret is
+    // bound into HKDF; for SafetyNumberOnly it is null (and the transcript
+    // authMode is SafetyNumberOnly, so the defensive check in
+    // deriveSessionKeys does not trip).
     const sessionKeys = await deriveSessionKeys({
       localEcdhPrivateKey: this.ephemeral.privateKey,
       peerEcdhPublicKey: remoteEphemeralKey,
       transcript: this.transcript,
       localIdentityPublicKey: this.identity.publicKey,
+      pakeSecret: pakeSecret ?? undefined,
     });
 
     const safetyNumber = await computeSafetyNumber(
@@ -690,6 +819,141 @@ export class ConversationOrchestrator {
 
     this.setState(ConnectionState.Connected);
     this.handlers.onSafetyNumber?.(safetyNumber, this.safetyNumberVerified);
+  }
+
+  /**
+   * Resolver for the peer-share promise. Set by {@link awaitPakeFinish} and
+   * resolved by {@link handlePakeShare} once the peer's SPAKE2 share lands.
+   * Kept as a field (not a local) because the share may arrive before
+   * `awaitPakeFinish` is entered.
+   */
+  private pakePeerShareResolve: ((share: Uint8Array) => void) | null = null;
+
+  /**
+   * Receive the peer's SPAKE2 share and resolve anyone waiting in
+   * {@link awaitPakeFinish}. Validates that the peer's role byte is the
+   * COMPLEMENT of the local role — a peer offering the same side indicates a
+   * reflected-message attack and aborts the handshake.
+   */
+  private async handlePakeShare(role: number, share: Uint8Array): Promise<void> {
+    if (this.authMode !== AuthMode.Pake) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        "received a PakeShare message but the session authMode is not Pake",
+      );
+    }
+    const expectedLocalByte =
+      this.pakeSession === null ? null : this.pakeSession.sideByte;
+    if (expectedLocalByte !== null) {
+      const expectedPeerByte = expectedLocalByte === PAKE_ROLE_A ? PAKE_ROLE_B : PAKE_ROLE_A;
+      if (role !== expectedPeerByte) {
+        throw new PakeError(
+          PakeErrorCode.Abort,
+          `peer SPAKE2 side 0x${role.toString(16)} is not complementary to local side 0x${expectedLocalByte.toString(16)}`,
+        );
+      }
+    }
+    if (this.peerPakeShare !== null) {
+      throw new PakeError(PakeErrorCode.Abort, "duplicate peer SPAKE2 share");
+    }
+    this.peerPakeShare = share;
+    const resolve = this.pakePeerShareResolve;
+    this.pakePeerShareResolve = null;
+    resolve?.(share);
+  }
+
+  /**
+   * Block until the peer's SPAKE2 share arrives, then run `pakeFinish` to
+   * derive the shared secret. Throws a {@link PakeError} on any failure; the
+   * caller ({@link verifyPeerAndComplete}) propagates it to `failHandshake`.
+   */
+  private async awaitPakeFinish(): Promise<Uint8Array> {
+    const session = this.pakeSession;
+    if (session === null) {
+      throw new PakeError(PakeErrorCode.Abort, "awaitPakeFinish: no PAKE session");
+    }
+    let peerShare = this.peerPakeShare;
+    if (peerShare === null) {
+      peerShare = await new Promise<Uint8Array>((resolve) => {
+        this.pakePeerShareResolve = resolve;
+      });
+    }
+    this.peerPakeShare = null;
+    const secret = await pakeFinish(session, peerShare);
+    this.pakeSession = null;
+    return secret;
+  }
+
+  /**
+   * Run the PAKE confirmation exchange. Computes the local role-bound
+   * confirmation tag over the transcript hash, sends it, awaits the peer's
+   * tag, and verifies it equals the locally-computed peer-role tag. A mismatch
+   * proves a wrong-code attack (the SPAKE2 secrets diverged) and the handshake
+   * aborts with {@link PakeErrorCode.Mismatch} — there is no path to Connected.
+   */
+  private async runPakeConfirmation(pakeSecret: Uint8Array, localRole: Role): Promise<void> {
+    if (this.transcript === null) {
+      throw new PakeError(PakeErrorCode.Abort, "runPakeConfirmation: no transcript");
+    }
+    const transcriptHash = await sha256(encodeTranscript(this.transcript));
+    const localTag = await derivePakeConfirmationTag(pakeSecret, transcriptHash, localRole);
+    const localSideByte = localRole === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
+    this.transport?.send(encodePakeConfirm(localSideByte, localTag));
+    // Await the peer's confirmation tag.
+    let peerTag = this.peerPakeConfirm;
+    if (peerTag === null) {
+      peerTag = await new Promise<Uint8Array>((resolve) => {
+        this.pakeConfirmResolve = resolve;
+      });
+    }
+    this.peerPakeConfirm = null;
+    const peerRole = localRole === Role.Initiator ? Role.Responder : Role.Initiator;
+    const expectedPeerTag = await derivePakeConfirmationTag(
+      pakeSecret,
+      transcriptHash,
+      peerRole,
+    );
+    if (!bytesEqual(peerTag, expectedPeerTag)) {
+      throw new PakeError(
+        PakeErrorCode.Mismatch,
+        "PAKE confirmation tag mismatch (wrong code or tampering); aborting handshake",
+      );
+    }
+  }
+
+  /**
+   * Receive the peer's PAKE confirmation tag and resolve anyone waiting in
+   * {@link runPakeConfirmation}. Validates the role byte is complementary to
+   * the local side; a same-role tag indicates a reflected-message attack.
+   */
+  private async handlePakeConfirm(role: number, tag: Uint8Array): Promise<void> {
+    if (this.authMode !== AuthMode.Pake) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        "received a PakeConfirm message but the session authMode is not Pake",
+      );
+    }
+    const expectedLocalByte =
+      this.pakeSession === null ? null : this.pakeSession.sideByte;
+    // By the time the confirmation arrives, pakeSession may already be nulled
+    // (pakeFinish consumed it); fall back to the role we recorded as sender.
+    const localSide = expectedLocalByte ?? this.pakeLocalSideByte;
+    if (localSide !== null) {
+      const expectedPeerByte = localSide === PAKE_ROLE_A ? PAKE_ROLE_B : PAKE_ROLE_A;
+      if (role !== expectedPeerByte) {
+        throw new PakeError(
+          PakeErrorCode.Abort,
+          `peer PAKE confirm side 0x${role.toString(16)} is not complementary to local side 0x${localSide.toString(16)}`,
+        );
+      }
+    }
+    if (this.peerPakeConfirm !== null) {
+      throw new PakeError(PakeErrorCode.Abort, "duplicate peer PAKE confirmation");
+    }
+    this.peerPakeConfirm = tag;
+    const resolve = this.pakeConfirmResolve;
+    this.pakeConfirmResolve = null;
+    resolve?.(tag);
   }
 
   private handleReceivedFile(file: ReceivedFile): void {
@@ -784,6 +1048,12 @@ export class ConversationOrchestrator {
     this.transcript = null;
     this.localSignatureSent = false;
     this.handshakeCompleting = false;
+    this.pakeSession = null;
+    this.peerPakeShare = null;
+    this.peerPakeConfirm = null;
+    this.pakePeerShareResolve = null;
+    this.pakeConfirmResolve = null;
+    this.pakeLocalSideByte = null;
     // safetyNumberValue is kept so callers can still read it after leave().
   }
 
