@@ -220,6 +220,17 @@ export class ConversationOrchestrator {
   private safetyNumberValue: string | null = null;
   private safetyNumberVerified = false;
   /**
+   * CR-15 test-only mirror of the derived traffic send key. Populated in
+   * {@link verifyPeerAndComplete} once {@link deriveSessionKeys} resolves, and
+   * cleared in {@link teardownSession}. The framing layer owns the authoritative
+   * copy (inside the private `FrameSender.config.sessionKeys.sendKey`); this
+   * field exists solely so the test seam {@link __getSendKeyForTest} can expose
+   * the derived key to integration tests without breaking the FrameSender's
+   * encapsulation. NEVER read this in production code — production uses the
+   * framing layer's copy.
+   */
+  private derivedSendKeyForTest: Uint8Array | null = null;
+  /**
    * In-memory mirror of the durable {@link ConversationRepository.getAuthFailed}
    * flag (R7/F3). Set on two paths:
    *   1. Hydrated from the durable repo flag at the end of {@link start}/
@@ -285,6 +296,29 @@ export class ConversationOrchestrator {
    */
   get handshakeAuthMode(): AuthMode {
     return this.authMode;
+  }
+
+  /**
+   * CR-15 TEST-ONLY SEAM. Returns the traffic send key derived by
+   * {@link deriveSessionKeys} for the current (or just-torn-down) session, or
+   * `null` if no handshake has completed key derivation yet.
+   *
+   * This seam exists solely so integration tests can prove the PAKE shared
+   * secret is mixed into the key schedule: a Pake handshake and a
+   * SafetyNumberOnly handshake over the SAME two identity keys (identical
+   * ECDH + transcript) MUST derive different sendKeys, because the former
+   * feeds `pakeSecret` into {@link deriveSessionKeys} while the latter passes
+   * `undefined`. That load-bearing assertion (report 14 M2) is unreachable
+   * without this seam because the framing layer's `FrameSender` keeps its
+   * `sessionKeys` private.
+   *
+   * The `__` prefix and this docstring mark it as test-only. Production code
+   * MUST NOT call this method; production uses the framing layer's own copy.
+   * The field is mirrored in {@link verifyPeerAndComplete} and cleared in
+   * {@link teardownSession}; no production behavior changes.
+   */
+  __getSendKeyForTest(): Uint8Array | null {
+    return this.derivedSendKeyForTest;
   }
 
   /**
@@ -979,6 +1013,11 @@ export class ConversationOrchestrator {
       localIdentityPublicKey: this.identity.publicKey,
       pakeSecret: pakeSecret ?? undefined,
     });
+    // CR-15: mirror the derived send key for the test-only seam. See the field
+    // docstring on `derivedSendKeyForTest` — this is NOT read by any production
+    // codepath; it exists so integration tests can assert the PAKE secret was
+    // mixed into the key schedule (the load-bearing assertion of report 14 M2).
+    this.derivedSendKeyForTest = sessionKeys.sendKey;
 
     const safetyNumber = await computeSafetyNumber(
       this.conversation,
@@ -1323,6 +1362,9 @@ export class ConversationOrchestrator {
     this.pakePeerShareResolve = null;
     this.pakeConfirmResolve = null;
     this.pakeLocalSideByte = null;
+    // CR-15: clear the test-only send-key mirror so a stale key never leaks
+    // across a session boundary. Production code never reads this field.
+    this.derivedSendKeyForTest = null;
     // safetyNumberValue is kept so callers can still read it after leave().
   }
 

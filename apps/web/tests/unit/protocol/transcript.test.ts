@@ -1,6 +1,7 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
+import { sha256 } from "@/features/chat/crypto/primitives";
 import { decodeTranscript, encodeTranscript } from "@/features/chat/protocol/codec";
 import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
 import {
@@ -18,6 +19,14 @@ import {
   type SessionId,
   type Transcript,
 } from "@/features/chat/protocol/types";
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 function pubKey(seed: number): PublicKey {
   return p256.getPublicKey(seedToPrivKey(seed), false) as unknown as PublicKey;
@@ -156,5 +165,64 @@ describe("encodeTranscript / decodeTranscript (343 bytes, canonical order)", () 
     (t2 as { conversationId: ConversationId }).conversationId = convId(0x80);
     const b = encodeTranscript(t2);
     expect(Array.from(a)).not.toEqual(Array.from(b));
+  });
+
+  // CR-11: transcript anti-reflection. If two peers could somehow negotiate
+  // transcripts that differ ONLY by which peer is the initiator vs responder
+  // (same four public keys, same sessions, roles swapped), the resulting
+  // encoded transcripts MUST still be byte-distinct — otherwise a reflection
+  // attack (or a regression that sorts both sides into the same slot, e.g.
+  // ordering by "smaller key first" on BOTH initiator and responder fields)
+  // would let the two transcripts collide. We assert byte-distinctness and
+  // distinct SHA-256 hashes over the canonical encodings.
+  it("produces distinct encodings when initiator/responder roles are swapped (anti-reflection)", async () => {
+    // Four fixed public keys shared by both transcripts — the ONLY thing that
+    // differs between t1 and t2 is which peer plays initiator vs responder.
+    const identityA = pubKey(1);
+    const identityB = pubKey(2);
+    const ephA = pubKey(3);
+    const ephB = pubKey(4);
+    const sessionA = sessionId(0x20);
+    const sessionB = sessionId(0x40);
+
+    const t1: Transcript = {
+      transcriptVersion: TRANSCRIPT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      conversationId: convId(0x10),
+      authMode: AuthMode.SafetyNumberOnly,
+      initiatorIdentityKey: identityA,
+      responderIdentityKey: identityB,
+      initiatorEphemeralKey: ephA,
+      responderEphemeralKey: ephB,
+      initiatorSessionId: sessionA,
+      responderSessionId: sessionB,
+    };
+
+    const t2: Transcript = {
+      transcriptVersion: TRANSCRIPT_VERSION,
+      protocolVersion: PROTOCOL_VERSION,
+      conversationId: convId(0x10),
+      authMode: AuthMode.SafetyNumberOnly,
+      initiatorIdentityKey: identityB,
+      responderIdentityKey: identityA,
+      initiatorEphemeralKey: ephB,
+      responderEphemeralKey: ephA,
+      initiatorSessionId: sessionB,
+      responderSessionId: sessionA,
+    };
+
+    const enc1 = encodeTranscript(t1);
+    const enc2 = encodeTranscript(t2);
+    // Byte-for-byte distinct encodings — guards against a regression that
+    // sorts both initiator and responder into the same slot.
+    expect(enc1.length).toBe(TRANSCRIPT_BYTES);
+    expect(enc2.length).toBe(TRANSCRIPT_BYTES);
+    expect(bytesEqual(enc1, enc2)).toBe(false);
+    // Distinct transcript hashes — guards against a collision that only shows
+    // up after hashing (defense-in-depth: even if byte-distinct somehow hashed
+    // alike, that would be a reflection-class collision worth flagging).
+    const h1 = await sha256(enc1);
+    const h2 = await sha256(enc2);
+    expect(bytesEqual(h1, h2)).toBe(false);
   });
 });

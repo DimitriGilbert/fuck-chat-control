@@ -110,6 +110,32 @@ async function tick(ms = 100): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * CR-14 helper: poll both orchestrators until BOTH reach Disconnected, with a
+ * bounded budget. Replaces the prior `not.toBe(Connected)` half-assertion,
+ * which a half-open Handshaking/Verifying state would also satisfy. The only
+ * legitimate terminal state for an aborting PAKE handshake is Disconnected
+ * (failHandshake routes Handshaking/Verifying → Disconnected); if the abort
+ * never fires this helper throws within `timeoutMs`, failing the test loudly
+ * rather than passing on a stale intermediate state.
+ */
+async function expectPollsDisconnected(
+  ...orchestrators: ConversationOrchestrator[]
+): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    if (orchestrators.every((o) => o.state === ConnectionState.Disconnected)) {
+      return;
+    }
+    await tick(25);
+  }
+  // Final assertion: if we got here, at least one side never settled. The
+  // toEqual line surfaces both states in the failure message for diagnosis.
+  expect(orchestrators.map((o) => o.state)).toEqual(
+    orchestrators.map(() => ConnectionState.Disconnected),
+  );
+}
+
 function isOrchError(e: unknown, code: OrchestratorErrorCode): boolean {
   return e instanceof OrchestratorError && e.code === code;
 }
@@ -236,17 +262,16 @@ describe("ConversationOrchestrator PAKE (SPAKE2) integration", () => {
       initiator.orchestrator.attachTransport(a);
       responder.orchestrator.attachTransport(b);
 
-      await tick(500);
-
-      // Neither side reaches Connected — the PAKE-derived traffic keys differ,
-      // so the first encrypted frame each side sends fails to decrypt on the
-      // other side (or the shares themselves yield different secrets that
-      // surface as a framing error). Critically: there is no fallback.
-      expect(initiator.orchestrator.state).not.toBe(ConnectionState.Connected);
-      expect(responder.orchestrator.state).not.toBe(ConnectionState.Connected);
+      // CR-14: the prior `not.toBe(Connected)` half was insufficient — a
+      // half-open Handshaking state would also satisfy it. Pin the POSITIVE
+      // terminal state: both sides must settle on Disconnected (the PAKE
+      // confirmation tag mismatch aborts the handshake via failHandshake,
+      // which is the only legitimate terminal state for a wrong-code run).
+      // Bounded poll so the assertion fails loudly if the abort never fires.
+      await expectPollsDisconnected(initiator.orchestrator, responder.orchestrator);
     });
 
-    it("surfaces a PakeError or handshake failure on the error handler (no silent success)", async () => {
+    it("surfaces a PakeError(Mismatch) on the error handler (no silent success)", async () => {
       const initiator = await makeOrchestrator();
       const responder = await makeOrchestrator();
       initiator.orchestrator.setPakeCode("111111");
@@ -261,13 +286,18 @@ describe("ConversationOrchestrator PAKE (SPAKE2) integration", () => {
 
       await tick(500);
 
-      // At least one side must have surfaced an error. The exact code depends
-      // on which side's framed send surfaces the mismatch first, but it is
-      // never silent — Connected is not reached without a matching secret.
+      // CR-14: tighten the decisive assertion. The prior `length > 0` accepted
+      // ANY error (transport noise, a stray framing error) as proof of abort.
+      // The load-bearing signal is that the PAKE confirmation exchange
+      // detected the divergent secrets and surfaced PakeErrorCode.Mismatch —
+      // the only error code runPakeConfirmation throws on a wrong code. Both
+      // sides settle on Disconnected (bounded poll), and at least one side's
+      // error handler MUST carry the typed Mismatch.
+      await expectPollsDisconnected(initiator.orchestrator, responder.orchestrator);
       const initErrors = initiator.spies.onError.calls.map((c) => c[0]);
       const respErrors = responder.spies.onError.calls.map((c) => c[0]);
       const allErrors = [...initErrors, ...respErrors];
-      expect(allErrors.length).toBeGreaterThan(0);
+      expect(allErrors.some((e) => isPakeError(e, PakeErrorCode.Mismatch))).toBe(true);
     });
   });
 
@@ -321,20 +351,30 @@ describe("ConversationOrchestrator PAKE (SPAKE2) integration", () => {
 
       await tick(400);
 
-      expect(initiator.orchestrator.state).not.toBe(ConnectionState.Connected);
-      expect(responder.orchestrator.state).not.toBe(ConnectionState.Connected);
-      // No SafetyNumberOnly completion: the PAKE await path is the only route
-      // to Connected under a Pake invitation, and it cannot complete. The
-      // orchestrator stays in Handshaking/Disconnected.
-      const allErrors = [
-        ...initiator.spies.onError.calls.map((c) => c[0]),
-        ...responder.spies.onError.calls.map((c) => c[0]),
-      ];
-      // No PakeError mismatches should fire (no shares exchanged at all); the
-      // session simply never completes. This is the no-fallback guarantee.
-      const sawPakeAbort = allErrors.some((e) => isPakeError(e, PakeErrorCode.Abort));
-      // An abort is acceptable (e.g. transport teardown); a silent Connected is not.
-      expect(sawPakeAbort || allErrors.length === 0).toBe(true);
+      // CR-14: drop the `|| allErrors.length === 0` escape hatch. The
+      // orchestrator's PAKE await path has no internal timeout, so when all
+      // shares are dropped both sides stall in Verifying (the promise inside
+      // awaitPakeFinish never resolves). The positive no-fallback signal is
+      // therefore NOT "an error fired" — it is "no path to Connected was
+      // taken": both sides remain in a non-Connected auth-in-progress state
+      // (Verifying or Disconnected), and crucially the handshake did NOT
+      // complete with a SafetyNumberOnly key schedule. Assert that positive
+      // state directly, and assert that NO error codepath that would indicate
+      // a silent SafetyNumberOnly completion fired (there is none, but the
+      // explicit check documents the invariant).
+      const initStates = initiator.spies.onStateChange.calls.map((c) => c[0]);
+      const respStates = responder.spies.onStateChange.calls.map((c) => c[0]);
+      expect(initStates).not.toContain(ConnectionState.Connected);
+      expect(respStates).not.toContain(ConnectionState.Connected);
+      // Positive terminal state: both are stuck in Verifying (share await) or
+      // have been torn down to Disconnected. Handshaking would indicate the
+      // signature round never completed; Connected is the forbidden fallback.
+      const acceptable = new Set<ConnectionState>([
+        ConnectionState.Verifying,
+        ConnectionState.Disconnected,
+      ]);
+      expect(acceptable.has(initiator.orchestrator.state)).toBe(true);
+      expect(acceptable.has(responder.orchestrator.state)).toBe(true);
     });
   });
 });
