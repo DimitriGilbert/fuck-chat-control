@@ -35,6 +35,7 @@ import { SignalingClient } from "@/features/chat/signaling/signaling-client";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import type { ConversationMessage, ConversationRepository } from "@/features/chat/store";
 import { AuthFailedRetryBlocked, MessageDirection } from "@/features/chat/store";
+import { getAuthFailedDurable, markAuthFailedDurable } from "@/features/chat/store/auth-failed-store";
 
 import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 import {
@@ -355,12 +356,13 @@ export class ConversationOrchestrator {
     const id = generateConversationId();
     this.conversation = id;
     await this.repository.createConversation(id, Date.now());
-    // R7/F3 durability: hydrate the in-memory cache from the durable repo flag
-    // so retry() (sync by contract) gates on the persisted truth, not just on
-    // in-session failures. start() always creates a fresh record (authFailed=
-    // false), but the read is cheap defense-in-depth and keeps start()/join()
-    // symmetric.
-    this.authFailedCached = await this.repository.getAuthFailed(id);
+    // R7/F3 + SEC-1 durability: hydrate the in-memory cache from BOTH the
+    // in-repo flag and the durable localStorage store. The durable store is the
+    // cross-session source of truth (the in-repo flag may be false if the
+    // session never reached the inner repo — e.g. the manager was locked at
+    // failure time). Either being true means retry() must block.
+    this.authFailedCached =
+      (await this.repository.getAuthFailed(id)) || (await getAuthFailedDurable(id));
     if (code !== undefined && code.length > 0) {
       this.pakeCode = code;
       this.authMode = AuthMode.Pake;
@@ -398,13 +400,16 @@ export class ConversationOrchestrator {
     const parsed = parseInvitation(bare);
     this.conversation = parsed.conversationId;
     await this.repository.createConversation(parsed.conversationId, Date.now());
-    // R7/F3 durability: hydrate the in-memory cache from the durable repo flag.
-    // The controller's resumeConversation path re-enters via join() with an
-    // existing conversation id (createConversation is idempotent and preserves
-    // the existing authFailed flag), so this closes the restart gap: a fresh
-    // orchestrator on a previously-auth-failed conversation reads the durable
-    // truth and retry() correctly throws AuthFailedRetryBlocked.
-    this.authFailedCached = await this.repository.getAuthFailed(parsed.conversationId);
+    // R7/F3 + SEC-1 durability: hydrate the in-memory cache from BOTH the
+    // in-repo flag and the durable localStorage store. join() is the re-entry
+    // point for the controller's resumeConversation path (createConversation is
+    // idempotent and preserves the existing authFailed flag), so this closes
+    // the restart gap: a fresh orchestrator on a previously-auth-failed
+    // conversation reads the durable truth and retry() correctly throws
+    // AuthFailedRetryBlocked even if the in-repo flag was never landed.
+    this.authFailedCached =
+      (await this.repository.getAuthFailed(parsed.conversationId)) ||
+      (await getAuthFailedDurable(parsed.conversationId));
     // R7/F6 (Phase 8.3): if the invitation carried a PAKE code, switch the
     // negotiated auth mode to Pake before the handshake begins. setPakeCode
     // throws AlreadyStarted here only if join() ran twice (we set this.started
@@ -1162,11 +1167,20 @@ export class ConversationOrchestrator {
       if (conversationId !== null) {
         // Fire-and-forget: failHandshake is synchronous by contract (its caller
         // is the .catch on the handshake promise). The repo write runs in the
-        // background; teardown proceeds in parallel.
-        void this.repository.markAuthFailed(conversationId).catch(() => {
-          // best-effort: the cache flag above is the authoritative gate for
-          // the synchronous retry() call; a failed repo write only means the
-          // flag will not survive a process restart.
+        // background; teardown proceeds in parallel. SEC-1: ALSO persist to the
+        // durable localStorage store so the flag survives a reload; SEC-2:
+        // surface genuine storage failures instead of swallowing them.
+        void Promise.all([
+          this.repository.markAuthFailed(conversationId),
+          markAuthFailedDurable(conversationId),
+        ]).catch((writeErr: unknown) => {
+          this.handlers.onError?.(
+            new OrchestratorError(
+              OrchestratorErrorCode.DurableStoreWriteFailed,
+              "failed to persist auth-failed flag",
+              writeErr,
+            ),
+          );
         });
       }
     }

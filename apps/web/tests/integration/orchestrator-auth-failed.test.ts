@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, beforeEach, afterAll } from "vitest";
 
 import {
   __setWasmModuleForTests,
@@ -15,6 +15,7 @@ import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { AuthFailedRetryBlocked } from "@/features/chat/store";
 import { InMemoryConversationRepository } from "@/features/chat/store";
 import type { ConversationRepository } from "@/features/chat/store";
+import { AUTH_FAILED_STORAGE_KEY } from "@/features/chat/store/auth-failed-store";
 
 import {
   ConversationOrchestrator,
@@ -29,6 +30,7 @@ import {
   mockSocketFactory,
   MockSignalingSocket,
 } from "../unit/orchestrator/_helpers";
+import { installLocalStorage, type MemoryStorage } from "../unit/store/_helpers";
 
 const PKG_JS = fileURLToPath(
   new URL("../../src/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
@@ -397,6 +399,85 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
       // though the durable repo flag was true. With hydration in join(), the
       // cache is seeded from the durable flag and retry() throws.
       expect(() => restarted.orchestrator.retry()).toThrow(AuthFailedRetryBlocked);
+    });
+  });
+
+  describe("true reload across a NEW repository (SEC-1 durable localStorage store)", () => {
+    // The Node integration environment has no `localStorage` global; install
+    // an in-memory one for the durable-store paths the orchestrator now
+    // touches during start()/join() hydration and failHandshake.
+    let storage: MemoryStorage;
+    let teardownLocalStorage: () => void;
+
+    beforeAll(() => {
+      const installed = installLocalStorage();
+      storage = installed.storage;
+      teardownLocalStorage = installed.teardown;
+    });
+
+    beforeEach(() => {
+      // Isolate the durable store between tests so a prior test's flag never
+      // bleeds into this one.
+      storage.removeItem(AUTH_FAILED_STORAGE_KEY);
+    });
+
+    afterAll(() => {
+      teardownLocalStorage();
+    });
+
+    it("a fresh orchestrator + fresh repo on a previously-auth-failed conversation rejects retry via the durable store", async () => {
+      // Phase 1: drive a real handshake to an IdentityChanged failure so the
+      // durable localStorage flag is written for this conversation id.
+      const initiator = await makeOrchestrator();
+      const responder = await makeOrchestrator();
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const bogusIdentity = await generateIdentityKeyPair();
+      const bogusKey = encodePublicKey(bogusIdentity.publicKey);
+      await responder.repository.storePeerIdentity(
+        responder.orchestrator.conversationId!,
+        "00 00 00 00 00 00",
+        bogusKey,
+      );
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      responder.orchestrator.attachTransport(b);
+      await tick(300);
+
+      const failedConversationId = responder.orchestrator.conversationId!;
+      // Confirm the durable localStorage store was written (SEC-1).
+      const durableRaw = storage.getItem(AUTH_FAILED_STORAGE_KEY);
+      expect(durableRaw).not.toBeNull();
+      const durableParsed = JSON.parse(durableRaw as string) as Record<string, true>;
+      const hex = Array.from(failedConversationId, (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      expect(durableParsed[hex]).toBe(true);
+
+      // Phase 2: simulate a TRUE process reload — a NEW controller instance
+      // means a NEW repository (the in-repo authFailed flag is gone; the only
+      // thing carrying the cross-session truth is the durable localStorage
+      // store). This is the hardest case the SEC-1 fix must close: a fresh
+      // repo reports getAuthFailed=false, so without the durable hydration the
+      // orchestrator's authFailedCached would default to false and retry()
+      // would wrongly proceed.
+      const reloaded = await makeOrchestrator();
+      // Sanity: the fresh repo reports false (no in-session record).
+      expect(await reloaded.repository.getAuthFailed(failedConversationId)).toBe(false);
+
+      const fragment = `#${invitation.split("#")[1]}`;
+      await reloaded.orchestrator.join(fragment);
+      expect(reloaded.orchestrator.conversationId).toEqual(failedConversationId);
+
+      // Move into Disconnected so retry() is legal by state.
+      reloaded.orchestrator.leave();
+      expect(reloaded.orchestrator.state).toBe(ConnectionState.Disconnected);
+
+      // THE SEC-1 GATE: the durable store hydrated authFailedCached, so retry()
+      // throws AuthFailedRetryBlocked even though the fresh repo has no flag.
+      expect(() => reloaded.orchestrator.retry()).toThrow(AuthFailedRetryBlocked);
     });
   });
 });

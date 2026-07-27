@@ -56,6 +56,16 @@ export interface AtRestKeyManager {
   setPassphrase(passphrase: string): Promise<void>;
   /** True once {@link lock} has been called and until a successful unlock. */
   isLocked(): boolean;
+  /**
+   * Register a callback fired after a SUCCESSFUL {@link unlock} (locked →
+   * unlocked transition). Used by the {@link LockableRepository} wrapper to
+   * flush auth-failed writes that were queued while locked (R7/F3 + SEC-2).
+   * The callback is invoked AFTER the manager's own state flips, so
+   * `isLocked()` reads false inside the callback. Returning `false` from the
+   * callback does nothing; the contract is "you were notified". Registering
+   * returns an unsubscribe function.
+   */
+  onUnlock(callback: () => void): () => void;
 }
 
 const MODE_AUTO = "auto";
@@ -95,6 +105,22 @@ type StoredAtRest = StoredAutoKey | StoredWrappedKey;
 export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager {
   let autoKey: AtRestKey | null = null;
   let locked = false;
+  const unlockListeners = new Set<() => void>();
+
+  function notifyUnlocked(): void {
+    // Snapshot to a local array so a callback that (un)subscribes during
+    // dispatch does not mutate the set mid-iteration.
+    const snapshot = Array.from(unlockListeners);
+    for (const cb of snapshot) {
+      try {
+        cb();
+      } catch {
+        // A listener throwing must not break the unlock path or block other
+        // listeners. The listener owns its own error handling; surfacing here
+        // would couple the manager to consumer failures.
+      }
+    }
+  }
 
   return {
     async ensureLoaded(): Promise<void> {
@@ -151,12 +177,14 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
         // in-memory key from storage and clear the lock.
         autoKey = base64ToBytes(parsed.keyBase64) as unknown as AtRestKey;
         locked = false;
+        notifyUnlocked();
         return true;
       }
       const wrapped = base64ToBytes(parsed.wrappedBase64) as unknown as WrappedKey;
       try {
         autoKey = await unwrapKey(passphrase, wrapped);
         locked = false;
+        notifyUnlocked();
         return true;
       } catch (err) {
         if (err instanceof CryptoError && err.code === CryptoErrorCode.WrongPassphrase) {
@@ -185,6 +213,13 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
 
     isLocked(): boolean {
       return locked;
+    },
+
+    onUnlock(callback: () => void): () => void {
+      unlockListeners.add(callback);
+      return () => {
+        unlockListeners.delete(callback);
+      };
     },
   };
 }

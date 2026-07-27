@@ -1,4 +1,4 @@
-export { generateIdentityKeyPair, signTranscript, verifyTranscript } from "./identity";
+export { derivePublicKeyFromPrivate, generateIdentityKeyPair, signTranscript, verifyTranscript } from "./identity";
 export { generateEphemeralKeyPair, deriveSessionKeys } from "./session";
 export { ReplayWindow, encryptFrame, decryptFrame } from "./aead";
 export { computeSafetyNumber } from "./safety-number";

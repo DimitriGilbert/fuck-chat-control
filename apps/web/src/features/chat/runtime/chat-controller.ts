@@ -1032,6 +1032,16 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       mode: ImportMode,
     ): Promise<ImportResult> {
       const result = await importBundle(passphrase, bundle, repository, mode);
+      // SEC-3: the bundle carries the exporter's device-identity private scalar
+      // (base64 in the payload). When present, adopt it as the active identity
+      // BEFORE refreshConversations() so any downstream read of the identity
+      // (e.g. a session resume) sees the imported pair. ImportResult.deviceIdentity
+      // is the raw privateKey Uint8Array (or null when the exporter held no
+      // identity); see export-bundle.ts decodeIdentity + store/types.ts
+      // ImportResult. Adoption does NOT rotate the at-rest key.
+      if (result.deviceIdentity !== null) {
+        await deps.identityManager.adoptImportedIdentity(result.deviceIdentity);
+      }
       await refreshConversations();
       return result;
     },

@@ -1,4 +1,4 @@
-import { generateIdentityKeyPair, signTranscript } from "@/features/chat/crypto";
+import { derivePublicKeyFromPrivate, generateIdentityKeyPair, signTranscript } from "@/features/chat/crypto";
 import type { IdentityKeyPair } from "@/features/chat/crypto";
 import { decodePublicKey } from "@/features/chat/protocol/codec";
 import type { PublicKey, Signature, Transcript } from "@/features/chat/protocol/types";
@@ -34,6 +34,27 @@ export interface IdentityManager {
   get(): IdentityKeyPair;
   /** Loads the persisted identity, or generates and persists a fresh one. */
   ensureLoaded(): Promise<void>;
+  /**
+   * Adopt an imported private key, persisting it as the active identity.
+   *
+   * SEC-3: previously the {@link ImportResult.deviceIdentity} returned by
+   * `importBundle` was silently discarded — the controller never propagated it
+   * into the manager, so the next page load rehydrated the OLD identity and
+   * the imported key was lost. This method overwrites both the in-memory
+   * identity AND the persisted storage entry, then rebuilds the `sign` closure
+   * so subsequent `get()` calls return the imported pair without an
+   * `ensureLoaded` round-trip.
+   *
+   * The public key is re-derived from the private scalar via
+   * {@link derivePublicKeyFromPrivate} (P-256; the bundle stores only the
+   * private half because the public point is reproducible from the curve).
+   *
+   * NOTE: this does NOT rotate the at-rest key. The caller (chat-controller)
+   * invokes adoption AFTER the bundle's conversation history has already been
+   * decrypted under the passphrase-derived at-rest key, so the freshly adopted
+   * identity sits on top of the existing sealed store without re-keying it.
+   */
+  adoptImportedIdentity(privateKey: Uint8Array): Promise<void>;
   /**
    * Drop the in-memory identity reference (R9/F8). The persisted form on disk
    * is unchanged — the next manager that calls `ensureLoaded` on the same
@@ -91,6 +112,24 @@ export function createIdentityManager(storage: IdentityStorage): IdentityManager
       };
       storage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(stored));
       identity = fresh;
+    },
+    async adoptImportedIdentity(privateKey: Uint8Array): Promise<void> {
+      // SEC-3: re-derive the public point from the imported private scalar and
+      // build the same {publicKey, privateKey, sign} shape `ensureLoaded`
+      // produces, then overwrite both the in-memory identity AND the persisted
+      // storage entry. The at-rest key is NOT rotated — see interface doc.
+      const publicKey = derivePublicKeyFromPrivate(privateKey);
+      const adopted: IdentityKeyPair = {
+        publicKey,
+        privateKey,
+        sign: (transcript: Transcript): Promise<Signature> => signTranscript(privateKey, transcript),
+      };
+      const stored: StoredIdentity = {
+        publicKeyBase64: bytesToBase64(publicKey),
+        privateKeyBase64: bytesToBase64(privateKey),
+      };
+      storage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(stored));
+      identity = adopted;
     },
     evict(): void {
       // Drop the closure-captured identity so the private key is no longer

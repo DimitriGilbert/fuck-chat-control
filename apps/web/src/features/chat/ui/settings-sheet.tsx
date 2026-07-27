@@ -128,8 +128,13 @@ function SettingsSheetContent({ onClose }: SettingsSheetContentProps): React.Rea
 function reportImportResult(result: ImportResult): void {
   const conflictNote =
     result.conflicts.length > 0 ? ` (${result.conflicts.length} identity conflicts)` : "";
+  // SEC-3: when the bundle carried a device-identity private scalar, the
+  // controller has already adopted it by the time we render this toast — surface
+  // that as an explicit line so the user knows their identity moved with the
+  // bundle (rather than silently switching keys on the next session).
+  const identityNote = result.deviceIdentity !== null ? " Identity restored from bundle." : "";
   toast.success("Bundle imported", {
-    description: `${result.conversationsAdded + result.conversationsMerged} conversations, ${result.messagesImported} messages${conflictNote}.`,
+    description: `${result.conversationsAdded + result.conversationsMerged} conversations, ${result.messagesImported} messages${conflictNote}.${identityNote}`,
   });
 }
 

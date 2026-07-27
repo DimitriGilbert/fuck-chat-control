@@ -10,12 +10,27 @@ import type { IdentityKeyPair } from "./types";
 
 export async function generateIdentityKeyPair(): Promise<IdentityKeyPair> {
   const privateKey = p256.utils.randomSecretKey();
-  const publicKey = encodePublicKey(p256.getPublicKey(privateKey, false));
+  const publicKey = derivePublicKeyFromPrivate(privateKey);
   return {
     publicKey,
     privateKey,
     sign: (transcript: Transcript): Promise<Signature> => signTranscript(privateKey, transcript),
   };
+}
+
+/**
+ * Derive the 65-byte uncompressed SEC1 P-256 public key from a private scalar.
+ * Used to recompute the public half when only the private key is available —
+ * e.g. when adopting an imported bundle's device identity (the bundle stores
+ * only the private scalar; the public key is reproducible from the curve).
+ *
+ * Mirrors the path used by {@link generateIdentityKeyPair} and the ephemeral
+ * keypair generator in `session.ts`: `p256.getPublicKey(secret, false)` yields
+ * the uncompressed point, then {@link encodePublicKey} validates on-curve and
+ * brands it.
+ */
+export function derivePublicKeyFromPrivate(privateKey: Uint8Array): PublicKey {
+  return encodePublicKey(p256.getPublicKey(privateKey, false));
 }
 
 export async function signTranscript(

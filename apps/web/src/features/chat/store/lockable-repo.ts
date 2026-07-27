@@ -1,5 +1,6 @@
 import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
 
+import { getAuthFailedDurable } from "./auth-failed-store";
 import { MessageDirection } from "./types";
 import type {
   ConversationMessage,
@@ -26,14 +27,54 @@ import { AtRestLockedError } from "../runtime/at-rest-key-manager";
  * implement {@link PersistableConversationRepository} — serialization is a
  * repository-lifetime operation owned by the bundle exporter, which holds the
  * real repo reference and is only invoked while unlocked by contract.
+ *
+ * AUTH-FAILED HANDLING (SEC-2): the auth-failed flag is plain metadata, not
+ * ciphertext, so writing it does not require the at-rest key. To avoid
+ * crashing session-start hydration with {@link AtRestLockedError} when the
+ * manager is locked, {@link markAuthFailed} and {@link getAuthFailed} are
+ * special-cased: while locked, `markAuthFailed` queues the id into
+ * {@link pendingAuthFailedWrites} (the durable store from
+ * `auth-failed-store.ts` carries the cross-session truth regardless), and
+ * `getAuthFailed` falls back to the durable store. On unlock, the manager's
+ * `onUnlock` callback fires {@link flushPendingAuthFailed}, which replays the
+ * queued ids into the inner repo.
  */
 export class LockableRepository implements ConversationRepository {
   private readonly inner: ConversationRepository;
   private readonly manager: AtRestKeyManager;
+  /**
+   * Conversation ids whose `markAuthFailed` was queued while the manager was
+   * locked. Flushed by {@link flushPendingAuthFailed} on the locked→unlocked
+   * transition. Plain metadata only — the durable localStorage store is the
+   * cross-session source of truth.
+   */
+  private readonly pendingAuthFailedWrites = new Set<ConversationId>();
+  /**
+   * Optional sink for unexpected (non-lock) errors encountered while flushing
+   * pending auth-failed writes. Wired by the controller/orchestrator to
+   * surface genuine storage failures instead of swallowing them.
+   */
+  private flushErrorSink: ((err: unknown) => void) | null = null;
 
   constructor(inner: ConversationRepository, manager: AtRestKeyManager) {
     this.inner = inner;
     this.manager = manager;
+    // Register for the locked→unlocked transition once. The manager owns the
+    // callback set; the unsubscribe is implicitly the lifetime of this wrapper
+    // (the wrapper and manager share the controller's lifetime).
+    manager.onUnlock(() => {
+      this.flushPendingAuthFailed();
+    });
+  }
+
+  /**
+   * Wire a sink for unexpected (non-{@link AtRestLockedError}) failures during
+   * {@link flushPendingAuthFailed}. Called by the orchestrator/controller so a
+   * genuine storage failure during replay is surfaced to `handlers.onError`
+   * instead of swallowed.
+   */
+  setFlushErrorSink(sink: (err: unknown) => void): void {
+    this.flushErrorSink = sink;
   }
 
   /** True iff the underlying at-rest key is currently locked. */
@@ -112,13 +153,73 @@ export class LockableRepository implements ConversationRepository {
   }
 
   async markAuthFailed(id: ConversationId): Promise<void> {
-    this.assertUnlocked();
-    await this.inner.markAuthFailed(id);
+    if (this.manager.isLocked()) {
+      // SEC-2: the auth-failed flag is plain metadata; do not crash hydration
+      // or fail the handshake by rethrowing AtRestLockedError. Queue the id;
+      // the durable store from auth-failed-store.ts already carries the
+      // cross-session truth, and {@link flushPendingAuthFailed} will land the
+      // in-repo flag on unlock.
+      this.pendingAuthFailedWrites.add(id);
+      return;
+    }
+    try {
+      await this.inner.markAuthFailed(id);
+    } catch (err) {
+      if (err instanceof AtRestLockedError) {
+        // The manager re-locked between our isLocked() check and the inner
+        // write (concurrent lock()). Queue and let the next unlock flush it.
+        this.pendingAuthFailedWrites.add(id);
+        return;
+      }
+      throw err;
+    }
   }
 
   async getAuthFailed(id: ConversationId): Promise<boolean> {
-    this.assertUnlocked();
-    return await this.inner.getAuthFailed(id);
+    if (this.manager.isLocked()) {
+      // SEC-2: hydration must not throw while locked. Fall back to the durable
+      // store (the cross-session truth) plus any write queued in this session.
+      return this.pendingAuthFailedWrites.has(id) || (await getAuthFailedDurable(id));
+    }
+    try {
+      return await this.inner.getAuthFailed(id);
+    } catch (err) {
+      if (err instanceof AtRestLockedError) {
+        return this.pendingAuthFailedWrites.has(id) || (await getAuthFailedDurable(id));
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Replay queued `markAuthFailed` ids into the inner repo once the manager has
+   * unlocked. Called automatically from the manager's `onUnlock` callback.
+   * Best-effort: non-{@link AtRestLockedError} failures are forwarded to the
+   * {@link flushErrorSink} (when wired); a concurrent re-lock re-queues an id
+   * for the next unlock instead of dropping it.
+   */
+  flushPendingAuthFailed(): void {
+    if (this.pendingAuthFailedWrites.size === 0) return;
+    // Snapshot then clear: subsequent markAuthFailed calls during this dispatch
+    // (or a concurrent re-lock) re-queue cleanly.
+    const queued = Array.from(this.pendingAuthFailedWrites);
+    this.pendingAuthFailedWrites.clear();
+    for (const id of queued) {
+      void this.inner
+        .markAuthFailed(id)
+        .then(() => {
+          // success: nothing to surface. The flag is now durable in the repo.
+        })
+        .catch((err: unknown) => {
+          if (err instanceof AtRestLockedError) {
+            // Re-locked mid-flush: re-queue for the next unlock.
+            this.pendingAuthFailedWrites.add(id);
+            return;
+          }
+          // Unexpected storage failure: forward to the sink if wired.
+          this.flushErrorSink?.(err);
+        });
+    }
   }
 
   async clearConversation(id: ConversationId): Promise<void> {
