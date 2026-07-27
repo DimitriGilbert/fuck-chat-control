@@ -34,7 +34,6 @@ import { CopyIcon, PaperclipIcon, SendIcon, ShieldIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { randomBytes } from "@/features/chat/crypto/primitives";
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { AuthMode } from "@/features/chat/protocol/types";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
@@ -106,6 +105,24 @@ export function ChatView(): React.ReactElement {
     controller.leave();
   }
 
+  /**
+   * R7/F3 (Phase 3b / CR-3): once the session has durably failed auth, retry
+   * is disabled (re-handshaking with the same identity would just re-trigger
+   * the same failure). The only recovery path is to start a fresh, uncoded
+   * conversation. The orchestrator's `start()` allocates a new conversation
+   * id and the InvitationBanner takes over to surface the new link.
+   */
+  async function handleCreateFreshInvitation(): Promise<void> {
+    if (controller === null) return;
+    try {
+      await controller.startConversation();
+    } catch (err: unknown) {
+      toast.error("Could not create invitation", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   function sendFiles(files: FileList | readonly File[]): void {
     if (controller === null || activeId === null) return;
     for (const file of Array.from(files)) {
@@ -166,8 +183,10 @@ export function ChatView(): React.ReactElement {
         safetyNumber={state.safetyNumber}
         safetyNumberVerified={state.safetyNumberVerified}
         authMode={state.active?.authMode ?? AuthMode.SafetyNumberOnly}
+        authFailed={state.active?.authFailed ?? false}
         error={state.error}
         onRetry={handleRetry}
+        onCreateInvitation={handleCreateFreshInvitation}
         onLeave={handleLeave}
       />
 
@@ -342,14 +361,35 @@ interface StatusBarProps {
   readonly safetyNumber: string | null;
   readonly safetyNumberVerified: boolean;
   readonly authMode: AuthMode;
+  /**
+   * R7/F3 (Phase 3b / CR-3): durable auth-failed flag. When true, the retry
+   * affordance is hidden (re-handshaking would just re-fail) and a "Create a
+   * fresh invitation" CTA is rendered in its place.
+   */
+  readonly authFailed: boolean;
   readonly error: string | null;
   readonly onRetry: () => void;
+  /**
+   * Invoked when the user picks the "Create a fresh invitation" recovery CTA
+   * (rendered when {@link authFailed} is true). The handler leaves the failed
+   * session and starts a fresh uncoded conversation.
+   */
+  readonly onCreateInvitation: () => void;
   readonly onLeave: () => void;
 }
 
 function StatusBar(props: StatusBarProps): React.ReactElement {
-  const { connectionState, safetyNumber, safetyNumberVerified, authMode, error, onRetry, onLeave } =
-    props;
+  const {
+    connectionState,
+    safetyNumber,
+    safetyNumberVerified,
+    authMode,
+    authFailed,
+    error,
+    onRetry,
+    onCreateInvitation,
+    onLeave,
+  } = props;
   const variant = CONNECTION_STATE_VARIANTS[connectionState];
   const label = CONNECTION_STATE_LABELS[connectionState];
   // SEC-4: once connected, label the session's auth provenance. PAKE sessions
@@ -386,9 +426,21 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
         </span>
       )}
       <div className="ml-auto flex items-center gap-1">
-        {connectionState === ConnectionState.Disconnected && (
+        {/*
+         * R7/F3 (Phase 3b / CR-3): retry is gated on Disconnected AND
+         * !authFailed. When auth previously failed, re-handshaking with the
+         * same identity is durably blocked; the only recovery is a fresh
+         * invitation. The fresh-invitation CTA takes over the same slot so
+         * the user has exactly one obvious action.
+         */}
+        {connectionState === ConnectionState.Disconnected && !authFailed && (
           <Button variant="outline" size="sm" onClick={onRetry}>
             Retry
+          </Button>
+        )}
+        {connectionState === ConnectionState.Disconnected && authFailed && (
+          <Button variant="default" size="sm" onClick={onCreateInvitation}>
+            Create a fresh invitation
           </Button>
         )}
         <Button variant="outline" size="sm" onClick={onLeave}>
@@ -491,25 +543,6 @@ function InvitationBanner(): React.ReactElement | null {
   }
 
   /**
-   * Generate a fresh 6-digit code using the same CSPRNG the rest of the
-   * crypto layer uses (randomBytes -> crypto.getRandomValues). Math.random
-   * is explicitly forbidden for security-relevant values.
-   *
-   * 6 digits -> [000000, 999999]. We sample 4 bytes (32 bits) and reduce mod
-   * 1e6; the bias is under 1e-3 of a digit and well below the 20-bit entropy
-   * ceiling the PRD calls out for the 6-digit code (PRD ~:262).
-   */
-  function generateCode(): string {
-    const bytes = randomBytes(4);
-    // Compose a uint32 in unsigned-arithmetic-safe order. Each byte is at most
-    // 0xff; multiplying and adding in this order keeps the running total under
-    // 2^32 (no sign-bit / int32 wrap surprise).
-    const n =
-      bytes[0]! * 0x1000000 + bytes[1]! * 0x10000 + bytes[2]! * 0x100 + bytes[3]!;
-    return (n % 1_000_000).toString().padStart(6, "0");
-  }
-
-  /**
    * Apply the user's PAKE choice: leave the current uncoded conversation and
    * start a fresh one with the chosen code. The orchestrator's `start()`
    * requires the code up front (PAKE state must be ready before the peer
@@ -517,6 +550,10 @@ function InvitationBanner(): React.ReactElement | null {
    *
    * Removing PAKE reverses the flow: leave the coded conversation and start
    * a fresh uncoded one.
+   *
+   * Phase 3b (CR-4): the 6-digit code is generated by the controller's
+   * `generatePakeCode()` so the CSPRNG sampling + modular reduction live in
+   * the security-relevant runtime, not the render layer.
    */
   async function applyPakeChoice(next: boolean): Promise<void> {
     if (controller === null || busy) return;
@@ -527,7 +564,7 @@ function InvitationBanner(): React.ReactElement | null {
         controller.leaveConversation(currentId);
       }
       if (next) {
-        const code = codeDraft.trim().length === 6 ? codeDraft.trim() : generateCode();
+        const code = codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
         setCodeDraft(code);
         await controller.startConversation({ code });
         toast.success("PAKE-protected invitation ready", {
@@ -552,9 +589,9 @@ function InvitationBanner(): React.ReactElement | null {
     void applyPakeChoice(next);
   }
 
-  function handleRegenerateCode(): void {
-    if (busy) return;
-    const fresh = generateCode();
+  function handleRegeneratePakeCode(): void {
+    if (busy || controller === null) return;
+    const fresh = controller.generatePakeCode();
     setCodeDraft(fresh);
     // Apply immediately so the invitation reflects the new code.
     void applyPakeChoice(true);
@@ -601,7 +638,7 @@ function InvitationBanner(): React.ReactElement | null {
         codeDraft={codeDraft}
         busy={busy}
         onToggle={handleTogglePake}
-        onRegenerate={handleRegenerateCode}
+        onRegenerate={handleRegeneratePakeCode}
         onCodeDraftChange={handleCodeDraftChange}
         onApplyCustomCode={handleApplyCustomCode}
         onCopyCode={copyCode}

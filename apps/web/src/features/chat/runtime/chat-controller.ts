@@ -5,6 +5,7 @@ import {
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
 } from "@/features/chat/protocol/limits";
+import { randomBytes } from "@/features/chat/crypto/primitives";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "@/features/chat/store";
@@ -112,6 +113,18 @@ export interface ChatController {
    * SPAKE2 against the same code and aborts loudly on mismatch.
    */
   startConversation(options?: { readonly code?: string }): Promise<{ invitation: string }>;
+  /**
+   * Generate a fresh 6-digit PAKE code using the same CSPRNG the crypto layer
+   * uses (randomBytes -> crypto.getRandomValues). 6 digits -> [000000, 999999]:
+   * sample 4 bytes (32 bits) and reduce mod 1e6. The bias is under 1e-3 of a
+   * digit, well below the 20-bit entropy ceiling the PRD calls out for the
+   * 6-digit code.
+   *
+   * R7/F6 / Phase 8: lives on the controller (not the UI) so the sampling +
+   * modular reduction stays inside the security-relevant runtime boundary and
+   * the UI is a pure render layer over the controller's surface.
+   */
+  generatePakeCode(): string;
   joinConversation(fragment: string): Promise<void>;
   resumeConversation(conversationId: ConversationId): Promise<void>;
   selectConversation(conversationId: ConversationId): void;
@@ -649,6 +662,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       await refreshConversations();
       emit(null);
       return { invitation };
+    },
+
+    generatePakeCode(): string {
+      return generatePakeCode();
     },
 
     async joinConversation(fragment: string): Promise<void> {
@@ -1214,6 +1231,29 @@ function utf8Length(value: string): number {
 }
 
 const TEXT_ENCODER = new TextEncoder();
+
+/**
+ * Generate a fresh 6-digit PAKE code using the same CSPRNG the rest of the
+ * crypto layer uses (randomBytes -> crypto.getRandomValues). Math.random is
+ * explicitly forbidden for security-relevant values.
+ *
+ * 6 digits -> [000000, 999999]. We sample 4 bytes (32 bits) and reduce mod
+ * 1e6; the bias is under 1e-3 of a digit and well below the 20-bit entropy
+ * ceiling the PRD calls out for the 6-digit code (PRD ~:262).
+ *
+ * Exported so the unit suite can assert format + spread properties directly
+ * against the helper (the controller's public `generatePakeCode` method is a
+ * one-line passthrough to this function).
+ */
+export function generatePakeCode(): string {
+  const bytes = randomBytes(4);
+  // Compose a uint32 in unsigned-arithmetic-safe order. Each byte is at most
+  // 0xff; multiplying and adding in this order keeps the running total under
+  // 2^32 (no sign-bit / int32 wrap surprise).
+  const n =
+    bytes[0]! * 0x1000000 + bytes[1]! * 0x10000 + bytes[2]! * 0x100 + bytes[3]!;
+  return (n % 1_000_000).toString().padStart(6, "0");
+}
 
 /**
  * True if the orchestrator rejected because the concurrent-transfer cap was

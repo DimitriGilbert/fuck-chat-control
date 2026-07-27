@@ -457,6 +457,14 @@ export class ConversationOrchestrator {
     // generation at scheduling time and abort (without mutating this.ephemeral
     // or other handshake state) if it has advanced by the time they resolve.
     this.handshakeGeneration += 1;
+    // CR-1: reset so a second failure on a fresh retry path surfaces. Without
+    // this, failHandshake's `if (this.handshakeError !== null) return;` guard
+    // turns handshakeError into a set-once flag — the FIRST failure silently
+    // swallows every subsequent failure, including on a brand-new transport
+    // after retry(). Tying the reset to a fresh attachTransport (rather than
+    // a separate handshakeErrorGeneration) is sufficient: a new handshake
+    // always claims its own transport, so there is no multi-transport race.
+    this.handshakeError = null;
     this.transport = transport;
     this.setState(ConnectionState.Handshaking);
     // Kick off the local Hello generation and transmission.
@@ -784,12 +792,41 @@ export class ConversationOrchestrator {
       return;
     }
     if (bytes.length === PAKE_MESSAGE_BYTES) {
+      // CR-2 phase guard (strict): a PakeShare is only ever valid once the local
+      // signature round has begun — i.e. after `verifyPeerAndComplete` has set
+      // pakeLocalSideByte synchronously (PAKE mode) or after a PAKE session
+      // exists (re-entry/async races within the same handshake). The signal
+      // pakeLocalSideByte === null && pakeSession === null is true EXACTLY when
+      // no PAKE round has begun: in SafetyNumberOnly mode it is always true
+      // (PAKE frames are invalid anyway), and in Pake mode it is true until the
+      // synchronous top-of-verifyPeerAndComplete assignment — closing the prior
+      // window between Hello receipt (remoteHello set at ~783) and the
+      // setState(Verifying) call that previously ran only AFTER verifyTranscript.
+      // An attacker-injected PAKE frame landing in that window is now rejected
+      // at the gate rather than stashed. The legitimate reorder (share racing
+      // ahead of awaitPakeFinish) lands AFTER the synchronous set, so the guard
+      // does not fire and the share flows through to handlePakeShare as before.
+      if (this.pakeLocalSideByte === null && this.pakeSession === null) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedHandshakeMessage,
+          "PAKE frame received before signature verified",
+        );
+      }
       const msg = decodePakeShare(bytes);
       if (generation !== this.handshakeGeneration) return;
       await this.handlePakeShare(msg.role, msg.share);
       return;
     }
     if (bytes.length === PAKE_CONFIRM_MESSAGE_BYTES) {
+      // CR-2 phase guard (strict): same invariant as PakeShare — a PakeConfirm is
+      // only valid once the local PAKE round has begun. See the PakeShare branch
+      // above for the full rationale on the pakeLocalSideByte/pakeSession signal.
+      if (this.pakeLocalSideByte === null && this.pakeSession === null) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedHandshakeMessage,
+          "PAKE frame received before signature verified",
+        );
+      }
       const msg = decodePakeConfirm(bytes);
       if (generation !== this.handshakeGeneration) return;
       await this.handlePakeConfirm(msg.role, msg.tag);
@@ -844,6 +881,21 @@ export class ConversationOrchestrator {
     const remoteEphemeralKey = this.remoteHello.ephemeralPublicKey;
     const remoteSessionId = this.remoteHello.sessionId;
 
+    // CR-2 strict: set the local side byte SYNCHRONOUSLY before the first await
+    // (verifyTranscript below) so the inbound dispatcher's PAKE phase guard keys
+    // on a signal that is true EXACTLY when the signature round has begun —
+    // closing the window between Hello receipt (remoteHello set in dispatch at
+    // ~783) and signature verification (which setState(Verifying) only marks as
+    // having begun AFTER the await below). Without this, an attacker-injected
+    // PAKE frame landing in that window would pass the remoteHello !== null guard
+    // and be stashed. pakeLocalSideByte is the same value the PAKE block below
+    // uses to send our share; computing it here lets us reuse it there.
+    let pakeRole: Role | null = null;
+    if (this.authMode === AuthMode.Pake) {
+      pakeRole = deriveRole(this.identity.publicKey, remoteIdentityKey);
+      this.pakeLocalSideByte = pakeRole === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
+    }
+
     // Signature verification against the transcript.
     const ok = await verifyTranscript(remoteIdentityKey, remoteSignature, this.transcript);
     if (!ok) {
@@ -886,13 +938,23 @@ export class ConversationOrchestrator {
           "authMode is Pake but no PAKE code is set",
         );
       }
-      const role = deriveRole(this.identity.publicKey, remoteIdentityKey);
+      // pakeRole/pakeLocalSideByte were computed synchronously at the top of this
+      // method (before verifyTranscript). Reuse them: one source of truth for the
+      // local role, both for the guard signal and the outbound share byte. The
+      // non-null checks are invariants (both are set iff authMode is Pake at the
+      // top of this method) and guard against any future reorder.
+      if (pakeRole === null || this.pakeLocalSideByte === null) {
+        throw new PakeError(
+          PakeErrorCode.Abort,
+          "PAKE role not derived before session creation",
+        );
+      }
+      const role = pakeRole;
+      const sideByte = this.pakeLocalSideByte;
       const session = await createPakeSession(code, role);
       this.pakeSession = session;
       // Send the local SPAKE2 share to the peer (cleartext, as with the Hello).
       const localShare = pakeOutgoingShare(session);
-      const sideByte = role === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
-      this.pakeLocalSideByte = sideByte;
       this.transport.send(encodePakeShare(sideByte, localShare));
       // Await the peer's share; handlePakeShare stashes it and completes the
       // exchange when both shares are present.
@@ -1002,12 +1064,18 @@ export class ConversationOrchestrator {
     }
     const expectedLocalByte =
       this.pakeSession === null ? null : this.pakeSession.sideByte;
-    if (expectedLocalByte !== null) {
-      const expectedPeerByte = expectedLocalByte === PAKE_ROLE_A ? PAKE_ROLE_B : PAKE_ROLE_A;
+    // CR-2: by the time the share arrives, pakeSession may already be nulled
+    // (pakeFinish consumed it) OR the share may race ahead of awaitPakeFinish
+    // but land after verifyPeerAndComplete recorded our local side byte. Fall
+    // back to pakeLocalSideByte so we still validate the peer's role byte in
+    // both windows — mirrors handlePakeConfirm's fallback below.
+    const localSide = expectedLocalByte ?? this.pakeLocalSideByte;
+    if (localSide !== null) {
+      const expectedPeerByte = localSide === PAKE_ROLE_A ? PAKE_ROLE_B : PAKE_ROLE_A;
       if (role !== expectedPeerByte) {
         throw new PakeError(
           PakeErrorCode.Abort,
-          `peer SPAKE2 side 0x${role.toString(16)} is not complementary to local side 0x${expectedLocalByte.toString(16)}`,
+          `peer SPAKE2 side 0x${role.toString(16)} is not complementary to local side 0x${localSide.toString(16)}`,
         );
       }
     }
