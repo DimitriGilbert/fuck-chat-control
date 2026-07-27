@@ -8,6 +8,13 @@ hand over. Once two peers complete the application handshake over the
 broker, they exchange messages over a direct WebRTC data channel and
 the broker leaves the path entirely.
 
+**Open source.** The entire codebase lives at
+[github.com/DimitriGilbert/fck-chat-control](https://github.com/DimitriGilbert/fck-chat-control)
+and is free to read, audit, fork, and self-host. For a tool whose whole
+point is "nothing to hand over," that is not a nice-to-have: if you can't
+verify there is no server-side key material or hidden log, the security
+claim is just a promise. Every line below is checkable.
+
 The security model in one paragraph: messages are end-to-end encrypted
 under keys derived from an authenticated P-256 ECDH handshake; the
 broker only relays signaling bytes; identity is TOFU with a

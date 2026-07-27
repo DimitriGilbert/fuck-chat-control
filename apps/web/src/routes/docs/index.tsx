@@ -30,6 +30,22 @@ function DocsIndexComponent() {
           source of truth if you want to verify a claim.
         </p>
 
+        <p>
+          The whole thing is{" "}
+          <a
+            href="https://github.com/DimitriGilbert/fck-chat-control"
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            open source
+          </a>
+          . That is not a footnote &mdash; for a tool whose entire point is &ldquo;nothing to hand
+          over,&rdquo; being able to read every line, reproduce the build, fork it, and run your own
+          instance is the guarantee. The crypto claims above are checkable against the protocol spec
+          page; the deployment page shows exactly how to host it yourself instead of trusting a
+          third party. If you find a flaw, open an issue or a pull request.
+        </p>
+
         <h2>Pages</h2>
         <ul>
           <li>

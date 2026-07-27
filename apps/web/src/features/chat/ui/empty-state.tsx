@@ -83,6 +83,18 @@ export function EmptyState(): React.ReactElement {
             </a>{" "}
             before relying on it for anything sensitive.
           </p>
+          <p className="text-muted-foreground text-xs leading-5">
+            Fully open source &mdash;{" "}
+            <a
+              href="https://github.com/DimitriGilbert/fck-chat-control"
+              target="_blank"
+              rel="noreferrer noopener"
+              className="text-primary underline underline-offset-4 hover:opacity-80"
+            >
+              read the code
+            </a>
+            , audit it, fork it, or run it yourself. No binary you have to trust on faith.
+          </p>
         </EmptyContent>
 
         {/* Primary CTA. Visible at all sizes: the empty state is the home base
