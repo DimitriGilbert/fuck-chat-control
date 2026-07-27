@@ -89,6 +89,12 @@ export default defineConfig({
     ...nitro({
       features: { websocket: true },
       handlers: [{ route: "/ws", handler: "./src/server/broker.ts" }],
+      // Pre-compress every public asset >1KB (the ~1MB JS/CSS/WASM bundle +
+      // prerendered HTML) to gzip + brotli at build time. Nitro negotiates the
+      // best encoding per request via Accept-Encoding, so the client downloads
+      // the brotli/gzip file directly with zero runtime CPU cost. Without this
+      // the full ~1MB ships uncompressed before the app is interactive.
+      compressPublicAssets: { gzip: true, brotli: true },
       // Prerender the docs routes at build time. These are content-only SSR
       // pages with no per-request state, so we emit static HTML for them and
       // skip the runtime SSR pass on each hit. Mechanism: Nitro `routeRules`
