@@ -10,11 +10,29 @@ import { decodeManifest, sha256 } from "./manifest";
 import type { FileManifest, FrameReceiverConfig, ReceivedFile } from "./types";
 import { decodeWireFrame } from "./wire";
 
+/**
+ * Default inactivity timeout: a transfer that receives no chunk (or manifest)
+ * for this long is evicted. Trade-off: a legitimately slow peer on a lossy
+ * link may hit the timeout and have its transfer dropped even though it would
+ * have eventually completed. The constants are exposed via
+ * {@link FrameReceiverConfig.inactivityTimeoutMs} and
+ * {@link FrameReceiverConfig.inactivityTickMs} so the orchestrator can tune
+ * them for the deployment's expected link characteristics.
+ */
+const DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS = 120_000;
+const DEFAULT_TRANSFER_INACTIVITY_TICK_MS = 30_000;
+
 interface ActiveTransfer {
   readonly manifest: FileManifest;
   readonly chunks: (Uint8Array | null)[];
   receivedCount: number;
   receivedBytes: number;
+  /**
+   * `Date.now()` captured at transfer creation and refreshed on every stored
+   * chunk. Drives the periodic inactivity sweep so a silent peer cannot hold
+   * buffer + transfer slots for the channel lifetime (CR-5).
+   */
+  lastActivity: number;
 }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
@@ -30,9 +48,22 @@ export class FrameReceiver {
   private readonly replayWindow = new ReplayWindow();
   private readonly transfers = new Map<number, ActiveTransfer>();
   private totalBufferedBytes = 0;
+  private readonly inactivityTimeoutMs: number;
+  private readonly inactivityTickMs: number;
+  /**
+   * Timer handle for the periodic inactivity sweep. Armed once in the
+   * constructor and cleared in {@link teardown} to avoid leaks. Guarded
+   * against double-arm/teardown by null-checking on clear. SSR/test safe:
+   * Node ships timers, and tests that mock the clock via `vi.useFakeTimers`
+   * drive the sweep through this same handle.
+   */
+  private intervalId: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: FrameReceiverConfig) {
     this.config = config;
+    this.inactivityTimeoutMs = config.inactivityTimeoutMs ?? DEFAULT_TRANSFER_INACTIVITY_TIMEOUT_MS;
+    this.inactivityTickMs = config.inactivityTickMs ?? DEFAULT_TRANSFER_INACTIVITY_TICK_MS;
+    this.intervalId = setInterval(() => this.sweepInactiveTransfers(), this.inactivityTickMs);
   }
 
   get activeTransferCount(): number {
@@ -81,6 +112,10 @@ export class FrameReceiver {
   }
 
   teardown(): void {
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
     for (const transfer of this.transfers.values()) {
       this.totalBufferedBytes -= transfer.receivedBytes;
     }
@@ -134,6 +169,25 @@ export class FrameReceiver {
     this.config.onControl(subtype, payload);
   }
 
+  /**
+   * Periodic sweep (CR-5) armed in the constructor and cleared in
+   * {@link teardown}. Evicts any transfer whose `Date.now() - lastActivity`
+   * exceeds {@link FrameReceiverConfig#inactivityTimeoutMs}, releasing its
+   * buffered bytes and surfacing the eviction via `onTransferTimeout`. A
+   * legitimately slow peer may hit this timeout; the constants are
+   * configurable to tune the trade-off.
+   */
+  private sweepInactiveTransfers(): void {
+    const now = Date.now();
+    for (const [transferId, transfer] of this.transfers) {
+      if (now - transfer.lastActivity > this.inactivityTimeoutMs) {
+        this.totalBufferedBytes -= transfer.receivedBytes;
+        this.transfers.delete(transferId);
+        this.config.onTransferTimeout?.(transferId);
+      }
+    }
+  }
+
   private async handleManifest(transferId: number, plaintext: Uint8Array): Promise<void> {
     const manifest = decodeManifest(plaintext, transferId);
     if (this.transfers.has(transferId)) {
@@ -161,6 +215,7 @@ export class FrameReceiver {
       chunks,
       receivedCount: 0,
       receivedBytes: 0,
+      lastActivity: Date.now(),
     };
     this.transfers.set(transferId, transfer);
     if (manifest.chunkCount === 0) {
@@ -208,6 +263,7 @@ export class FrameReceiver {
     transfer.chunks[chunkId] = plaintext;
     transfer.receivedCount += 1;
     transfer.receivedBytes += plaintext.length;
+    transfer.lastActivity = Date.now();
     this.totalBufferedBytes += plaintext.length;
 
     if (transfer.receivedCount === transfer.manifest.chunkCount) {

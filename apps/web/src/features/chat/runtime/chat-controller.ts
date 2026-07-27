@@ -591,6 +591,19 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * Try to start the next queued send for a session (if any) now that a slot
    * has freed. Idempotent: a no-op when the queue is empty or the cap is
    * still saturated.
+   *
+   * Re-entrance note: {@link FrameSender.sendFile} fires `onTransferStart`
+   * SYNCHRONOUSLY inside the controller's `await orchestrator.sendFile`, so a
+   * drain triggered by a just-started send's onTransferStart can re-enter this
+   * function while the original send's orchestrator call is still on the stack.
+   * The cap check (`countInFlightTransfers >= MAX_CONCURRENT_TRANSFERS`) guards
+   * the happy path; the `.catch` on the scheduled startSend is the safety net
+   * that guarantees no orchestrator rejection (e.g. a cap reached again because
+   * the in-flight snapshot had not yet reflected the just-started send) ever
+   * escapes unhandled. startSend itself routes every orchestrator rejection to
+   * `queued.reject` so the caller's await rejects cleanly, then returns without
+   * re-throwing; the catch here therefore only fires for truly unexpected
+   * throws and swallows them after surfacing via onSessionChange.
    */
   function drainSendQueue(id: ConversationId): void {
     const k = keyOf(id);
@@ -604,16 +617,54 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       sendQueues.delete(k);
     }
     void startSend(id, next).catch((err: unknown) => {
-      // The queued send's reject is handled inside startSend; this catch is
-      // for unexpected throws from startSend itself.
+      // startSend routes orchestrator rejections to queued.reject itself and
+      // does not re-throw, so reaching this branch means an unexpected throw
+      // (e.g. a synchronous throw from onSessionChange). Surface the snapshot
+      // update and swallow: the queued promise was already rejected inside
+      // startSend, and letting this escape would surface as an unhandled
+      // rejection during the onTransferStart re-entrance window.
+      const s = sessions.get(k);
+      if (s !== undefined) onSessionChange(s);
       void err;
     });
+  }
+
+  /**
+   * Drain a session's send queue on teardown paths
+   * (leaveConversation / leaveAll / dispose / clearConversation / clearAll).
+   *
+   * Each queued send's promise is rejected with "conversation cleared" so a
+   * caller awaiting `sendFile` does not hang forever, and the pre-read byte
+   * buffer is zeroed in place before the map entry is dropped (mirrors the
+   * receivedFiles zeroing contract: queued bytes never persist beyond their
+   * useful lifetime). Faithful extraction of the inline drain that lived in
+   * clearConversation — the queued-entry type and the reject/data access are
+   * identical.
+   */
+  function drainSendQueueForTarget(targetKey: string): void {
+    const queue = sendQueues.get(targetKey);
+    if (queue === undefined) return;
+    for (const queued of queue) {
+      queued.reject(new Error("conversation cleared"));
+      queued.data.fill(0);
+    }
+    sendQueues.delete(targetKey);
   }
 
   /**
    * Drive one send through the orchestrator. Reads the bytes, calls
    * sendFile, and reconciles the queued-id placeholder in the snapshot with
    * the real orchestrator id once the send starts.
+   *
+   * Re-entrance contract: this is invoked as `void startSend(...).catch(...)`
+   * from {@link drainSendQueue}, which itself can be re-entered synchronously
+   * via `onTransferStart → onSessionChange` while THIS call's
+   * `orchestrator.sendFile` is still on the stack. To keep that re-entrance
+   * from escaping an unhandled rejection, EVERY failure path here MUST route
+   * the error to `queued.reject` and return normally (never re-throw). The
+   * promise reject is idempotent in practice — a racing cancel/dispose may
+   * have already rejected `queued`; calling it again is a no-op on the
+   * settled promise — so the caller's await always settles cleanly.
    */
   async function startSend(id: ConversationId, queued: QueuedSend): Promise<void> {
     const session = sessions.get(keyOf(id));
@@ -643,7 +694,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       const realId = await session.orchestrator.sendFile(queued.data, queued.name, queued.mimeType);
       queued.resolve(realId);
     } catch (err: unknown) {
-      // Remove the queued placeholder if the start never happened.
+      // Remove the queued placeholder if the start never happened. Route the
+      // orchestrator rejection (cap reached again under re-entrance,
+      // NotConnected, etc.) to the queued promise so the caller's await
+      // rejects cleanly, then return WITHOUT re-throwing — drainSendQueue's
+      // .catch relies on this to guarantee no rejection escapes unhandled.
       session.transfers = session.transfers.filter((t) => t.id !== queued.queuedId);
       onSessionChange(session);
       queued.reject(err);
@@ -739,7 +794,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       sessions.delete(k);
       holders.delete(k);
       readMarkers.delete(k);
-      sendQueues.delete(k);
+      // CR-8: drain queued sends (reject promises + zero buffers) instead of
+      // the bare sendQueues.delete that orphaned awaiters and left bytes
+      // unzeroed.
+      drainSendQueueForTarget(k);
       if (activeConversationId !== null && keyOf(activeConversationId) === k) {
         // Do NOT auto-select another session — the caller decides what to
         // surface next. The empty state is a valid and expected outcome.
@@ -753,10 +811,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       for (const session of sessions.values()) {
         teardownSession(session);
       }
+      // CR-8: drain every session's send queue (reject + zero) before wiping
+      // the session map. Collect keys first so we do not mutate sendQueues
+      // while iterating a snapshot derived from it.
+      for (const k of Array.from(sendQueues.keys())) {
+        drainSendQueueForTarget(k);
+      }
       sessions.clear();
       holders.clear();
       readMarkers.clear();
-      sendQueues.clear();
       activeConversationId = null;
       emit(null);
     },
@@ -957,10 +1020,20 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       await repository.clearConversation(target);
       const session = sessions.get(targetKey);
       if (session !== undefined) {
-        // (5.2.1) Cancel every non-terminal transfer through the orchestrator
-        // (and the bridge if it grows a cancelSend seam). Queued sends never
-        // entered the orchestrator; they are dropped via the queue drain
-        // below, so we only need to cancel orchestrator-tracked ids here.
+        // (5.2.1) Drain the session's send queue FIRST, before any transfer
+        // cancellation. Ordering matters: cancelling an in-flight transfer
+        // fires onTransferCancelled -> onSessionChange -> drainSendQueue, and
+        // if the queue still holds an entry at that moment, drainSendQueue
+        // will shift and start it (allocating a fresh orchestrator id that
+        // the cancellation loop below — iterating a stale snapshot of
+        // session.transfers — will never reach), leaving the queued promise
+        // hanging. Draining first empties the queue so the subsequent
+        // cancel-driven drains are no-ops. Rejects each queued send with
+        // "conversation cleared" and zeroes its pre-read byte buffer.
+        drainSendQueueForTarget(targetKey);
+        // (5.2.2) Cancel every non-terminal transfer through the orchestrator
+        // (and the bridge if it grows a cancelSend seam). Queued sends were
+        // already dropped above, so we only cancel orchestrator-tracked ids.
         for (const transfer of session.transfers) {
           if (
             transfer.status === "queued" ||
@@ -981,24 +1054,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
             bridge.cancelSend?.(transfer.id);
           }
         }
-        // (5.2.2) Drop the transfer snapshot.
+        // (5.2.3) Drop the transfer snapshot.
         session.transfers = [];
-        // (5.2.3) Zero received-file byte buffers before clearing the map
+        // (5.2.4) Zero received-file byte buffers before clearing the map
         // (PRD: files are transient; clearConversation releases them).
         for (const file of session.receivedFiles.values()) {
           file.data.fill(0);
         }
         session.receivedFiles.clear();
-        // (5.2.4) Drain the session's send queue. Mirrors leaveConversation's
-        // sendQueues.delete(targetKey) and rejects any queued sends so their
-        // promises do not hang awaiting a slot that will never free.
-        const queue = sendQueues.get(targetKey);
-        if (queue !== undefined) {
-          for (const queued of queue) {
-            queued.reject(new Error("conversation cleared"));
-          }
-          sendQueues.delete(targetKey);
-        }
         // (5.2.5) Detach inbound handlers so a late frame does not repopulate
         // the snapshot. Re-armed on the next send/resume/select.
         session.detached = true;
@@ -1025,7 +1088,48 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
 
     async clearAll(): Promise<void> {
       await repository.clearAll();
+      // CR-9: bring clearAll to parity with clearConversation. Previously
+      // clearAll only wiped store + previews and left receivedFiles, transfers,
+      // and sendQueues untouched, AND did not set `detached` — so a late
+      // inbound frame after clearAll would re-populate the snapshot. Mirror
+      // clearConversation's per-session cleanup for EVERY live session, in the
+      // same order (sendQueues → transfers → receivedFiles → detached LAST).
+      // See clearConversation for why the queue drain runs before transfer
+      // cancellation (prevents a cancel-driven drainSendQueue from re-starting
+      // a queued send with an id the cancellation loop will never reach).
       for (const session of sessions.values()) {
+        const targetKey = keyOf(session.id);
+        // Mirror (5.2.1): drain the send queue first.
+        drainSendQueueForTarget(targetKey);
+        // Mirror (5.2.2): cancel every non-terminal transfer.
+        for (const transfer of session.transfers) {
+          if (
+            transfer.status === "queued" ||
+            transfer.status === "sending" ||
+            transfer.status === "receiving"
+          ) {
+            try {
+              session.orchestrator.cancelTransfer(transfer.id);
+            } catch {
+              // best-effort: the orchestrator may have already torn the
+              // transfer down. The snapshot wipe below is authoritative.
+            }
+            const bridge = session.bridge as BridgeWithOptionalCancelSend;
+            bridge.cancelSend?.(transfer.id);
+          }
+        }
+        // Mirror (5.2.3): drop the transfer snapshot.
+        session.transfers = [];
+        // Mirror (5.2.4): zero received-file byte buffers before clearing.
+        for (const file of session.receivedFiles.values()) {
+          file.data.fill(0);
+        }
+        session.receivedFiles.clear();
+        // Mirror (5.2.5): detach inbound handlers so a late frame does NOT
+        // repopulate the snapshot. THIS is the load-bearing CR-9 fix for the
+        // late-frame re-population bug — set detached LAST, after every other
+        // field is wiped, exactly like clearConversation.
+        session.detached = true;
         session.messages = [];
         session.lastMessagePreview = null;
         session.lastMessageAt = null;
@@ -1079,6 +1183,12 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       disposed = true;
       for (const session of sessions.values()) {
         teardownSession(session);
+      }
+      // CR-8: drain every queued send BEFORE sessions.clear() so each queued
+      // promise rejects with "conversation cleared" and its byte buffer is
+      // zeroed. Collect keys first to avoid mutating sendQueues mid-iteration.
+      for (const k of Array.from(sendQueues.keys())) {
+        drainSendQueueForTarget(k);
       }
       sessions.clear();
       holders.clear();

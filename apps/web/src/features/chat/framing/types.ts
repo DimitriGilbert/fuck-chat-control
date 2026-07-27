@@ -55,4 +55,21 @@ export interface FrameReceiverHandlers {
 export interface FrameReceiverConfig extends FrameReceiverHandlers {
   readonly sessionKeys: SessionKeys;
   readonly peerSessionId: SessionId;
+  /**
+   * Invoked when the periodic inactivity sweep evicts a transfer that has not
+   * received a manifest or chunk for {@link inactivityTimeoutMs}. Additive:
+   * callers that omit it see no change (the transfer is still evicted and the
+   * buffered bytes are still released). CR-5.
+   */
+  readonly onTransferTimeout?: (transferId: number) => void;
+  /**
+   * Max wall-clock gap (ms) between activity events on a single transfer
+   * before the sweep evicts it. Defaults to 120_000 (2 minutes). CR-5.
+   */
+  readonly inactivityTimeoutMs?: number;
+  /**
+   * Interval (ms) at which the inactivity sweep runs. Defaults to 30_000.
+   * Each tick walks {@link FrameReceiver#activeTransferCount} entries. CR-5.
+   */
+  readonly inactivityTickMs?: number;
 }

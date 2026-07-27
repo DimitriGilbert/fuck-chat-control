@@ -1033,6 +1033,16 @@ export class ConversationOrchestrator {
       onFileComplete: (file: ReceivedFile): void => {
         this.handleReceivedFile(file);
       },
+      // CR-5: surface per-transfer inactivity timeouts as transfer errors so
+      // the host application can clear UI state for stalled peer transfers.
+      // Passed as a plain Error rather than an OrchestratorError code: there
+      // is no dedicated timeout code, and onTransferError accepts unknown.
+      onTransferTimeout: (transferId: number): void => {
+        this.handlers.onTransferError?.(
+          transferId,
+          new Error(`inbound transfer ${transferId} timed out after inactivity`),
+        );
+      },
     });
     this.frameSender = sender;
     this.frameReceiver = receiver;
