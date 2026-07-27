@@ -191,32 +191,39 @@ export async function importBundle(
   const payload = parsePayload(payloadBytes);
   const validated = validateConversations(payload);
   if (mode === ImportMode.Replace) {
+    // CR-6: atomic Replace. Snapshot the pre-existing state BEFORE clearAll so
+    // a mid-import failure (e.g. an AtRestLockedError thrown by a
+    // LockableRepository wrapper mid-loop) can roll the repo back to its
+    // pre-import contents. The snapshot is a plaintext in-memory read of the
+    // repo (listConversations + getMessages) shaped as ValidatedConversation[];
+    // it requires no passphrase and no bundle round-trip, so the restore path
+    // is just clearAll + re-populate from the snapshot array.
+    const rollback = await snapshotRepoState(repo);
     await repo.clearAll();
-    let messagesImported = 0;
-    for (const convo of validated) {
-      await repo.createConversation(convo.id, convo.createdAt);
-      if (convo.peer !== null) {
-        // Replace-mode runs after clearAll, so the conversation's peer is null
-        // here in practice — but use replacePeerIdentity so the intent is
-        // explicit and the call cannot trip the R8/F1 TOFU guard even if a
-        // future caller feeds this path a pre-existing conversation.
-        await repo.replacePeerIdentity(convo.id, convo.peer.fingerprint, convo.peer.publicKey);
+    try {
+      let messagesImported = 0;
+      for (const convo of validated) {
+        messagesImported += await populateConversation(repo, convo);
       }
-      if (convo.displayName !== null) {
-        await repo.setDisplayName(convo.id, convo.displayName);
+      return {
+        conversationsAdded: validated.length,
+        conversationsMerged: 0,
+        messagesImported,
+        conflicts: [],
+        deviceIdentity: decodeIdentity(payload.identity),
+      };
+    } catch (importError) {
+      // Rollback: restore the pre-existing state captured before clearAll.
+      // Best-effort — if the restore itself throws (e.g. the at-rest key is
+      // STILL locked), swallow the restore error and surface the original
+      // import error so the caller sees the real root cause.
+      try {
+        await restoreRepoState(repo, rollback);
+      } catch {
+        // best-effort; fall through to rethrow the original import error
       }
-      for (const message of convo.messages) {
-        await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp);
-        messagesImported++;
-      }
+      throw importError;
     }
-    return {
-      conversationsAdded: validated.length,
-      conversationsMerged: 0,
-      messagesImported,
-      conflicts: [],
-      deviceIdentity: decodeIdentity(payload.identity),
-    };
   }
   const conflicts: IdentityConflict[] = [];
   let conversationsAdded = 0;
@@ -517,6 +524,92 @@ interface MutableConversation {
   displayName: string | null;
   peer: PeerIdentityRecord | null;
   messages: ConversationMessage[];
+}
+
+/**
+ * CR-6: in-memory plaintext snapshot of the repo's current contents, used as a
+ * rollback target for atomic Replace-mode import. Shaped identically to
+ * {@link ValidatedConversation} so the restore path can reuse the same
+ * populate primitive as the import loop. The snapshot is a pure read of the
+ * repo's public interface (listConversations + getMessages) and requires no
+ * passphrase; for the in-memory repo this is straightforward. Future durable
+ * repos that cannot service a consistent read before clearAll should document
+ * the contract (the restore loop calls the same createConversation/
+ * appendMessage/replacePeerIdentity primitives the import path uses).
+ */
+type RepoSnapshot = ValidatedConversation[];
+
+/**
+ * Read the repo's current conversations + messages into an in-memory snapshot.
+ * Used ONLY by the atomic-Replace path to capture pre-clearAll state.
+ */
+async function snapshotRepoState(repo: ConversationRepository): Promise<RepoSnapshot> {
+  const existing = await repo.listConversations();
+  const snapshot: ValidatedConversation[] = [];
+  for (const convo of existing) {
+    const messages = await repo.getMessages(convo.id);
+    snapshot.push({
+      id: cloneConversationId(convo.id),
+      createdAt: convo.createdAt,
+      displayName: convo.displayName,
+      peer:
+        convo.peer === null
+          ? null
+          : {
+              fingerprint: convo.peer.fingerprint,
+              publicKey: encodePublicKey(convo.peer.publicKey),
+            },
+      messages: messages.map((m) => ({
+        id: m.id,
+        conversationId: cloneConversationId(m.conversationId),
+        direction: m.direction,
+        timestamp: m.timestamp,
+        text: m.text,
+      })),
+    });
+  }
+  return snapshot;
+}
+
+/**
+ * Restore the repo to the captured snapshot by clearing then re-populating.
+ * Called from the atomic-Replace catch path; performs no further snapshotting
+ * (the snapshot is already in hand).
+ */
+async function restoreRepoState(repo: ConversationRepository, snapshot: RepoSnapshot): Promise<void> {
+  await repo.clearAll();
+  for (const convo of snapshot) {
+    await populateConversation(repo, convo);
+  }
+}
+
+/**
+ * Persist a single conversation (create + peer + display name + messages) into
+ * the repo via its public interface. Used by both the atomic-Replace import
+ * loop and the rollback restore path so the two stay shape-identical. Returns
+ * the number of messages appended.
+ */
+async function populateConversation(
+  repo: ConversationRepository,
+  convo: ValidatedConversation,
+): Promise<number> {
+  await repo.createConversation(convo.id, convo.createdAt);
+  if (convo.peer !== null) {
+    // Replace-mode runs after clearAll (or from a rollback snapshot), so the
+    // conversation's peer is null here in practice — but use replacePeerIdentity
+    // so the intent is explicit and the call cannot trip the R8/F1 TOFU guard
+    // even if a future caller feeds this path a pre-existing conversation.
+    await repo.replacePeerIdentity(convo.id, convo.peer.fingerprint, convo.peer.publicKey);
+  }
+  if (convo.displayName !== null) {
+    await repo.setDisplayName(convo.id, convo.displayName);
+  }
+  let count = 0;
+  for (const message of convo.messages) {
+    await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp);
+    count++;
+  }
+  return count;
 }
 
 function toValidated(convo: MutableConversation): ValidatedConversation {

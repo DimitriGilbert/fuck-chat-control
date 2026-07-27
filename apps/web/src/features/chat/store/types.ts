@@ -203,4 +203,21 @@ export interface PersistableConversationRepository extends ConversationRepositor
 
 export interface ReloadableConversationRepository extends PersistableConversationRepository {
   reload(atRestKey: AtRestKey, state: SerializedState): Promise<void>;
+  /**
+   * CR-7: defense-in-depth zeroize the inner at-rest key reference. Called by
+   * the {@link LockableRepository} wrapper when the manager transitions to
+   * locked, so an attacker who reads the JS heap while locked cannot recover
+   * the live key from the inner repo's state. Optional on the interface so
+   * future repository implementations can opt out (the wrapper feature-checks
+   * before calling). See {@link InMemoryConversationRepository.zeroizeAtRestKey}.
+   */
+  zeroizeAtRestKey?(): void;
+  /**
+   * CR-7: repopulate the inner at-rest key after a successful unlock. Pairs
+   * with {@link zeroizeAtRestKey}: the wrapper calls this from its `onUnlock`
+   * listener so the inner repo resumes operation after the manager's key has
+   * been repopulated. Optional for the same feature-check reason as
+   * {@link zeroizeAtRestKey}.
+   */
+  resetAtRestKey?(key: AtRestKey): void;
 }

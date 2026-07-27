@@ -8,6 +8,7 @@ import type {
   ConversationRepository,
   PeerIdentityRecord,
 } from "./types";
+import type { AtRestKey } from "../crypto/types";
 import type { AtRestKeyManager } from "../runtime/at-rest-key-manager";
 import { AtRestLockedError } from "../runtime/at-rest-key-manager";
 
@@ -38,6 +39,19 @@ import { AtRestLockedError } from "../runtime/at-rest-key-manager";
  * `getAuthFailed` falls back to the durable store. On unlock, the manager's
  * `onUnlock` callback fires {@link flushPendingAuthFailed}, which replays the
  * queued ids into the inner repo.
+ *
+ * HEAP-READ-WHILE-LOCKED (CR-7): the inner repository holds the at-rest key
+ * in a mutable field (see {@link InMemoryConversationRepository.atRestKey}).
+ * The functional lock above prevents the repo from being USED while locked,
+ * but the key bytes remain live in the JS heap — an attacker who can read the
+ * heap while the manager is locked could recover them. The constructor
+ * registers an `onLock` listener that calls
+ * {@link InMemoryConversationRepository.zeroizeAtRestKey} on the unlocked→
+ * locked transition, overwriting the bytes with zeros and dropping the
+ * reference. The paired `onUnlock` listener calls
+ * {@link InMemoryConversationRepository.resetAtRestKey} with the manager's
+ * repopulated key, so the inner repo resumes operation after unlock. This is
+ * defense-in-depth: the authoritative gate stays in {@link assertUnlocked}.
  */
 export class LockableRepository implements ConversationRepository {
   private readonly inner: ConversationRepository;
@@ -63,7 +77,26 @@ export class LockableRepository implements ConversationRepository {
     // callback set; the unsubscribe is implicitly the lifetime of this wrapper
     // (the wrapper and manager share the controller's lifetime).
     manager.onUnlock(() => {
+      // CR-7: re-acquire the at-rest key BEFORE flushing pending writes. The
+      // manager has already repopulated its own reference from storage (auto
+      // mode) or unwrapped it from the passphrase KEK (passphrase mode); we
+      // hand the fresh key to the inner repo so its previously-zeroized
+      // reference is restored. This keeps CR-7's defense-in-depth (key bytes
+      // wiped while locked) WITHOUT regressing the post-unlock path.
+      this.resetInnerAtRestKey();
       this.flushPendingAuthFailed();
+    });
+    // CR-7: register the unlocked→locked listener that zeroizes the inner
+    // repo's at-rest key. The inner repo is constructed with the at-rest key
+    // (InMemoryConversationRepository holds it in a mutable field); while the
+    // functional lock is enforced by {@link assertUnlocked} below, the inner
+    // key stays stale-but-live in the JS heap. Zeroizing it on lock is
+    // defense-in-depth: an attacker who reads the heap while the manager is
+    // locked cannot recover the live key from the inner repo. The paired
+    // onUnlock listener above repopulates the key on the next successful
+    // unlock, so the inner repo resumes operation cleanly.
+    manager.onLock(() => {
+      this.zeroizeInnerAtRestKey();
     });
   }
 
@@ -198,6 +231,39 @@ export class LockableRepository implements ConversationRepository {
    * {@link flushErrorSink} (when wired); a concurrent re-lock re-queues an id
    * for the next unlock instead of dropping it.
    */
+  /**
+   * CR-7: zeroize the inner repo's at-rest key reference on the unlocked→
+   * locked transition. Feature-checks for the optional
+   * {@link ReloadableConversationRepository.zeroizeAtRestKey} method so a
+   * future repository implementation that does not hold an at-rest key in a
+   * mutable field can opt out cleanly. The authoritative lock continues to
+   * live in {@link assertUnlocked}; this is defense-in-depth for the
+   * heap-read-while-locked threat.
+   */
+  private zeroizeInnerAtRestKey(): void {
+    const maybe = this.inner as { zeroizeAtRestKey?(): void };
+    if (typeof maybe.zeroizeAtRestKey === "function") {
+      maybe.zeroizeAtRestKey();
+    }
+  }
+
+  /**
+   * CR-7: repopulate the inner repo's at-rest key reference on the locked→
+   * unlocked transition. Pairs with {@link zeroizeInnerAtRestKey}: the manager
+   * has already repopulated its own key reference; we hand the fresh key to
+   * the inner repo so its previously-zeroized reference is restored.
+   * Feature-checks the optional {@link ReloadableConversationRepository.resetAtRestKey}
+   * method; the authoritative key source is {@link AtRestKeyManager.get},
+   * which throws if the manager is still locked (the unlock listener only
+   * fires after the manager flips to unlocked, so this is safe).
+   */
+  private resetInnerAtRestKey(): void {
+    const maybe = this.inner as { resetAtRestKey?(key: AtRestKey): void };
+    if (typeof maybe.resetAtRestKey === "function") {
+      maybe.resetAtRestKey(this.manager.get());
+    }
+  }
+
   flushPendingAuthFailed(): void {
     if (this.pendingAuthFailedWrites.size === 0) return;
     // Snapshot then clear: subsequent markAuthFailed calls during this dispatch

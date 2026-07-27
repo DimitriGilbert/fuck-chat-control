@@ -30,6 +30,7 @@ function conversationId(seed: number): ConversationId {
 function makeManager(initiallyLocked: boolean): AtRestKeyManager {
   let locked = initiallyLocked;
   const listeners = new Set<() => void>();
+  const lockListeners = new Set<() => void>();
   const key = generateAtRestKey();
   return {
     async ensureLoaded(): Promise<void> {},
@@ -37,7 +38,22 @@ function makeManager(initiallyLocked: boolean): AtRestKeyManager {
       return key;
     },
     lock(): void {
+      const was = locked;
       locked = true;
+      // CR-7: mirror the real manager — fire onLock only on the unlocked→
+      // locked edge. The pending-auth-failed tests do not assert on the
+      // zeroize behavior (see lockable-repo-zeroize.test.ts), but the stub
+      // must honor the interface contract so the wrapper's onLock
+      // registration does not throw.
+      if (!was) {
+        for (const cb of Array.from(lockListeners)) {
+          try {
+            cb();
+          } catch {
+            // mirror the real manager's defensive swallow
+          }
+        }
+      }
     },
     async unlock(): Promise<boolean> {
       locked = false;
@@ -58,6 +74,12 @@ function makeManager(initiallyLocked: boolean): AtRestKeyManager {
       listeners.add(callback);
       return () => {
         listeners.delete(callback);
+      };
+    },
+    onLock(callback: () => void): () => void {
+      lockListeners.add(callback);
+      return () => {
+        lockListeners.delete(callback);
       };
     },
   };

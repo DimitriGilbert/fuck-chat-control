@@ -66,6 +66,17 @@ export interface AtRestKeyManager {
    * returns an unsubscribe function.
    */
   onUnlock(callback: () => void): () => void;
+  /**
+   * CR-7: register a callback fired AFTER {@link lock} flips the manager to
+   * the locked state (unlocked → locked transition). Used by the
+   * {@link LockableRepository} wrapper to zeroize the inner repository's
+   * at-rest key reference, so an attacker who reads the JS heap while locked
+   * cannot recover the live key. Invoked AFTER the manager's own state flips,
+   * so `isLocked()` reads true inside the callback. Contract mirrors
+   * {@link onUnlock}: registering returns an unsubscribe function; a throwing
+   * listener is swallowed so it cannot block the lock path or other listeners.
+   */
+  onLock(callback: () => void): () => void;
 }
 
 const MODE_AUTO = "auto";
@@ -106,6 +117,7 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
   let autoKey: AtRestKey | null = null;
   let locked = false;
   const unlockListeners = new Set<() => void>();
+  const lockListeners = new Set<() => void>();
 
   function notifyUnlocked(): void {
     // Snapshot to a local array so a callback that (un)subscribes during
@@ -118,6 +130,21 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
         // A listener throwing must not break the unlock path or block other
         // listeners. The listener owns its own error handling; surfacing here
         // would couple the manager to consumer failures.
+      }
+    }
+  }
+
+  function notifyLocked(): void {
+    // CR-7: mirror notifyUnlocked's defensive snapshot+swallow pattern. A
+    // zeroize listener throwing must not break the lock path or block other
+    // listeners (the lock state flip has already happened; the listeners are
+    // best-effort defense-in-depth).
+    const snapshot = Array.from(lockListeners);
+    for (const cb of snapshot) {
+      try {
+        cb();
+      } catch {
+        // same posture as notifyUnlocked.
       }
     }
   }
@@ -162,7 +189,15 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
       // access lives in the LockableRepository wrapper, but nulling autoKey
       // here makes the manager's own lock() honest rather than cosmetic.
       autoKey = null;
+      const wasLocked = locked;
       locked = true;
+      // CR-7: fire onLock listeners only on the unlocked → locked transition,
+      // mirroring notifyUnlocked's transition semantics (a no-op lock() that
+      // re-locks an already-locked manager does not re-zeroize). The wrapper
+      // registers a listener that zeroizes the inner repo's at-rest key.
+      if (!wasLocked) {
+        notifyLocked();
+      }
     },
 
     async unlock(passphrase: string): Promise<boolean> {
@@ -219,6 +254,13 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
       unlockListeners.add(callback);
       return () => {
         unlockListeners.delete(callback);
+      };
+    },
+
+    onLock(callback: () => void): () => void {
+      lockListeners.add(callback);
+      return () => {
+        lockListeners.delete(callback);
       };
     },
   };

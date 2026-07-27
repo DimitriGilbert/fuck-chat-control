@@ -56,6 +56,54 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     return this.atRestKey;
   }
 
+  /**
+   * CR-7: defense-in-depth zeroize the inner at-rest key when the
+   * {@link LockableRepository} wrapper observes a lock transition. Overwrites
+   * the key bytes with zeros and drops the reference, so an attacker who gains
+   * heap-read access while the manager is locked cannot recover the live key
+   * from this repository's state.
+   *
+   * THE FUNCTIONAL LOCK IS ELSEWHERE: {@link LockableRepository.assertUnlocked}
+   * throws {@link AtRestLockedError} on every ciphertext-touching call while
+   * the manager reports locked. This method is defense-in-depth for the
+   * "attacker reads the JS heap while locked" threat model — even if the gate
+   * is bypassed, there is no key in this object to read.
+   *
+   * PAIR WITH {@link resetAtRestKey}: the wrapper's `onUnlock` listener calls
+   * {@link resetAtRestKey} with the manager's repopulated key so the inner
+   * repo resumes operation after unlock. This keeps CR-7's defense-in-depth
+   * (key bytes wiped while locked) WITHOUT regressing the post-unlock path:
+   * the inner key is null only between lock and the next successful unlock.
+   */
+  zeroizeAtRestKey(): void {
+    if (this.atRestKey !== null) {
+      this.atRestKey.fill(0);
+      this.atRestKey = null;
+    }
+  }
+
+  /**
+   * CR-7: repopulate the inner at-rest key after a successful unlock. Called
+   * by the {@link LockableRepository} wrapper's `onUnlock` listener so the
+   * inner repo (whose key was {@link zeroizeAtRestKey}'d on lock) resumes
+   * normal operation. The {@link key} argument comes from
+   * {@link AtRestKeyManager.get}, which has already repopulated its own
+   * reference from storage (auto mode) or unwrapped it from the passphrase
+   * KEK (passphrase mode).
+   */
+  resetAtRestKey(key: AtRestKey): void {
+    this.atRestKey = key;
+  }
+
+  /**
+   * Test seam for CR-7: returns true iff {@link zeroizeAtRestKey} has run and
+   * the inner reference has been dropped. Used by the zeroize test to assert
+   * the post-lock state without exposing the key itself.
+   */
+  _atRestKeyIsZeroizedForTest(): boolean {
+    return this.atRestKey === null;
+  }
+
   async createConversation(id: ConversationId, createdAt: number): Promise<ConversationRecord> {
     const key = idKey(id);
     if (!this.conversations.has(key)) {
