@@ -91,15 +91,7 @@ export function AppShell(): React.ReactElement {
         <div className="min-h-0 flex-1 overflow-hidden">
           {activeId === null ? (
             <div className="h-full overflow-y-auto">
-              <EmptyState
-                onStart={() => {
-                  // The mobile empty-state surfaces a Start affordance that
-                  // opens the drawer (where the sidebar's Start button lives).
-                  // On desktop the sidebar is already visible, so this callback
-                  // only fires from the mobile-only button.
-                  setMobileOpen(true);
-                }}
-              />
+              <EmptyState />
             </div>
           ) : (
             <ChatView />

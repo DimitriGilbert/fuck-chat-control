@@ -21,18 +21,8 @@ import type { ConversationRecord } from "@/features/chat/store";
  * compact list offers to resume each one. This is the home base; the sidebar
  * stays focused on currently-live sessions.
  */
-export interface EmptyStateProps {
-  /**
-   * Invoked when the user wants to start a new conversation from the empty
-   * state. On desktop the sidebar's Start button is already visible, so this
-   * is primarily for mobile where the sidebar lives inside a closed drawer.
-   * The AppShell wires this to "open the drawer."
-   */
-  readonly onStart: () => void;
-}
-
-export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
-  const { state, controller } = useChat();
+export function EmptyState(): React.ReactElement {
+  const { state, controller, ready } = useChat();
   // Show persisted conversations that have no live session. Live ones are
   // already in the sidebar; duplicating them here would split attention.
   // ConversationId is a branded Uint8Array, so byte-wise comparison is required
@@ -46,6 +36,26 @@ export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
     if (controller === null) return;
     void controller.resumeConversation(record.id).catch((err: unknown) => {
       toast.error("Could not resume", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  function handleLeave(record: ConversationRecord): void {
+    if (controller === null) return;
+    // clearConversation deletes the persisted record and tears down any live
+    // session — the persisted row vanishes from this list on the next emit.
+    void controller.clearConversation(record.id).catch((err: unknown) => {
+      toast.error("Could not remove", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  function handleStart(): void {
+    if (controller === null) return;
+    void controller.startConversation().catch((err: unknown) => {
+      toast.error("Could not start", {
         description: err instanceof Error ? err.message : String(err),
       });
     });
@@ -80,9 +90,16 @@ export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
         </EmptyContent>
 
         {/* Primary CTA. Visible at all sizes: the empty state is the home base
-            and should invite action everywhere. On mobile it also opens the
-            drawer where the sidebar's Start flow lives. */}
-        <Button variant="default" size="default" className="mt-1 w-full" onClick={onStart}>
+            and should invite action everywhere. Starts the conversation
+            directly — same action as the sidebar's Start button, so both
+            buttons with the same label do the same thing. */}
+        <Button
+          variant="default"
+          size="default"
+          className="mt-1 w-full"
+          onClick={handleStart}
+          disabled={!ready}
+        >
           <PlusIcon />
           Start a conversation
         </Button>
@@ -96,7 +113,11 @@ export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
           <ul className="flex flex-col gap-1">
             {resumable.map((record) => (
               <li key={resumeKey(record)}>
-                <ResumeRow record={record} onResume={() => handleResume(record)} />
+                <ResumeRow
+                  record={record}
+                  onResume={() => handleResume(record)}
+                  onLeave={() => handleLeave(record)}
+                />
               </li>
             ))}
           </ul>
@@ -109,9 +130,10 @@ export function EmptyState({ onStart }: EmptyStateProps): React.ReactElement {
 interface ResumeRowProps {
   readonly record: ConversationRecord;
   readonly onResume: () => void;
+  readonly onLeave: () => void;
 }
 
-function ResumeRow({ record, onResume }: ResumeRowProps): React.ReactElement {
+function ResumeRow({ record, onResume, onLeave }: ResumeRowProps): React.ReactElement {
   const label = record.displayName ?? "Untitled conversation";
   const when = new Date(record.createdAt).toLocaleString();
   return (
@@ -122,6 +144,9 @@ function ResumeRow({ record, onResume }: ResumeRowProps): React.ReactElement {
       </div>
       <Button variant="outline" size="sm" onClick={onResume}>
         Resume
+      </Button>
+      <Button variant="ghost" size="sm" onClick={onLeave}>
+        Leave
       </Button>
     </div>
   );
