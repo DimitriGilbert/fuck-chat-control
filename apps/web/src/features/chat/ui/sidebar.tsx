@@ -18,12 +18,13 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
+import { deriveSessionLabel } from "@/features/chat/runtime/types";
+import type { SessionSummary } from "@/features/chat/runtime/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { CONNECTION_STATE_LABELS } from "@/features/chat/ui/chat-status";
 import { SettingsSheetTrigger } from "@/features/chat/ui/settings-sheet";
 import { sortSessions } from "@/features/chat/ui/sort-sessions";
-import type { SessionSummary } from "@/features/chat/runtime/types";
 
 /**
  * Left rail of the app shell. Owns no layout of its own beyond its width and
@@ -52,7 +53,31 @@ export function Sidebar({
   hideSettingsEntry = false,
 }: SidebarProps): React.ReactElement {
   const { controller, state, ready } = useChat();
-  const sorted = React.useMemo(() => sortSessions(state.sessions), [state.sessions]);
+  // Unified list: every persisted conversation, with live-session state
+  // (connection, unread, preview) merged in where a session exists. This
+  // matches the center "Previous conversations" list exactly — live and
+  // left conversations both appear, so the two surfaces stay in sync.
+  const sorted = React.useMemo(() => {
+    const liveByKey = new Map<string, SessionSummary>();
+    for (const s of state.sessions) liveByKey.set(sessionKey(s.id), s);
+    const unified: SessionSummary[] = state.conversations.map((c) => {
+      const live = liveByKey.get(sessionKey(c.id));
+      if (live !== undefined) return live;
+      // Persisted-only (no live session): default to Idle, no unread, no
+      // preview. Sort by createdAt so stale chats don't all sink identically.
+      return {
+        id: c.id,
+        label: deriveSessionLabel(c, null),
+        connectionState: ConnectionState.Idle,
+        unread: 0,
+        lastMessagePreview: null,
+        lastMessageAt: c.createdAt,
+        safetyNumberVerified: false,
+        authFailed: c.authFailed,
+      };
+    });
+    return sortSessions(unified);
+  }, [state.sessions, state.conversations]);
   const activeId = state.activeConversationId;
 
   function handleStart(): void {
@@ -67,6 +92,17 @@ export function Sidebar({
   function handleSelect(id: ConversationId): void {
     if (controller === null) return;
     if (id === activeId) return;
+    // A row may be persisted-only (no live session). Selecting it must resume
+    // rather than no-op, so left conversations are still openable from the list.
+    const isLive = state.sessions.some((s) => sessionKey(s.id) === sessionKey(id));
+    if (!isLive) {
+      void controller.resumeConversation(id).catch((err: unknown) => {
+        toast.error("Could not open", {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      });
+      return;
+    }
     try {
       controller.selectConversation(id);
     } catch (err: unknown) {
