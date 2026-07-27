@@ -6,6 +6,7 @@ import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { teardownSession } from "@/features/chat/runtime/chat-session";
 import type { ChatSession } from "@/features/chat/runtime/types";
 import type { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
+import { AuthMode } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 
 /**
@@ -39,6 +40,7 @@ function makeSession(files: ReceivedFile[]): ChatSession {
     receivedFiles,
     detached: false,
     authFailed: false,
+    authMode: AuthMode.SafetyNumberOnly,
   };
 }
 
@@ -109,6 +111,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
       receivedFiles: new Map(),
       detached: false,
       authFailed: false,
+      authMode: AuthMode.SafetyNumberOnly,
     };
 
     teardownSession(session);
@@ -145,6 +148,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
       receivedFiles: new Map([[7, file]]),
       detached: false,
       authFailed: false,
+      authMode: AuthMode.SafetyNumberOnly,
     };
 
     // teardownSession swallows orchestrator/bridge errors; the buffer-zeroing

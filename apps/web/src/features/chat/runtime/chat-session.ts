@@ -1,4 +1,4 @@
-import { Role } from "@/features/chat/protocol/types";
+import { AuthMode, Role } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 import { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
 import type {
@@ -254,6 +254,10 @@ export function wireBridge(params: {
     receivedFiles: new Map<number, ReceivedFile>(),
     detached: false,
     authFailed: false,
+    // SEC-4: seed from the orchestrator's own default (SafetyNumberOnly).
+    // summarizeSession/activeSessionView read the orchestrator's live getter,
+    // but the session field is the source of truth for direct construction.
+    authMode: AuthMode.SafetyNumberOnly,
   };
 
   // Populate the holder BEFORE the caller starts the bridge so any synchronous

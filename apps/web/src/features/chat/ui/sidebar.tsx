@@ -8,6 +8,7 @@ import {
 import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
 import {
   CheckCheckIcon,
+  LockIcon,
   MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
@@ -20,6 +21,7 @@ import { toast } from "sonner";
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { deriveSessionLabel } from "@/features/chat/runtime/types";
 import type { SessionSummary } from "@/features/chat/runtime/types";
+import { AuthMode } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { CONNECTION_STATE_LABELS } from "@/features/chat/ui/chat-status";
@@ -65,6 +67,9 @@ export function Sidebar({
       if (live !== undefined) return live;
       // Persisted-only (no live session): default to Idle, no unread, no
       // preview. Sort by createdAt so stale chats don't all sink identically.
+      // SEC-4: no live orchestrator means no negotiated auth mode; the safety-
+      // number baseline matches the pre-PAKE fallback every persisted session
+      // would otherwise display.
       return {
         id: c.id,
         label: deriveSessionLabel(c, null),
@@ -74,6 +79,7 @@ export function Sidebar({
         lastMessageAt: c.createdAt,
         safetyNumberVerified: false,
         authFailed: c.authFailed,
+        authMode: AuthMode.SafetyNumberOnly,
       };
     });
     return sortSessions(unified);
@@ -204,6 +210,9 @@ function SessionRow({ session, active, onSelect }: SessionRowProps): React.React
   const connected = session.connectionState === ConnectionState.Connected;
   const unread = session.unread;
   const verified = session.safetyNumberVerified;
+  // SEC-4: PAKE-authenticated rows carry a lock glyph so users can tell which
+  // sessions are PAKE-protected vs safety-number-only at a glance.
+  const pakeProtected = session.authMode === AuthMode.Pake;
 
   async function handleRename(): Promise<void> {
     if (controller === null) return;
@@ -267,6 +276,12 @@ function SessionRow({ session, active, onSelect }: SessionRowProps): React.React
         <span className="flex items-center gap-1.5">
           <ConnectionDot connected={connected} />
           <span className="truncate text-sm font-medium">{label}</span>
+          {pakeProtected && (
+            <LockIcon
+              className="text-sidebar-primary size-3.5 shrink-0"
+              aria-label="PAKE-authenticated session"
+            />
+          )}
           {verified && (
             <CheckCheckIcon
               className="text-sidebar-primary size-3.5 shrink-0"

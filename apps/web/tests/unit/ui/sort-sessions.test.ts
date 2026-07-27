@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { AuthMode } from "@/features/chat/protocol/types";
 import type { ConversationId } from "@/features/chat/protocol/types";
 import type { SessionSummary } from "@/features/chat/runtime/types";
 import { sortSessions } from "@/features/chat/ui/sort-sessions";
@@ -19,6 +20,7 @@ function makeSummary(
     lastMessageAt: overrides.lastMessageAt ?? null,
     safetyNumberVerified: overrides.safetyNumberVerified ?? false,
     authFailed: overrides.authFailed ?? false,
+    authMode: overrides.authMode ?? AuthMode.SafetyNumberOnly,
     id: overrides.id,
   };
 }

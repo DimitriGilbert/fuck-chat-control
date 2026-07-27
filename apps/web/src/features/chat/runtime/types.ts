@@ -1,4 +1,4 @@
-import type { ConversationId } from "@/features/chat/protocol/types";
+import type { AuthMode, ConversationId } from "@/features/chat/protocol/types";
 import type { ConnectionState } from "@/features/chat/signaling/state-machine";
 import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
 import type { ConversationMessage, ConversationRecord } from "@/features/chat/store";
@@ -90,6 +90,14 @@ export interface ChatSession {
    * call-to-action and disables the retry affordance.
    */
   authFailed: boolean;
+  /**
+   * SEC-4: the negotiated auth mode for this session. Mirrors
+   * {@link ConversationOrchestrator.handshakeAuthMode} so the UI can show
+   * PAKE-protected sessions distinctly from safety-number-only ones. Defaults
+   * to {@link AuthMode.SafetyNumberOnly}; becomes {@link AuthMode.Pake} once a
+   * PAKE code is supplied (Phase 8/10 invitation fragment or `setPakeCode`).
+   */
+  authMode: AuthMode;
 }
 
 /**
@@ -110,6 +118,12 @@ export interface SessionSummary {
   readonly safetyNumberVerified: boolean;
   /** Durable auth-failed flag (R7/F3). When true, retry is blocked. */
   readonly authFailed: boolean;
+  /**
+   * SEC-4: the negotiated auth mode surfaced to the sidebar so PAKE-protected
+   * sessions render a distinct affordance. Mirrors
+   * {@link ChatSession.authMode}.
+   */
+  readonly authMode: AuthMode;
 }
 
 /**
@@ -133,6 +147,12 @@ export interface ActiveSessionState {
   readonly transfers: readonly TransferState[];
   /** Durable auth-failed flag (R7/F3). When true, retry is blocked. */
   readonly authFailed: boolean;
+  /**
+   * SEC-4: the negotiated auth mode for the active session. Mirrors
+   * {@link ChatSession.authMode}; the status bar / security sheet read this
+   * to surface "PAKE" vs "Safety number" provenance.
+   */
+  readonly authMode: AuthMode;
 }
 
 /**
@@ -175,6 +195,10 @@ export function summarizeSession(session: ChatSession): SessionSummary {
     lastMessageAt: session.lastMessageAt,
     safetyNumberVerified: session.safetyNumberVerified,
     authFailed: session.authFailed,
+    // SEC-4: surface the orchestrator's negotiated auth mode so the sidebar
+    // can distinguish PAKE-protected sessions. The orchestrator defaults to
+    // SafetyNumberOnly; this getter flips to Pake once a code is supplied.
+    authMode: session.orchestrator.handshakeAuthMode,
   };
 }
 
@@ -197,5 +221,8 @@ export function activeSessionView(session: ChatSession | null): ActiveSessionSta
     lastMessageAt: session.lastMessageAt,
     transfers: session.transfers,
     authFailed: session.authFailed,
+    // SEC-4: mirror the negotiated auth mode so the status bar and security
+    // sheet can show PAKE vs safety-number provenance for the active session.
+    authMode: session.orchestrator.handshakeAuthMode,
   };
 }

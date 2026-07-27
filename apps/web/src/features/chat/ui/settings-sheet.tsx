@@ -13,6 +13,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
+import { AuthMode } from "@/features/chat/protocol/types";
 import type { ImportResult } from "@/features/chat/store";
 import { ExportBundleDialog } from "@/features/chat/ui/export-bundle-dialog";
 import { ImportBundleDialog } from "@/features/chat/ui/import-bundle-dialog";
@@ -62,6 +63,7 @@ function SettingsSheetContent({ onClose }: SettingsSheetContentProps): React.Rea
           <SecuritySection
             safetyNumber={state.safetyNumber}
             verified={state.safetyNumberVerified}
+            authMode={state.active?.authMode ?? AuthMode.SafetyNumberOnly}
           />
         </TabsContent>
 
@@ -141,9 +143,14 @@ function reportImportResult(result: ImportResult): void {
 interface SecuritySectionProps {
   readonly safetyNumber: string | null;
   readonly verified: boolean;
+  readonly authMode: AuthMode;
 }
 
-function SecuritySection({ safetyNumber, verified }: SecuritySectionProps): React.ReactElement {
+function SecuritySection({
+  safetyNumber,
+  verified,
+  authMode,
+}: SecuritySectionProps): React.ReactElement {
   return (
     <div className="space-y-4">
       <div className="space-y-2">
@@ -168,6 +175,32 @@ function SecuritySection({ safetyNumber, verified }: SecuritySectionProps): Reac
       </div>
 
       <div className="space-y-2">
+        <h3 className="text-sm font-medium">Handshake authentication</h3>
+        {/* SEC-4: surface the live negotiated auth mode rather than a static
+            PAKE blurb. A PAKE session carries the stronger guarantee (the
+            handshake was authenticated against a malicious broker); a safety-
+            number session relies on post-hoc comparison. */}
+        {authMode === AuthMode.Pake ? (
+          <p className="text-xs">
+            <span className="text-primary font-medium">PAKE-protected.</span>{" "}
+            <span className="text-muted-foreground">
+              This session authenticated the handshake with a SPAKE2 password exchange keyed by the
+              6-digit code shared out-of-band. The broker could not mount a MITM attack without
+              knowing the code.
+            </span>
+          </p>
+        ) : (
+          <p className="text-xs">
+            <span className="text-foreground font-medium">Safety number only.</span>{" "}
+            <span className="text-muted-foreground">
+              The handshake was not password-authenticated. Compare the safety number with your peer
+              out-of-band to detect a man-in-the-middle; if it matches, the channel is secure.
+            </span>
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-2">
         <h3 className="text-sm font-medium">At-rest encryption</h3>
         <p className="text-muted-foreground text-xs">
           History is sealed with an AES-256 key held in this browser. In auto mode (the default) the
@@ -188,18 +221,6 @@ function SecuritySection({ safetyNumber, verified }: SecuritySectionProps): Reac
           Direct WebRTC (STUN only, no TURN relay). Peers behind symmetric NAT (~10–20% of networks)
           may fail to connect; the broker only relays encrypted signaling and drops out of the data
           path once the peer connection is established.
-        </p>
-      </div>
-
-      <div className="space-y-2">
-        <h3 className="text-sm font-medium">PAKE when an invitation carries a code</h3>
-        <p className="text-muted-foreground text-xs">
-          When an invitation link contains a <code>~code</code>, a SPAKE2 password-authenticated key
-          exchange (RustCrypto&apos;s <code>spake2</code>, compiled to WebAssembly) runs over the
-          data channel before the session is established, authenticating the handshake against a
-          malicious broker. The 6-digit code carries roughly 20 bits of entropy &mdash; share it
-          out-of-band (read it aloud), and still compare the safety number once connected. Invitations
-          without a code fall back to safety-number-only.
         </p>
       </div>
     </div>

@@ -36,6 +36,7 @@ import { toast } from "sonner";
 
 import { randomBytes } from "@/features/chat/crypto/primitives";
 import { useChat } from "@/features/chat/runtime/chat-provider";
+import { AuthMode } from "@/features/chat/protocol/types";
 import { ConnectionState } from "@/features/chat/signaling/state-machine";
 import { MessageDirection } from "@/features/chat/store";
 import type { ConversationMessage } from "@/features/chat/store";
@@ -164,6 +165,7 @@ export function ChatView(): React.ReactElement {
         connectionState={state.connectionState}
         safetyNumber={state.safetyNumber}
         safetyNumberVerified={state.safetyNumberVerified}
+        authMode={state.active?.authMode ?? AuthMode.SafetyNumberOnly}
         error={state.error}
         onRetry={handleRetry}
         onLeave={handleLeave}
@@ -339,18 +341,42 @@ interface StatusBarProps {
   readonly connectionState: ConnectionState;
   readonly safetyNumber: string | null;
   readonly safetyNumberVerified: boolean;
+  readonly authMode: AuthMode;
   readonly error: string | null;
   readonly onRetry: () => void;
   readonly onLeave: () => void;
 }
 
 function StatusBar(props: StatusBarProps): React.ReactElement {
-  const { connectionState, safetyNumber, safetyNumberVerified, error, onRetry, onLeave } = props;
+  const { connectionState, safetyNumber, safetyNumberVerified, authMode, error, onRetry, onLeave } =
+    props;
   const variant = CONNECTION_STATE_VARIANTS[connectionState];
   const label = CONNECTION_STATE_LABELS[connectionState];
+  // SEC-4: once connected, label the session's auth provenance. PAKE sessions
+  // surface the stronger guarantee; safety-number sessions read as such so the
+  // user can tell which conversations are only verified post-hoc.
+  const connected = connectionState === ConnectionState.Connected;
+  const authLabel =
+    connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <StatusPill variant={variant} label={label} />
+      <span
+        data-slot="auth-mode-pill"
+        data-auth-mode={authMode === AuthMode.Pake ? "pake" : "safety-number"}
+        className={cn(
+          "inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium",
+          authMode === AuthMode.Pake
+            ? "bg-primary/10 text-primary"
+            : "bg-secondary text-secondary-foreground",
+        )}
+      >
+        <ShieldIcon
+          className="size-3"
+          aria-label={authMode === AuthMode.Pake ? "PAKE-authenticated" : "Safety number only"}
+        />
+        {authLabel}
+      </span>
       {safetyNumber !== null && (
         <SafetyNumberDialog safetyNumber={safetyNumber} verified={safetyNumberVerified} />
       )}
