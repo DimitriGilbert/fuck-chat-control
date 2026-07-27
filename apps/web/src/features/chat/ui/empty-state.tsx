@@ -86,7 +86,7 @@ export function EmptyState(): React.ReactElement {
           <p className="text-muted-foreground text-xs leading-5">
             Fully open source &mdash;{" "}
             <a
-              href="https://github.com/DimitriGilbert/fck-chat-control"
+              href="https://github.com/DimitriGilbert/fuck-chat-control"
               target="_blank"
               rel="noreferrer noopener"
               className="text-primary underline underline-offset-4 hover:opacity-80"

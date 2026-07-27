@@ -9,7 +9,7 @@ broker, they exchange messages over a direct WebRTC data channel and
 the broker leaves the path entirely.
 
 **Open source.** The entire codebase lives at
-[github.com/DimitriGilbert/fck-chat-control](https://github.com/DimitriGilbert/fck-chat-control)
+[github.com/DimitriGilbert/fuck-chat-control](https://github.com/DimitriGilbert/fuck-chat-control)
 and is free to read, audit, fork, and self-host. For a tool whose whole
 point is "nothing to hand over," that is not a nice-to-have: if you can't
 verify there is no server-side key material or hidden log, the security
@@ -43,7 +43,7 @@ agent-browser driving real Chrome at 1080p; the captions are baked in:
 ![Two-browser live chat demo](docs/media/chat-demo.gif)
 
 The full-quality WebM with soundless captions is also on the
-[`demo-v1` release](https://github.com/DimitriGilbert/fck-chat-control/releases/tag/demo-v1).
+[`demo-v1` release](https://github.com/DimitriGilbert/fuck-chat-control/releases/tag/demo-v1).
 
 The broker relays only the encrypted signaling handshake, then drops out of
 the data path -- from that point the two browsers talk directly.

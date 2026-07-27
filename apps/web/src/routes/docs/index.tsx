@@ -33,7 +33,7 @@ function DocsIndexComponent() {
         <p>
           The whole thing is{" "}
           <a
-            href="https://github.com/DimitriGilbert/fck-chat-control"
+            href="https://github.com/DimitriGilbert/fuck-chat-control"
             target="_blank"
             rel="noreferrer noopener"
           >
