@@ -1,9 +1,12 @@
 import { defineWebSocketHandler } from "nitro";
 
+import { env } from "@fuck-eu-chat-control/env/server";
+
 import { BrokerConnection } from "../features/chat/broker/connection";
 import type { BrokerSocket } from "../features/chat/broker/room-registry";
 import { RoomRegistry } from "../features/chat/broker/room-registry";
 import { startZombieSweep } from "../features/chat/broker/sweep";
+import { isOriginAllowed } from "./origin-guard";
 
 // Single shared registry + connection bookkeeping for the lifetime of the
 // process. crossws hands us a `Peer` per event with a stable `id`, so we key
@@ -46,6 +49,9 @@ startZombieSweep(
  */
 interface CrosswsPeer {
   readonly id: string;
+  // CR-16: crossws exposes the upgrade `Request` so the origin guard can read
+  // the `Origin` header without coupling to a specific runtime adapter.
+  readonly request: { readonly headers: { get(name: string): string | null } };
   readonly websocket: { readonly readyState?: number } | null;
   send(data: unknown): unknown;
   close(code?: number, reason?: string): void;
@@ -75,6 +81,14 @@ function wrapPeer(peer: CrosswsPeer): BrokerSocket {
 
 export default defineWebSocketHandler({
   open(peer) {
+    // CR-16: reject cross-origin WebSocket upgrades when CORS_ORIGIN is
+    // configured. No-op in dev/local (var unset) and for headerless non-browser
+    // clients; see server/origin-guard.ts for the v1 trade-off.
+    const requestOrigin = peer.request.headers.get("origin");
+    if (!isOriginAllowed(env.CORS_ORIGIN, requestOrigin)) {
+      peer.close(1008, "origin not allowed");
+      return;
+    }
     const socket = wrapPeer(peer);
     sockets.set(peer.id, socket);
     connections.set(peer.id, new BrokerConnection(socket, registry));

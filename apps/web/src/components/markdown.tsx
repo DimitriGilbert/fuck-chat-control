@@ -88,6 +88,14 @@ function hasDangerousScheme(href: string): boolean {
  * source is author-controlled at build time), SSR passthrough of the marked
  * output is safe in that single context. In the browser the DOM exists, the
  * guard passes, and the sanitization security property (R12/F1) is enforced.
+ *
+ * LW-25 SAFETY CONTRACT: the SSR passthrough above is safe ONLY because every
+ * input reaching this function is a `?raw` import of repo-authored markdown
+ * from `docs/`, consumed by a `src/routes/docs/*` route. That scope is pinned
+ * by `tests/unit/components/markdown-ssr-safety.test.ts` (every importer must
+ * live under `src/routes/docs` and pull its source via a `*.md?raw` import;
+ * no non-docs file may reference `renderMarkdown`). Do not widen the input
+ * surface without re-auditing the pre-hydration window.
  */
 export function renderMarkdown(source: string): string {
   const raw = marked.parse(source, { async: false }) as string;
