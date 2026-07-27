@@ -1,4 +1,5 @@
 import { decryptFrame, ReplayWindow } from "../crypto/aead";
+import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError } from "../crypto/errors";
 import { decodeTransferCancelPayload } from "../protocol/codec";
 import { MAX_CONCURRENT_TRANSFERS, MAX_INCOMPLETE_TRANSFER_BYTES } from "../protocol/limits";
@@ -35,13 +36,6 @@ interface ActiveTransfer {
   lastActivity: number;
 }
 
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
 
 export class FrameReceiver {
   private readonly config: FrameReceiverConfig;
@@ -76,7 +70,7 @@ export class FrameReceiver {
 
   async ingest(bytes: Uint8Array): Promise<void> {
     const frame = decodeWireFrame(bytes);
-    if (!bytesEqual(frame.aad.senderSessionId, this.config.peerSessionId)) {
+    if (!ctEqual(frame.aad.senderSessionId, this.config.peerSessionId)) {
       throw new FramingError(
         FramingErrorCode.WrongSession,
         "sender session id does not match the expected peer session id",
@@ -294,7 +288,7 @@ export class FrameReceiver {
       );
     }
     const actualHash = await sha256(reassembled);
-    if (!bytesEqual(actualHash, transfer.manifest.contentHash)) {
+    if (!ctEqual(actualHash, transfer.manifest.contentHash)) {
       this.dropTransfer(transferId, transfer);
       throw new FramingError(
         FramingErrorCode.HashMismatch,

@@ -12,13 +12,14 @@ import { OrchestratorError, OrchestratorErrorCode } from "./errors";
  * derive the same traffic keys as the initiator. The code is optional —
  * safety-number-only invitations parse exactly as before.
  *
- * The PAKE code length is bounded to 1..6 decimal digits (matches the PRD's
- * "6-digit code" wording while still accepting shorter codes for tests and
- * future flexibility). The hex portion is unchanged so existing invitation
- * links keep round-tripping.
+ * The PAKE code tail MUST be exactly 6 decimal digits per PRD #90 ("6-digit
+ * code"). Tails with fewer digits are rejected as malformed; the input is
+ * case-normalized to lowercase before matching so users may paste the hex
+ * portion in either case (LW-8). The hex portion is otherwise unchanged so
+ * existing invitation links keep round-tripping.
  */
 const HEX_CHARS_PATTERN = /^[0-9a-f]{32}$/;
-const HEX_WITH_CODE_PATTERN = /^[0-9a-f]{32}~\d{1,6}$/;
+const HEX_WITH_CODE_PATTERN = /^[0-9a-f]{32}~\d{6}$/;
 
 export function generateConversationId(): ConversationId {
   return encodeConversationId(randomBytes(CONVERSATION_ID_BYTES));
@@ -96,12 +97,13 @@ export interface ParsedInvitation {
  *   - leading-hash: `#abcdef...`
  *   - hex+code: `abcdef...~123456` or `#abcdef...~123456`
  *
- * The hex portion MUST be 32 lowercase hex chars; the optional `~code` tail
- * MUST be 1..6 decimal digits. Anything else throws
- * {@link OrchestratorErrorCode.MalformedInvitation}.
+ * The hex portion MUST be 32 lowercase hex chars (case is normalized to
+ * lowercase before matching so an uppercase-paste still parses — LW-8); the
+ * optional `~code` tail MUST be exactly 6 decimal digits per PRD #90.
+ * Anything else throws {@link OrchestratorErrorCode.MalformedInvitation}.
  */
 export function parseInvitation(fragment: string): ParsedInvitation {
-  const stripped = fragment.startsWith("#") ? fragment.slice(1) : fragment;
+  const stripped = (fragment.startsWith("#") ? fragment.slice(1) : fragment).toLowerCase();
   if (HEX_CHARS_PATTERN.test(stripped)) {
     return { conversationId: hexToConversationId(stripped), code: null };
   }
@@ -118,6 +120,17 @@ export function parseInvitation(fragment: string): ParsedInvitation {
     const hexPart = stripped.slice(0, tildeIdx);
     const codePart = stripped.slice(tildeIdx + 1);
     return { conversationId: hexToConversationId(hexPart), code: codePart };
+  }
+  // Surface a loud PRD #90 error when the tail is present but not exactly 6
+  // digits — the previous 1..6-digit accept silently weakened the PAKE
+  // password entropy contract.
+  const tildeIdx = stripped.indexOf("~");
+  if (tildeIdx === 32 && !/^\d{6}$/.test(stripped.slice(tildeIdx + 1))) {
+    throw new OrchestratorError(
+      OrchestratorErrorCode.MalformedInvitation,
+      "invitation PAKE code tail must be exactly 6 decimal digits per PRD #90 (got: '" +
+        stripped.slice(tildeIdx + 1) + "')",
+    );
   }
   // Re-run hexToConversationId on the stripped fragment to surface the
   // canonical "32 lowercase hex" error message for malformed inputs that

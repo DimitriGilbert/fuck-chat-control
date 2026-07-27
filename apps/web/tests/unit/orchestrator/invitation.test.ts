@@ -176,16 +176,11 @@ describe("parseInvitation", () => {
     expect(bytesEqual(noHash, id)).toBe(true);
   });
 
-  it("rejects uppercase hex", () => {
+  it("accepts uppercase hex (LW-8 case-normalizes to lowercase)", () => {
     const id = generateConversationId();
     const upper = conversationIdToHex(id).toUpperCase();
-    try {
-      parseInvitation(upper);
-      throw new Error("expected throw");
-    } catch (err) {
-      expect(err).toBeInstanceOf(OrchestratorError);
-      expect((err as OrchestratorError).code).toBe(OrchestratorErrorCode.MalformedInvitation);
-    }
+    const { conversationId } = parseInvitation(upper);
+    expect(bytesEqual(conversationId, id)).toBe(true);
   });
 
   it("rejects a wrong-length fragment", () => {

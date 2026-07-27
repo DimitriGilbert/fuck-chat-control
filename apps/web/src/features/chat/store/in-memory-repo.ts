@@ -1,4 +1,5 @@
 import { decryptAtRest, encryptAtRest } from "../crypto/at-rest";
+import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
 import type { AtRestKey } from "../crypto/types";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
@@ -218,7 +219,7 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     // replace the peer (the Replace-mode import path after clearAll) go through
     // replacePeerIdentity. Re-pinning the SAME key is a no-op (safe).
     if (internal.peer !== null) {
-      const sameKey = bytesEqual(internal.peer.publicKey, publicKey);
+      const sameKey = ctEqual(internal.peer.publicKey, publicKey);
       if (!sameKey) {
         throw new StoreError(
           StoreErrorCode.PeerIdentityAlreadyPinned,
@@ -492,15 +493,6 @@ function assertDirection(value: string): MessageDirection {
     throw new StoreError(StoreErrorCode.MalformedBundle, `unknown message direction ${value}`);
   }
   return dir;
-}
-
-/** Constant-time-ish byte comparison used by the TOFU storePeerIdentity guard. */
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 function newMessageId(): string {

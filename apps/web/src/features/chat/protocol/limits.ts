@@ -31,10 +31,8 @@ export const FRAME_AAD_BYTES = 46 as const;
 export const TRANSCRIPT_BYTES = 343 as const;
 
 export const HKDF_TRAFFIC_KEY_BYTES = 32 as const;
-export const HKDF_NONCE_BASE_BYTES = 12 as const;
 export const INIT_TO_RESP_LABEL = "fck-chat-v1/init->resp/traffic";
 export const RESP_TO_INIT_LABEL = "fck-chat-v1/resp->init/traffic";
-export const NONCE_BASE_LABEL = "fck-chat-v1/nonce-base";
 
 /**
  * SPAKE2 (RFC 9383) wire constants for the in-band PAKE exchange. Shares are

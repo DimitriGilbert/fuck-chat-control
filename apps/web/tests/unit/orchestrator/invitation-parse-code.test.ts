@@ -63,16 +63,16 @@ describe("invitation parser accepts ~code (R7/F6 / Phase 8.3)", () => {
     it("accepts a leading-# fragment with code", () => {
       const id = generateConversationId();
       const hex = conversationIdToHex(id);
-      const parsed = parseInvitation(`#${hex}~42`);
+      const parsed = parseInvitation(`#${hex}~000042`);
       expect(bytesEqual(parsed.conversationId, id)).toBe(true);
-      expect(parsed.code).toBe("42");
+      expect(parsed.code).toBe("000042");
     });
 
-    it("accepts a 1-digit code (lower bound)", () => {
+    it("accepts a 6-digit code with leading zeros (lower bound)", () => {
       const id = generateConversationId();
       const hex = conversationIdToHex(id);
-      const parsed = parseInvitation(`${hex}~7`);
-      expect(parsed.code).toBe("7");
+      const parsed = parseInvitation(`${hex}~000000`);
+      expect(parsed.code).toBe("000000");
     });
 
     it("accepts a 6-digit code (upper bound)", () => {
@@ -80,6 +80,14 @@ describe("invitation parser accepts ~code (R7/F6 / Phase 8.3)", () => {
       const hex = conversationIdToHex(id);
       const parsed = parseInvitation(`${hex}~999999`);
       expect(parsed.code).toBe("999999");
+    });
+
+    it("rejects a 1..5-digit code (PRD #90 requires exactly 6 digits)", () => {
+      const id = generateConversationId();
+      const hex = conversationIdToHex(id);
+      expect(() => parseInvitation(`${hex}~7`)).toThrow(OrchestratorError);
+      expect(() => parseInvitation(`${hex}~42`)).toThrow(OrchestratorError);
+      expect(() => parseInvitation(`${hex}~12345`)).toThrow(OrchestratorError);
     });
 
     it("rejects a 7-digit code (above the upper bound)", () => {
@@ -106,10 +114,12 @@ describe("invitation parser accepts ~code (R7/F6 / Phase 8.3)", () => {
       expect(() => parseInvitation(`${hex}~abcdef`)).toThrow(OrchestratorError);
     });
 
-    it("rejects uppercase hex in the hex+code form", () => {
+    it("accepts uppercase hex in the hex+code form (LW-8 case normalization)", () => {
       const id = generateConversationId();
       const upper = conversationIdToHex(id).toUpperCase();
-      expect(() => parseInvitation(`${upper}~123456`)).toThrow(OrchestratorError);
+      const parsed = parseInvitation(`${upper}~123456`);
+      expect(bytesEqual(parsed.conversationId, id)).toBe(true);
+      expect(parsed.code).toBe("123456");
     });
 
     it("rejects a wrong-length hex part even with a valid ~code tail", () => {

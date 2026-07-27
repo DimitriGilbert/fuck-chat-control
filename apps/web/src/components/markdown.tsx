@@ -75,13 +75,19 @@ function hasDangerousScheme(href: string): boolean {
  * anchors so the link renderer's `target="_blank" rel="noreferrer"` for
  * external links survives sanitization.
  *
+ * TRUSTED-DOCS SCOPE: this renderer is used ONLY by the docs routes, which
+ * consume trusted repo-authored markdown (`?raw` imports from `docs/`).
+ * Chat messages do NOT flow through it — incoming peer text is rendered by
+ * BubbleContent, which treats message content as plain text and lets React
+ * escape it, so untrusted markup never reaches marked or DOMPurify. Keep it
+ * that way: do not route peer-controlled text through `renderMarkdown`.
+ *
  * DOMPurify is browser-only (it walks the DOM to sanitize). At SSR/prerender
  * time there is no `window`, so `DOMPurify.sanitize` is undefined and calling
- * it throws. The docs routes that prerender this function consume trusted,
- * repo-authored markdown (`?raw` imports from `docs/`), so SSR passthrough of
- * the marked output is safe there. In the browser — where untrusted message
- * markdown is rendered — the DOM exists, the guard passes, and the
- * sanitization security property (R12/F1) is enforced.
+ * it throws. Because the only consumer is the trusted docs route (whose
+ * source is author-controlled at build time), SSR passthrough of the marked
+ * output is safe in that single context. In the browser the DOM exists, the
+ * guard passes, and the sanitization security property (R12/F1) is enforced.
  */
 export function renderMarkdown(source: string): string {
   const raw = marked.parse(source, { async: false }) as string;

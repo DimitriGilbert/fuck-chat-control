@@ -13,6 +13,7 @@ import {
   signTranscript,
   verifyTranscript,
 } from "@/features/chat/crypto";
+import { ctEqual } from "@/features/chat/crypto/ct-equal";
 import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "@/features/chat/crypto";
 import { deriveRole, encodeSessionId, encodeTranscript } from "@/features/chat/protocol/codec";
 import {
@@ -948,7 +949,7 @@ export class ConversationOrchestrator {
     // TOFU: first contact stores, resume must match.
     const existing = await this.repository.getPeerIdentity(this.conversation);
     if (existing !== null) {
-      const sameKey = bytesEqual(existing.publicKey, remoteIdentityKey);
+      const sameKey = ctEqual(existing.publicKey, remoteIdentityKey);
       if (!sameKey) {
         throw new OrchestratorError(
           OrchestratorErrorCode.IdentityChanged,
@@ -1188,7 +1189,7 @@ export class ConversationOrchestrator {
       transcriptHash,
       peerRole,
     );
-    if (!bytesEqual(peerTag, expectedPeerTag)) {
+    if (!ctEqual(peerTag, expectedPeerTag)) {
       throw new PakeError(
         PakeErrorCode.Mismatch,
         "PAKE confirmation tag mismatch (wrong code or tampering); aborting handshake",
@@ -1484,14 +1485,6 @@ export class ConversationOrchestrator {
     this.signalingClient = client;
     client.connect();
   }
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 /**

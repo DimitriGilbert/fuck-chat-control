@@ -1,5 +1,6 @@
 import { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } from "../crypto/at-rest";
 import type { KdfParams } from "../crypto/at-rest";
+import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
 import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION } from "../protocol/limits";
@@ -246,7 +247,6 @@ export async function importBundle(
       conversationsAdded++;
       continue;
     }
-    conversationsMerged++;
     const existingPeer = await repo.getPeerIdentity(convo.id);
     if (convo.peer !== null) {
       if (existingPeer === null) {
@@ -260,10 +260,13 @@ export async function importBundle(
         // R8/F2: a peer-identity conflict means the incoming conversation is
         // hostile (or at least untrusted). Surface the conflict for UI action
         // but do NOT persist its display name or messages — `continue` skips
-        // the setDisplayName + message loop below.
+        // the setDisplayName + message loop below. The conversation is NOT
+        // counted as merged (conversationsMerged stays unchanged) because no
+        // incoming content was actually integrated.
         continue;
       }
     }
+    conversationsMerged++;
     if (existing.displayName === null && convo.displayName !== null) {
       await repo.setDisplayName(convo.id, convo.displayName);
     }
@@ -656,11 +659,7 @@ function cloneConversationId(id: ConversationId): ConversationId {
 
 function peerIdentityEqual(a: PeerIdentityRecord, b: PeerIdentityRecord): boolean {
   if (a.fingerprint !== b.fingerprint) return false;
-  if (a.publicKey.length !== b.publicKey.length) return false;
-  for (let i = 0; i < a.publicKey.length; i++) {
-    if (a.publicKey[i] !== b.publicKey[i]) return false;
-  }
-  return true;
+  return ctEqual(a.publicKey, b.publicKey);
 }
 
 function assertDirection(value: string): MessageDirection {

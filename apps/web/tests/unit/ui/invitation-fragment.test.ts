@@ -33,7 +33,7 @@ describe("readInvitationFragment", () => {
     expect(readInvitationFragment("#0123456789abcdef0123456789abcdef trailing")).toBeNull();
   });
 
-  describe("PAKE code suffix (R7/F6 / Phase 8.3)", () => {
+  describe("PAKE code suffix (R7/F6 / Phase 8.3, LW-9 PRD #90)", () => {
     it("accepts a hex~code fragment and returns the full bare fragment", () => {
       const hex = "0123456789abcdef0123456789abcdef";
       const fragment = `${hex}~123456`;
@@ -46,9 +46,9 @@ describe("readInvitationFragment", () => {
       expect(readInvitationFragment(fragment)).toBe(fragment);
     });
 
-    it("accepts a single-digit code", () => {
+    it("accepts the minimum 6-digit code length (000000)", () => {
       const hex = "0123456789abcdef0123456789abcdef";
-      const fragment = `${hex}~7`;
+      const fragment = `${hex}~000000`;
       expect(readInvitationFragment(`#${fragment}`)).toBe(fragment);
     });
 
@@ -59,6 +59,13 @@ describe("readInvitationFragment", () => {
       // Exactly 6 digits is valid.
       const valid = `${hex}~999999`;
       expect(readInvitationFragment(`#${valid}`)).toBe(valid);
+    });
+
+    it("rejects a 1..5-digit code (PRD #90 requires exactly 6 digits)", () => {
+      const hex = "0123456789abcdef0123456789abcdef";
+      expect(readInvitationFragment(`#${hex}~7`)).toBeNull();
+      expect(readInvitationFragment(`#${hex}~42`)).toBeNull();
+      expect(readInvitationFragment(`#${hex}~12345`)).toBeNull();
     });
 
     it("rejects a 7+ digit code (above the cap)", () => {

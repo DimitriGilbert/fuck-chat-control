@@ -10,20 +10,13 @@ import { ProtocolError, ProtocolErrorCode } from "../protocol/errors";
 import { AuthMode, Role } from "../protocol/types";
 import type { PublicKey, Transcript } from "../protocol/types";
 
+import { ctEqual } from "./ct-equal";
 import { CryptoError, CryptoErrorCode } from "./errors";
 import { hkdfSha256, sha256, toAESKey } from "./primitives";
 import type { DeriveSessionKeysInput, EphemeralKeyPair, SessionKeys } from "./types";
 
 const ECDH_X_OFFSET = 1;
 const ECDH_X_BYTES = 32;
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
 
 export async function generateEphemeralKeyPair(): Promise<EphemeralKeyPair> {
   const privateKey = p256.utils.randomSecretKey();
@@ -32,9 +25,9 @@ export async function generateEphemeralKeyPair(): Promise<EphemeralKeyPair> {
 }
 
 function resolvePeerIdentity(transcript: Transcript, localIdentityPublicKey: PublicKey): PublicKey {
-  const isInitiator = bytesEqual(transcript.initiatorIdentityKey, localIdentityPublicKey);
+  const isInitiator = ctEqual(transcript.initiatorIdentityKey, localIdentityPublicKey);
   if (isInitiator) return transcript.responderIdentityKey;
-  const isResponder = bytesEqual(transcript.responderIdentityKey, localIdentityPublicKey);
+  const isResponder = ctEqual(transcript.responderIdentityKey, localIdentityPublicKey);
   if (isResponder) return transcript.initiatorIdentityKey;
   throw new CryptoError(
     CryptoErrorCode.IdentityNotInTranscript,

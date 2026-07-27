@@ -6,7 +6,6 @@ import {
   FRAME_HEADER_BYTES,
   GCM_NONCE_BYTES,
   MAX_CHUNK_BYTES,
-  MAX_SEQUENCE,
   MAX_TEXT_FRAME_BYTES,
   PROTOCOL_VERSION,
   PUBLIC_KEY_BYTES,
@@ -424,12 +423,6 @@ export function decodeTransferCancelPayload(payload: Uint8Array): number {
 
 export function deriveNonce(senderSessionId: SessionId, sequence: number): Uint8Array {
   assertUint32(sequence, "sequence");
-  if (sequence > MAX_SEQUENCE) {
-    throw new ProtocolError(
-      ProtocolErrorCode.LimitExceeded,
-      `sequence exceeds MAX_SEQUENCE (${MAX_SEQUENCE})`,
-    );
-  }
   const nonce = new Uint8Array(GCM_NONCE_BYTES);
   nonce.set(senderSessionId.subarray(0, GCM_NONCE_BYTES));
   const seqOffset = NONCE_SEQ_BYTES - UINT32_BYTES;

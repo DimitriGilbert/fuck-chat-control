@@ -49,10 +49,11 @@ export function runSweep(
  * still in the registry. Bounds the worst-case half-open zombie to
  * `intervalMs` instead of the runtime's TCP keepalive default (~2h on Linux).
  *
- * The sweep logs a single concise line per eviction — server-side broker
- * hygiene, no secret material (the count of evictions is operational telemetry,
- * not user data). The interval timer is `.unref()`-ed when supported so it
- * never keeps the Node event loop alive on its own.
+ * The PRD requires logging to be "configured off" — the sweep therefore emits
+ * no console output unconditionally; operators who want eviction telemetry
+ * can wire it by instrumenting {@link SweepEvict} at the call site. The
+ * interval timer is `.unref()`-ed when supported so it never keeps the Node
+ * event loop alive on its own.
  */
 export function startZombieSweep(
   sockets: () => Iterable<BrokerSocket>,
@@ -61,12 +62,7 @@ export function startZombieSweep(
 ): SweepHandle {
   const intervalMs = options.intervalMs ?? 60_000;
   const timer = setInterval(() => {
-    const evicted = runSweep(sockets(), evict);
-    if (evicted > 0) {
-      // Single concise server-side log; no secret material. Acceptable per the
-      // spec's logging carve-out for the zombie sweep.
-      console.info(`[broker] zombie sweep evicted ${evicted} socket(s)`);
-    }
+    runSweep(sockets(), evict);
   }, intervalMs);
   // .unref() is a Node-only API; guard for runtimes where it's absent.
   if (typeof timer.unref === "function") {

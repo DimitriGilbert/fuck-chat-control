@@ -2,6 +2,7 @@ import { deriveNonce, encodeAad } from "../protocol/codec";
 import { GCM_NONCE_BYTES, REPLAY_WINDOW_SEQUENCES } from "../protocol/limits";
 import type { FrameAad } from "../protocol/types";
 
+import { ctEqual } from "./ct-equal";
 import { CryptoError, CryptoErrorCode } from "./errors";
 import { aesGcmDecrypt, aesGcmEncrypt } from "./primitives";
 import type { AESKey, EncryptedFrame } from "./types";
@@ -15,14 +16,6 @@ function assertUint32Sequence(seq: number): void {
       `sequence must be an unsigned uint32 integer, got ${seq}`,
     );
   }
-}
-
-function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
 
 export class ReplayWindow {
@@ -99,7 +92,7 @@ export async function decryptFrame(
   }
   assertUint32Sequence(aad.senderSequence);
   const expectedNonce = deriveNonce(aad.senderSessionId, aad.senderSequence);
-  if (!bytesEqual(nonce, expectedNonce)) {
+  if (!ctEqual(nonce, expectedNonce)) {
     throw new CryptoError(
       CryptoErrorCode.AuthenticationFailed,
       "nonce does not match the derived nonce for this sender session id and sequence",
