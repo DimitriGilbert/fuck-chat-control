@@ -76,29 +76,16 @@ export default defineConfig({
   },
   resolve: {
     tsconfigPaths: true,
-    // SSR split-React fix. The production bundle had TWO React module objects:
-    // nitro's `_libs` chunk bundles `react-dom/server` + an inlined React and
-    // binds the hook dispatcher (`ReactSharedInternals.H`) on it; the app's
-    // `use-sync-external-store/shim` regions (pulled in by Base UI and
-    // `@tanstack/react-store`) resolved `require("react")` to a *different*
-    // (external node_modules) copy whose dispatcher stays null → SSR crash
-    // "Cannot read properties of null (reading 'useSyncExternalStore')".
-    // `dedupe` forces every `react`/`react-dom` import onto one resolved file.
-    dedupe: ["react", "react-dom", "react/jsx-runtime"],
-    alias: {
-      // On React 19 the shim is a no-op — it returns `React.useSyncExternalStore`
-      // verbatim (`void 0 !== React.useSyncExternalStore ? React.useSyncExternalStore
-      // : shim`). Pointing the shim at `react` (which `dedupe` above collapses to
-      // the single React) makes its hooks read the same dispatcher-bearing copy
-      // that `react-dom/server` writes to. Verified semantically identical.
-      "use-sync-external-store/shim/with-selector": "react",
-      "use-sync-external-store/shim": "react",
-      "use-sync-external-store": "react",
-    },
   },
   plugins: [
     tailwindcss(),
-    tanstackStart(),
+    // SPA mode: the app routes serve a static shell and render client-side —
+    // they never hit the runtime SSR renderer. We don't need SSR here, and the
+    // SSR pass was shipping a split-React bundle that crashed
+    // ("Cannot read properties of null (reading 'useSyncExternalStore')").
+    // SPA mode keeps prerender enabled, so the docs routes below still emit
+    // static HTML at build time via nitro's `routeRules`.
+    tanstackStart({ spa: { enabled: true } }),
     ...nitro({
       features: { websocket: true },
       handlers: [{ route: "/ws", handler: "./src/server/broker.ts" }],
