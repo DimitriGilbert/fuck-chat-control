@@ -21,11 +21,51 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
       {
         title: "fck-chat-control",
       },
+      // Open Graph / social preview. og:image is root-relative; modern crawlers
+      // (Facebook, X/Twitter, Slack, Discord) resolve it against the page URL.
+      // If a fixed production domain is added later, make these absolute.
+      {
+        property: "og:title",
+        content: "fck-chat-control",
+      },
+      {
+        property: "og:type",
+        content: "website",
+      },
+      {
+        property: "og:image",
+        content: "/og.png",
+      },
+      {
+        property: "og:image:width",
+        content: "1536",
+      },
+      {
+        property: "og:image:height",
+        content: "1024",
+      },
+      {
+        name: "twitter:card",
+        content: "summary_large_image",
+      },
+      {
+        name: "twitter:image",
+        content: "/og.png",
+      },
     ],
     links: [
       {
         rel: "stylesheet",
         href: appCss,
+      },
+      {
+        rel: "icon",
+        type: "image/png",
+        href: "/icon.png",
+      },
+      {
+        rel: "apple-touch-icon",
+        href: "/icon.png",
       },
     ],
   }),
