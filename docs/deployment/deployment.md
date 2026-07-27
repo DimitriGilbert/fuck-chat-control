@@ -77,14 +77,18 @@ the honest answer.
 
 | Port          | Protocol | Purpose                                                           | Required in v1?                              |
 | ------------- | -------- | ----------------------------------------------------------------- | -------------------------------------------- |
-| 443 (or 3001) | HTTPS    | App + broker `/ws` (WSS after the proxy upgrades the connection). | Yes.                                         |
+| 443           | HTTPS    | App + broker `/ws` (WSS after the proxy upgrades the connection). | Yes.                                         |
 | 3478          | UDP      | STUN (e.g. coturn).                                               | Only for internet/NAT traversal deployments. |
 
-The app listens on **TCP 3001** inside the container
-(`ENV PORT=3001` in `apps/web/Dockerfile`,
-`ENV HOST=0.0.0.0`). The Docker Compose file maps `3001:3001`. In
+The app listens on **TCP 9000** inside the container
+(`ENV PORT=9000` in `apps/web/Dockerfile`,
+`ENV HOST=0.0.0.0`). The Docker Compose file uses `expose: ["9000"]`
+(not `ports:`), so the service is reachable **only on the Docker
+network** — Dokploy/traefik (or your reverse proxy) reaches it as
+`http://web:9000` and never publishes it on a host interface. In
 production, terminate TLS at a reverse proxy in front of the node
-server and expose 443 to the internet; do not expose 3001 directly.
+server and expose 443 to the internet; do not publish the container
+port on a host interface.
 
 The `/ws` route MUST be reached over **WSS** (secure WebSocket) in
 production. A plain-WS broker reachable over HTTP is not acceptable:
@@ -104,7 +108,7 @@ nginx example:
 
 ```nginx
 location /ws {
-    proxy_pass http://127.0.0.1:3001;
+    proxy_pass http://127.0.0.1:9000;
     proxy_http_version 1.1;
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
@@ -113,7 +117,7 @@ location /ws {
 }
 
 location / {
-    proxy_pass http://127.0.0.1:3001;
+    proxy_pass http://127.0.0.1:9000;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
@@ -124,7 +128,7 @@ Caddy example (automatic HTTPS + WebSocket pass-through by default):
 
 ```caddy
 chat.example.com {
-    reverse_proxy 127.0.0.1:3001
+    reverse_proxy 127.0.0.1:9000
 }
 ```
 
@@ -141,8 +145,13 @@ http:
     chat:
       loadBalancer:
         servers:
-          - url: "http://127.0.0.1:3001"
+          - url: "http://127.0.0.1:9000"
 ```
+
+> On Dokploy (and any Docker network setup), point the proxy at the
+> service name on the compose network — `http://web:9000` — rather than
+> `127.0.0.1:9000`. The `127.0.0.1` form above applies only when the
+> proxy runs on the host alongside the container.
 
 The app does not validate `X-Forwarded-Proto` directly; it uses
 `window.location.protocol`, so the proxy's TLS termination is what
@@ -152,7 +161,7 @@ makes the client pick `wss://`.
 
 Terminate TLS at the reverse proxy (Caddy, nginx, Traefik, or the
 hosting platform's HTTPS layer) in front of the node server. The node
-process itself speaks HTTP on port 3001; it does not present
+process itself speaks HTTP on port 9000 inside the container; it does not present
 certificates.
 
 - The app's broker URL is derived as
@@ -173,12 +182,14 @@ docker compose up -d --build
 
 This builds `apps/web/Dockerfile` (node:24, builds the SSR bundle via
 `pnpm run build`, runs `.output/server/index.mjs`) and starts it with
-the healthcheck below. The Compose file maps `3001:3001` and sets
-`restart: unless-stopped`.
+the healthcheck below. The Compose file uses `expose: ["9000"]` (the
+service is reachable on the Docker network only, not published on a
+host interface) and sets `restart: unless-stopped`.
 
 ### Health check
 
-The Compose healthcheck hits `http://localhost:3001/` every 10 s and
+The Compose healthcheck hits `http://localhost:9000/` (using the
+container's `PORT` env) every 10 s and
 expects a 2xx. The `/` GET is the health endpoint: it returns the SSR'd
 landing page with HTTP 200 and produces **no application-level chat or
 broker logs**. There is no separate `/healthz`; `/` is it.
@@ -305,9 +316,12 @@ a malicious operator; that remains outside v1 implementation scope
 
 Before going live:
 
-1. Stand up a reverse proxy (Caddy / nginx / Traefik) that terminates
-   TLS on 443 and forwards `/ws` with the WebSocket upgrade headers
-   to `127.0.0.1:3001`.
+1. Stand up a reverse proxy (Caddy / nginx / Traefik, or Dokploy's
+   built-in traefik) that terminates TLS on 443 and forwards `/ws`
+   with the WebSocket upgrade headers to the service on port **9000**
+   (`http://web:9000` on the compose network, or `127.0.0.1:9000` if
+   the proxy is host-side). Do NOT publish the container port on a host
+   interface — the Compose file uses `expose:`, not `ports:`.
 2. If peers will be on the open internet, run coturn (or equivalent)
    on UDP 3478, and edit `iceServers` in
    `apps/web/src/features/chat/runtime/chat-provider.tsx` to point at

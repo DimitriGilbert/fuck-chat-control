@@ -6,8 +6,12 @@ services:
       context: .
       dockerfile: apps/web/Dockerfile
     init: true
-    ports:
-      - "3001:3001"
+    # expose: reachable only on the docker network (Dokploy's traefik proxy),
+    # NOT published on any host interface. Use ports: only if a host-side
+    # process must reach it directly, and then bind loopback only:
+    #   - "127.0.0.1:9000:9000"
+    expose:
+      - "9000"
     env_file:
       - path: apps/web/.env
         required: false
@@ -17,7 +21,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://localhost:3001/').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://localhost:9000/').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
