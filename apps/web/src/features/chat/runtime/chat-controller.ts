@@ -968,6 +968,17 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       if (target === null) return;
       const session = sessions.get(keyOf(target));
       if (session === undefined) return;
+      // LW-13 (Phase 7b): drain any queued sends for this target BEFORE
+      // invoking orchestrator.retry(). A stale queued send (rejected with
+      // "conversation cleared") must not remain in the per-target queue across
+      // the retry boundary, or it would fire on the fresh handshake instead of
+      // being rejected. drainSendQueueForTarget rejects each waiter and zeroes
+      // its pre-read bytes — a stale queued send is then observed as rejected
+      // by its caller instead of silently completing on the new session. This
+      // mirrors the teardown-path drain (leaveConversation / clearConversation)
+      // that CR-8 introduced; reusing the helper here keeps the two paths at
+      // parity.
+      drainSendQueueForTarget(keyOf(target));
       try {
         session.orchestrator.retry();
       } catch (err) {

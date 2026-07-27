@@ -1,9 +1,15 @@
 import { encryptFrame } from "../crypto/aead";
 import { encodeTransferCancelPayload } from "../protocol/codec";
-import { MAX_BUFFERED_DATA_BYTES, MAX_SEQUENCE, PROTOCOL_VERSION } from "../protocol/limits";
+import {
+  MAX_BUFFERED_DATA_BYTES,
+  MAX_INCOMPLETE_TRANSFER_BYTES,
+  MAX_SEQUENCE,
+  PROTOCOL_VERSION,
+} from "../protocol/limits";
 import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/types";
 import type { FrameAad, FrameHeader } from "../protocol/types";
 
+import type { SessionKeys } from "../crypto/types";
 import { FramingError, FramingErrorCode } from "./errors";
 import { chunkBoundaries, computeChunkCount, encodeManifest, sha256 } from "./manifest";
 import type { FileManifest, FrameSenderConfig } from "./types";
@@ -73,6 +79,18 @@ export class FrameSender {
 
   async sendFile(data: Uint8Array, name: string, mimeType: string): Promise<number> {
     this.assertNotTearingDown();
+    // LW-5: reject an oversized input BEFORE hashing it. The receiver's budget
+    // check and the manifest encoder's size guard both reject sizes above
+    // MAX_INCOMPLETE_TRANSFER_BYTES, but they run only after this method has
+    // already paid for the sha256 over the full buffer. Hoisting the cap above
+    // the hash avoids wasted work on an input that can never be sent, and
+    // surfaces the error at the sender instead of after a round-trip.
+    if (data.length > MAX_INCOMPLETE_TRANSFER_BYTES) {
+      throw new FramingError(
+        FramingErrorCode.SizeExceeded,
+        `file size ${data.length} exceeds MAX_INCOMPLETE_TRANSFER_BYTES (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+      );
+    }
     const transferId = this.allocateTransferId();
     const contentHash = await sha256(data);
     const chunkCount = computeChunkCount(data.length);
@@ -152,6 +170,15 @@ export class FrameSender {
     const waiters = this.drainWaiters.splice(0, this.drainWaiters.length);
     for (const w of waiters) w.reject(error);
     this.activeTransfers.clear();
+    // LW-12 (Phase 7b): best-effort zeroize the session send key. JS-array
+    // zeroing is best-effort — the GC and the runtime's own copies (e.g. V8's
+    // externalized ArrayBuffer views) may retain a copy — but matching the
+    // receivedFiles precedent (Phase 4) bounds the lifetime of the live key
+    // bytes to the framing layer's own teardown. The SessionKeys are owned by
+    // the orchestrator; the config reference is dropped by the caller after
+    // teardown, so overwriting the bytes here is the only window the framing
+    // layer has to clear them.
+    zeroizeSessionKeys(this.config.sessionKeys);
   }
 
   private readonly handleDrain = (): void => {
@@ -262,4 +289,18 @@ function isSequenceExhaustedError(err: unknown): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * LW-12 (Phase 7b): best-effort zeroize of a {@link SessionKeys} pair. Overwrites
+ * the send and recv key bytes with zeros in place. JS-array zeroing is
+ * best-effort — a copy retained by the GC or by the runtime's own buffer
+ * management is not reached — but matching the receivedFiles precedent (Phase 4)
+ * bounds the lifetime of the live key bytes to the framing layer's teardown.
+ * Defense-in-depth; the authoritative key lifetime is the orchestrator's
+ * teardownSession which nulls its SessionKeys reference.
+ */
+export function zeroizeSessionKeys(keys: SessionKeys): void {
+  keys.sendKey.fill(0);
+  keys.recvKey.fill(0);
 }

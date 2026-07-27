@@ -52,6 +52,27 @@ describe("encryptFrame / decryptFrame (AES-256-GCM, NIST SP 800-38D)", () => {
     expect(bytesEqual(enc.nonce, deriveNonce(sender, 42))).toBe(true);
   });
 
+  it("LW-20: identical (senderSessionId, sequence) derive identical nonces (deterministic contract)", async () => {
+    // LW-20 (Phase 7b): framing nonces are DETERMINISTIC — derived as a pure
+    // function of (senderSessionId, sequence) — NOT random. This is the
+    // contract that makes the replay-protection window sound: the receiver
+    // derives the same nonce for a given (id, seq) and the AEAD tag binds it.
+    // Document the contract by encrypting TWICE with identical (id, seq) and
+    // asserting the nonces (and thus the ciphertexts, given the same key and
+    // AAD) are byte-equal. A regression that injected randomness here would
+    // break nonce uniqueness tracking and must surface loudly.
+    const key = generateAtRestKey();
+    const sender = sessionId(9);
+    const aad = textAad(sender, 17);
+    const first = await encryptFrame(key, aad, PLAINTEXT);
+    const second = await encryptFrame(key, aad, PLAINTEXT);
+    expect(bytesEqual(first.nonce, second.nonce)).toBe(true);
+    // Same key + same nonce + same AAD + same plaintext → same ciphertext.
+    expect(bytesEqual(first.ciphertext, second.ciphertext)).toBe(true);
+    // Cross-check against the explicit derivation to make the contract explicit.
+    expect(bytesEqual(first.nonce, deriveNonce(sender, 17))).toBe(true);
+  });
+
   it("rejects a tampered ciphertext (GCM tag)", async () => {
     const key = generateAtRestKey();
     const aad = textAad(sessionId(1), 0);

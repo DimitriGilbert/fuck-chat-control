@@ -1329,6 +1329,40 @@ export class ConversationOrchestrator {
     if (this.frameReceiver !== null) {
       this.frameReceiver.teardown();
     }
+    // LW-12 (Phase 7b): best-effort zeroize of handshake/transient key material
+    // BEFORE nulling the references. JS-array zeroing is best-effort — a copy
+    // retained by the GC or by the runtime's own buffer management is not
+    // reached — but matching the receivedFiles precedent (Phase 4) bounds the
+    // lifetime of the live secret bytes to the teardown path rather than
+    // leaving them in the heap until GC. Only PER-SESSION transient material is
+    // zeroed: the ephemeral ECDH keypair, the per-handshake session ids, the
+    // peer's ephemeral public key, and the PAKE exchange artifacts. The
+    // IDENTITY public keys are deliberately NOT zeroed — they are long-lived
+    // TOFU identities that persist across handshake rounds (resume) and are
+    // shared by reference from `this.identity`; zeroizing them in place would
+    // corrupt the identity used by the next handshake on this orchestrator.
+    // The framing layer's session keys are zeroed by sender/receiver.teardown.
+    if (this.ephemeral !== null) {
+      this.ephemeral.privateKey.fill(0);
+      this.ephemeral.publicKey.fill(0);
+    }
+    if (this.pakeSession !== null && this.pakeSession.state !== null) {
+      this.pakeSession.state.outgoing_share.fill(0);
+    }
+    if (this.localHello !== null) {
+      this.localHello.ephemeralPublicKey.fill(0);
+      this.localHello.sessionId.fill(0);
+    }
+    if (this.remoteHello !== null) {
+      this.remoteHello.ephemeralPublicKey.fill(0);
+      this.remoteHello.sessionId.fill(0);
+    }
+    if (this.peerPakeShare !== null) {
+      this.peerPakeShare.fill(0);
+    }
+    if (this.peerPakeConfirm !== null) {
+      this.peerPakeConfirm.fill(0);
+    }
     if (this.transport !== null) {
       try {
         this.transport.setOnMessage(null);

@@ -7,8 +7,9 @@ import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/t
 import type { FrameAad } from "../protocol/types";
 
 import { FramingError, FramingErrorCode } from "./errors";
-import { decodeManifest, sha256 } from "./manifest";
+import { chunkBoundaries, decodeManifest, sha256 } from "./manifest";
 import type { FileManifest, FrameReceiverConfig, ReceivedFile } from "./types";
+import { zeroizeSessionKeys } from "./sender";
 import { decodeWireFrame } from "./wire";
 
 /**
@@ -114,6 +115,9 @@ export class FrameReceiver {
       this.totalBufferedBytes -= transfer.receivedBytes;
     }
     this.transfers.clear();
+    // LW-12 (Phase 7b): best-effort zeroize the session keys. See
+    // {@link zeroizeSessionKeys} in sender.ts for the limitation rationale.
+    zeroizeSessionKeys(this.config.sessionKeys);
   }
 
   private async decrypt(
@@ -233,6 +237,23 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.ChunkOutOfRange,
         `chunk ${chunkId} out of range [0, ${transfer.manifest.chunkCount})`,
+      );
+    }
+    // LW-4 (defense-in-depth): reject a non-canonical chunk length BEFORE the
+    // hash check. The sender slices the file via the same `chunkBoundaries`
+    // helper, so a canonical chunk's length must equal `end - start` for its
+    // index. A mismatch here means either a malicious sender crafting a chunk
+    // that reassembles to the declared size but with the wrong byte layout, or
+    // a buggy sender slicing on different boundaries. Both would otherwise be
+    // caught by the content-hash check at completion, but rejecting early
+    // bounds the worst-case wasted buffering to one chunk and surfaces the
+    // error at the offending frame rather than at reassembly.
+    const { start, end } = chunkBoundaries(transfer.manifest.size, chunkId);
+    const expectedLength = end - start;
+    if (plaintext.length !== expectedLength) {
+      throw new FramingError(
+        FramingErrorCode.Malformed,
+        `chunk ${chunkId} length ${plaintext.length} does not match canonical length ${expectedLength} for transfer ${transferId}`,
       );
     }
     if (transfer.chunks[chunkId] !== null) {

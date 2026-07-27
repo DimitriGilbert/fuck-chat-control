@@ -1,12 +1,15 @@
 import type { BrokerSocket } from "./room-registry";
 
 /**
- * A僵尸连接清理回调 — invoked once per evicted socket. The broker server wires
- * this to the connection's `onClose()` so the partner receives a `leave`
- * notification via {@link BrokerConnection.notifyPeerLeft} exactly as it would
- * for a clean socket close.
+ * Zombie-connection eviction callback. Invoked once per evicted socket with the
+ * id under which it was registered, so the broker server can run its standard
+ * cleanup path (`cleanup(id)`) without an O(n) reverse-lookup over the sockets
+ * map. The broker server wires this to the connection's `onClose()` so the
+ * partner receives a `leave` notification via
+ * {@link BrokerConnection.notifyPeerLeft} exactly as it would for a clean
+ * socket close.
  */
-export type SweepEvict = (socket: BrokerSocket) => void;
+export type SweepEvict = (socket: BrokerSocket, id: string) => void;
 
 export interface SweepOptions {
   /** Sweep cadence in milliseconds. Defaults to 60_000 (one minute). */
@@ -28,16 +31,18 @@ export interface SweepHandle {
 
 /**
  * Run one sweep pass. Exported for unit testing so the deterministic test does
- * not have to wait for the periodic interval.
+ * not have to wait for the periodic interval. Iterates `[id, socket]` pairs so
+ * the {@link SweepEvict} callback receives the registration id directly,
+ * removing the previous O(n) reverse-lookup scan at the call site (LW-11).
  */
 export function runSweep(
-  sockets: Iterable<BrokerSocket>,
+  sockets: Iterable<readonly [string, BrokerSocket]>,
   evict: SweepEvict,
 ): number {
   let evicted = 0;
-  for (const socket of sockets) {
+  for (const [id, socket] of sockets) {
     if (socket.readyState > READY_STATE_DEAD_THRESHOLD) {
-      evict(socket);
+      evict(socket, id);
       evicted++;
     }
   }
@@ -56,7 +61,7 @@ export function runSweep(
  * event loop alive on its own.
  */
 export function startZombieSweep(
-  sockets: () => Iterable<BrokerSocket>,
+  sockets: () => Iterable<readonly [string, BrokerSocket]>,
   evict: SweepEvict,
   options: SweepOptions = {},
 ): SweepHandle {

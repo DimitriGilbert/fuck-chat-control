@@ -157,6 +157,10 @@ describe("slice 4: chunk rejection rules", () => {
 
   it("rejects a duplicate chunk id (distinct sequence numbers)", async () => {
     const { pair, seq } = await receiverWithTransfer(1, MAX_CHUNK_PLAINTEXT_BYTES * 2);
+    // LW-4: use the canonical chunk length so the duplicate-chunk check is the
+    // one under test (a non-canonical length would now be rejected first by
+    // the canonical-length defense-in-depth guard).
+    const canonical = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES);
     const chunkA = await forgeFrame(
       pair.recvKeys.recvKey,
       pair.peerSessionId,
@@ -164,7 +168,7 @@ describe("slice 4: chunk rejection rules", () => {
       FrameType.FileChunk,
       1,
       0,
-      deterministicData(10),
+      canonical,
     );
     await pair.receiver.ingest(chunkA);
     const chunkB = await forgeFrame(
@@ -174,7 +178,7 @@ describe("slice 4: chunk rejection rules", () => {
       FrameType.FileChunk,
       1,
       0,
-      deterministicData(10),
+      canonical,
     );
     await expect(pair.receiver.ingest(chunkB)).rejects.toMatchObject({
       code: FramingErrorCode.DuplicateChunk,
@@ -197,7 +201,12 @@ describe("slice 4: chunk rejection rules", () => {
     });
   });
 
-  it("rejects a chunk that would exceed the declared size", async () => {
+  it("LW-4: rejects a non-canonical chunk length (oversized) ahead of the hash check", async () => {
+    // LW-4 (Phase 7b): a non-canonical chunk length is now rejected by the
+    // canonical-length defense-in-depth guard before the size-exceeded check
+    // and before the hash check at completion. The pre-LW-4 size-exceeded
+    // check is now redundant for the single-chunk case (canonical sizes sum
+    // exactly to manifest.size by construction); this test pins the new guard.
     const { pair, seq } = await receiverWithTransfer(1, 100);
     const chunk = await forgeFrame(
       pair.recvKeys.recvKey,
@@ -209,7 +218,27 @@ describe("slice 4: chunk rejection rules", () => {
       deterministicData(101),
     );
     await expect(pair.receiver.ingest(chunk)).rejects.toMatchObject({
-      code: FramingErrorCode.SizeExceeded,
+      code: FramingErrorCode.Malformed,
+    });
+  });
+
+  it("LW-4: rejects an undersized non-canonical chunk length", async () => {
+    // The canonical guard rejects undersized chunks too — a sender slicing on
+    // different boundaries would produce a chunk shorter than the canonical
+    // length for its index. Pin the undersized direction alongside the
+    // oversized case above.
+    const { pair, seq } = await receiverWithTransfer(1, MAX_CHUNK_PLAINTEXT_BYTES * 2);
+    const chunk = await forgeFrame(
+      pair.recvKeys.recvKey,
+      pair.peerSessionId,
+      seq.n++,
+      FrameType.FileChunk,
+      1,
+      0,
+      deterministicData(10), // canonical is MAX_CHUNK_PLAINTEXT_BYTES
+    );
+    await expect(pair.receiver.ingest(chunk)).rejects.toMatchObject({
+      code: FramingErrorCode.Malformed,
     });
   });
 

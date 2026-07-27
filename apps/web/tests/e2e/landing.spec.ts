@@ -146,6 +146,54 @@ test.describe("landing shell", () => {
     }
   });
 
+  /**
+   * LW-23 / LW-24 (Phase 7b): a coded invitation carries a 6-digit PAKE code
+   * after the conversation id, separated by `~` (e.g. `#<hex>~<digits>`). The
+   * `~code` is the password-derived secret's input and MUST NEVER reach the
+   * server — the broker is signaling-only and must not see the code. The
+   * browser keeps the whole hash (hex + ~ + digits) client-side; this test
+   * asserts via a request log that neither the `~` separator, the digit code,
+   * nor the hex id appears in any server-visible path or query.
+   */
+  test("a coded invitation (#hex~digits) loads the index route; the ~code never reaches the server", async ({
+    page,
+  }) => {
+    const hex = "0123456789abcdef0123456789abcdef";
+    const code = "123456";
+    const fragment = `${hex}~${code}`;
+    const serverHits: string[] = [];
+    page.on("request", (req) => {
+      const url = req.url();
+      if (url.includes("localhost:3001")) {
+        serverHits.push(new URL(url).pathname + new URL(url).search);
+      }
+    });
+
+    await page.goto(`http://localhost:3001/#${fragment}`);
+
+    // The shell rendered; the join flow parsed the coded invitation from the
+    // fragment client-side.
+    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // The full coded invitation (hex + ~ + digits) is retained in the URL bar
+    // for the client-side join flow to consume.
+    expect(page.url()).toContain(`#${fragment}`);
+
+    // The server never sees the fragment at all: not the hex id, not the `~`
+    // separator, not the digit code, and no literal `#`. The `~` and the digit
+    // code are the load-bearing exclusions here — a regression that sent the
+    // hash to the server (e.g. via a malformed fetch that included location.hash)
+    // would leak the PAKE code.
+    for (const hit of serverHits) {
+      expect(hit).not.toContain(hex);
+      expect(hit).not.toContain("~");
+      expect(hit).not.toContain(code);
+      expect(hit).not.toContain("#");
+    }
+  });
+
   test("sidebar shows started conversations and highlights the active one", async ({ page }) => {
     // Desktop sidebar (md+) is visible by default at the default viewport.
     await page.goto("/");

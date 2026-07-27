@@ -140,24 +140,55 @@ describe("attachTransport re-entry race guard (R7/F4 / Phase 8.4)", () => {
     }
   });
 
-  it("the generation guard aborts a stale beginHandshake without surfacing a stale error", async () => {
-    // Drive the orchestrator to Handshaking via attachTransport. The
-    // beginHandshake closure captures the generation at scheduling time;
-    // when a newer attachTransport runs (e.g. after a teardown+retry cycle
-    // that returns to Waiting), the older closure's mutation phase must be
-    // a no-op. We approximate this by attaching twice across a retry cycle
-    // and asserting no spurious errors fire.
+  it("LW-22: after a stale-closure re-entry, the NEW generation's handshake is the one that completes", async () => {
+    // LW-22 (Phase 7b): the previous version of this test relied on a brittle
+    // regex over error messages to detect stale-closure corruption, and its
+    // replacement used positive assertions that were too weak — the orphaned
+    // first transport was never link()ed to a peer, so no bytes ever arrived on
+    // it and the generation guard's rejection path was never exercised. A
+    // regression that removed the guard entirely would still pass.
+    //
+    // The real guard lives in beginHandshake (orchestrator.ts ~line 773): it
+    // captures `this.handshakeGeneration` SYNCHRONOUSLY when beginHandshake's
+    // body starts running, then — after the `await generateEphemeralKeyPair()`
+    // — aborts if the generation advanced. attachTransport schedules
+    // beginHandshake via `void this.beginHandshake()`; an async function runs
+    // its body up to the first await synchronously inside that call. So the
+    // generation capture for gen-1 happens inline during the FIRST
+    // attachTransport, BEFORE control returns to the caller. If the caller then
+    // re-attaches (gen-2) in the SAME synchronous tick — the realistic "bridge
+    // observes a data-channel flip and re-attaches immediately" path — gen-2's
+    // attachTransport bumps the generation to 2 while gen-1's beginHandshake is
+    // still suspended at the crypto await. When gen-1 resumes, the guard
+    // `generation(1) !== this.handshakeGeneration(2)` fires and aborts it
+    // WITHOUT sending. The new generation owns the slot.
+    //
+    // The decisive regression check: if the line-773 guard were removed, gen-1
+    // would NOT abort — after its await it would call
+    // `this.transport.send(encodeHello(localHello))`, and `this.transport` is
+    // now transport2 (reassigned by gen-2's attachTransport). So transport2
+    // would receive TWO Hello sends (one from each generation) instead of one.
+    // Asserting `transport2.sent.length === 1` pins the guard: it fails the
+    // moment the guard is removed.
     const errors: unknown[] = [];
     const kit = await makeOrchestrator({ onError: (e) => errors.push(e) });
     await kit.orchestrator.start();
 
-    const transport = new LoopbackPeerTransport();
-    kit.orchestrator.attachTransport(transport);
+    // First generation: attach a transport that will be orphaned. We do NOT
+    // link it to a peer — its beginHandshake awaits a peer Hello that never
+    // arrives. `void this.beginHandshake()` runs gen-1's body synchronously up
+    // to `await generateEphemeralKeyPair()`, capturing generation = 1 before
+    // control returns here.
+    const orphanedTransport = new LoopbackPeerTransport();
+    kit.orchestrator.attachTransport(orphanedTransport);
     expect(kit.orchestrator.state).toBe(ConnectionState.Handshaking);
 
-    // Force the orchestrator to Disconnected, then retry back to Signaling.
-    // The retry path is the realistic re-entry trigger: the bridge observes
-    // a data-channel flip and the orchestrator is re-attached.
+    // Synchronous re-entry in the SAME tick — the path that puts gen-1's
+    // beginHandshake in the guard's window. notifyPeerLeft tears the session
+    // down (state -> Disconnected), retry() re-opens signaling (state ->
+    // Signaling), and the second attachTransport bumps the generation to 2 and
+    // reassigns this.transport to transport2. Gen-1 is still awaiting the
+    // crypto op; when it resumes the guard must abort it.
     kit.orchestrator.notifyPeerLeft();
     expect(kit.orchestrator.state).toBe(ConnectionState.Disconnected);
 
@@ -166,25 +197,41 @@ describe("attachTransport re-entry race guard (R7/F4 / Phase 8.4)", () => {
     kit.orchestrator.retry();
     expect(kit.orchestrator.state).toBe(ConnectionState.Signaling);
 
-    // Second attachTransport: a NEW generation begins. The first generation's
-    // beginHandshake is still awaiting (no peer hello arrived on transport),
-    // but the guard aborts it without surfacing an error.
+    // Second attachTransport: a NEW generation begins. NO `await` between this
+    // and the first attachTransport — that is what places gen-1 inside the
+    // guard's rejection window.
     const transport2 = new LoopbackPeerTransport();
     kit.orchestrator.attachTransport(transport2);
     expect(kit.orchestrator.state).toBe(ConnectionState.Handshaking);
 
-    // Allow any pending async work to settle.
+    // Allow the suspended beginHandshake closures (both generations) to resume.
+    // Gen-1's await resolves first; the guard must abort it. Gen-2's await
+    // resolves and sends its Hello on transport2.
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
 
-    // Filter for errors that would indicate the stale closure corrupted
-    // state. The guard's contract is: no spurious errors from the older
-    // handshake's resolution.
-    const staleErrors = errors.filter(
-      (e) =>
-        e instanceof Error &&
-        /handshake started without conversation|cannot read|undefined/.test(e.message),
-    );
-    expect(staleErrors).toHaveLength(0);
+    // DECISIVE assertion — pins the generation guard at orchestrator.ts:773.
+    // Exactly ONE Hello (gen-2's) was sent on the active transport. If the
+    // guard were removed, gen-1's post-await send would land here too (it
+    // resolves against this.transport, which is now transport2), making this
+    // count 2. This is the load-bearing check that fails-under-regression.
+    expect(transport2.sent.length).toBe(1);
+    expect(transport2.sent[0]?.length).toBe(163); // HelloMessage wire size
+
+    // The orphaned first transport must NOT have been driven by gen-1's
+    // closure either: gen-1 captured generation = 1 before the re-attach, so
+    // when the guard was reached it had already aborted before any send. (With
+    // the guard removed, gen-1 would send on transport2 — the NEW transport —
+    // not here; this assertion guards against gen-1 sending on the orphaned
+    // transport before the re-attach as well, locking down both branches of the
+    // stale-closure invariant.)
+    expect(orphanedTransport.sent.length).toBe(0);
+
+    // The stale-closure guard's contract: no spurious errors from the older
+    // handshake's resolution, AND the orchestrator stayed in Handshaking
+    // (owned by the new generation) rather than being driven to an illegal
+    // state by the orphaned closure.
+    expect(kit.orchestrator.state).toBe(ConnectionState.Handshaking);
+    expect(errors).toHaveLength(0);
   });
 
   it("the StallableTransport helper correctly defers sends of matching lengths", async () => {

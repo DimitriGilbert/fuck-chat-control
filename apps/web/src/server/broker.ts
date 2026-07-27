@@ -19,17 +19,18 @@ const sockets = new Map<string, BrokerSocket>();
 // the TCP connection. The sweep polls every 60s and routes each zombie through
 // the same cleanup path as a clean close, so the partner receives a `leave`
 // instead of waiting for ICE to time out.
+//
+// LW-11: the sweep is keyed by id. crossws hands us a stable `peer.id` per
+// connection for the connection's lifetime (the same id `open`/`message`/
+// `close`/`error` all receive), so iterating `[id, socket]` pairs and calling
+// `cleanup(id)` removes the previous O(n) reverse-lookup scan over the sockets
+// map. The id-stability invariant is what makes the keying safe: a socket's id
+// never changes while it is registered, so the id observed during the sweep is
+// the same id used to register it in `open`.
 startZombieSweep(
-  () => sockets.values(),
-  (socket) => {
-    // Find the peer.id for this socket, then run the standard cleanup path so
-    // the partner gets a `leave` notification via BrokerConnection.onClose.
-    for (const [id, registered] of sockets) {
-      if (registered === socket) {
-        cleanup(id);
-        break;
-      }
-    }
+  () => sockets.entries(),
+  (_socket, id) => {
+    cleanup(id);
   },
 );
 

@@ -68,6 +68,19 @@ export async function deriveSessionKeys(input: DeriveSessionKeysInput): Promise<
       "deriveSessionKeys: authMode is Pake but no pakeSecret was provided (refusing silent fallback)",
     );
   }
+  // LW-1 (defense-in-depth): the converse guard. A non-null pakeSecret under a
+  // SafetyNumberOnly transcript would silently mix the SPAKE2 secret into a
+  // session that the transcript declares password-less — the two sides would
+  // derive different keys and the mismatch would surface far downstream as an
+  // opaque AEAD auth failure instead of a clear configuration error. This is
+  // unreachable today (callers only pass pakeSecret under AuthMode.Pake), so
+  // the throw is fails-closed defense-in-depth against a future caller mistake.
+  if (pakeSecret !== null && input.transcript.authMode !== AuthMode.Pake) {
+    throw new CryptoError(
+      CryptoErrorCode.InvalidArgument,
+      "deriveSessionKeys: pakeSecret provided but authMode is not Pake (refusing silent mixing)",
+    );
+  }
 
   const transcriptHash = await sha256(encodeTranscript(input.transcript));
   // Bind the SPAKE2 shared secret into the HKDF info, alongside the ECDH

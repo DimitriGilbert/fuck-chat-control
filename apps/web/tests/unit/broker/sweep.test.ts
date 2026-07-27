@@ -13,13 +13,23 @@ describe("runSweep", () => {
     const closed = new MockBrokerSocket();
     closed.readyState = 3; // CLOSED
 
-    const evicted: MockBrokerSocket[] = [];
-    const count = runSweep([open, closing, closed], (s) => {
-      evicted.push(s as MockBrokerSocket);
-    });
+    const evicted: Array<{ id: string; socket: MockBrokerSocket }> = [];
+    const count = runSweep(
+      [
+        ["open", open],
+        ["closing", closing],
+        ["closed", closed],
+      ] as Array<readonly [string, MockBrokerSocket]>,
+      (socket, id) => {
+        evicted.push({ id, socket: socket as MockBrokerSocket });
+      },
+    );
 
     expect(count).toBe(2);
-    expect(evicted).toEqual([closing, closed]);
+    expect(evicted).toEqual([
+      { id: "closing", socket: closing },
+      { id: "closed", socket: closed },
+    ]);
   });
 
   it("leaves OPEN sockets untouched", () => {
@@ -28,14 +38,20 @@ describe("runSweep", () => {
     const b = new MockBrokerSocket();
     b.readyState = 1;
     const evicted: unknown[] = [];
-    const count = runSweep([a, b], (s) => evicted.push(s));
+    const count = runSweep(
+      [
+        ["a", a],
+        ["b", b],
+      ] as Array<readonly [string, MockBrokerSocket]>,
+      (s, id) => evicted.push({ s, id }),
+    );
     expect(count).toBe(0);
     expect(evicted).toEqual([]);
   });
 
   it("reports zero evictions for an empty socket set", () => {
     const evicted: unknown[] = [];
-    expect(runSweep([], (s) => evicted.push(s))).toBe(0);
+    expect(runSweep([], (s, id) => evicted.push({ s, id }))).toBe(0);
     expect(evicted).toEqual([]);
   });
 });
@@ -44,10 +60,10 @@ describe("startZombieSweep", () => {
   it("invokes evict on a short cadence and stops cleanly", async () => {
     const socket = new MockBrokerSocket();
     socket.readyState = 3;
-    const evicted: MockBrokerSocket[] = [];
+    const evicted: Array<{ id: string; socket: MockBrokerSocket }> = [];
     const handle = startZombieSweep(
-      () => [socket],
-      (s) => evicted.push(s as MockBrokerSocket),
+      () => [["zombie", socket]] as Array<readonly [string, MockBrokerSocket]>,
+      (s, id) => evicted.push({ id, socket: s as MockBrokerSocket }),
       { intervalMs: 20 },
     );
 
@@ -56,7 +72,7 @@ describe("startZombieSweep", () => {
 
     handle.stop();
     expect(evicted.length).toBeGreaterThanOrEqual(1);
-    expect(evicted.every((s) => s === socket)).toBe(true);
+    expect(evicted.every((e) => e.socket === socket && e.id === "zombie")).toBe(true);
   });
 
   it("does not evict healthy sockets on tick", async () => {
@@ -64,8 +80,8 @@ describe("startZombieSweep", () => {
     socket.readyState = 1;
     const evicted: unknown[] = [];
     const handle = startZombieSweep(
-      () => [socket],
-      (s) => evicted.push(s),
+      () => [["healthy", socket]] as Array<readonly [string, MockBrokerSocket]>,
+      (s, id) => evicted.push({ s, id }),
       { intervalMs: 20 },
     );
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -78,8 +94,8 @@ describe("startZombieSweep", () => {
     socket.readyState = 3;
     const evicted: unknown[] = [];
     const handle = startZombieSweep(
-      () => [socket],
-      (s) => evicted.push(s),
+      () => [["zombie", socket]] as Array<readonly [string, MockBrokerSocket]>,
+      (s, id) => evicted.push({ s, id }),
       { intervalMs: 20 },
     );
     handle.stop();

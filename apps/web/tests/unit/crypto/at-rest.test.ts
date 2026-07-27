@@ -35,6 +35,12 @@ describe("encryptAtRest / decryptAtRest (AES-256-GCM at-rest)", () => {
     const key = generateAtRestKey();
     const enc = await encryptAtRest(key, PLAINTEXT);
     expect(enc.nonce.length).toBe(12);
+    // LW-19: AES-256-GCM appends a 16-byte authentication tag to the
+    // ciphertext, so the ciphertext length must equal plaintext.length + 16.
+    // Pins the tag-presence invariant so a regression that dropped the tag
+    // (or appended it twice) surfaces here rather than only as a decrypt
+    // failure downstream.
+    expect(enc.ciphertext.length).toBe(PLAINTEXT.length + 16);
     expect(bytesEqual(enc.ciphertext, PLAINTEXT)).toBe(false);
     const dec = await decryptAtRest(key, enc.nonce, enc.ciphertext);
     expect(bytesEqual(dec, PLAINTEXT)).toBe(true);
@@ -80,6 +86,11 @@ describe("wrapKey / unwrapKey (Argon2id, RFC 9106)", () => {
   it("round-trips an at-rest key under a passphrase", async () => {
     const key = generateAtRestKey();
     const wrapped = await wrapKey("correct horse battery staple", key);
+    // LW-19: the wrapped blob layout is salt(16) + nonce(12) + ciphertext,
+    // where the ciphertext wraps a 32-byte AES key under GCM (so +16 tag).
+    // Total = 16 + 12 + 32 + 16 = 76. Pinning the length catches a regression
+    // that truncated a section or appended spurious bytes.
+    expect(wrapped.length).toBe(16 + 12 + key.length + 16);
     const recovered = await unwrapKey("correct horse battery staple", wrapped);
     expect(bytesEqual(recovered, key)).toBe(true);
   });
