@@ -38,11 +38,11 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
       },
       {
         property: "og:image:width",
-        content: "1536",
+        content: "1200",
       },
       {
         property: "og:image:height",
-        content: "1024",
+        content: "800",
       },
       {
         name: "twitter:card",
