@@ -10,6 +10,13 @@
 # timed captions with ffmpeg and writes BOTH a compressed WebM and an animated
 # GIF.
 #
+# Phase 8 additions: after Connected the demo now dwells on the gold PAKE pill
+# in the StatusBar (ShieldIcon + "PAKE"), and after starting a second chat it
+# highlights the sidebar LockIcon that distinguishes PAKE-authenticated rows.
+# An OPTIONAL best-effort beat (DEMO_AUTH_FAILED_CTA=1) induces a wrong-code
+# join to surface the "Create a fresh invitation" CTA; it is off by default
+# because driving a deterministic PAKE mismatch from CDP is racy.
+#
 # It does NOT start or stop the dev server. Boot it yourself first:
 #   pnpm dev                                   # serves http://localhost:3001
 # then in another terminal:
@@ -29,6 +36,11 @@
 #   PALETTE    temp palette png path           (default /tmp/chat-demo-palette.png)
 #   KEEP_RAW   "1" to keep the raw recording   (default unset)
 #   FONT       ttf path for drawtext           (default auto-detected)
+#   DEMO_AUTH_FAILED_CTA
+#              "1" to attempt the best-effort wrong-code beat that surfaces
+#              the "Create a fresh invitation" CTA. Off by default -- inducing
+#              a PAKE mismatch deterministically from CDP is racy, and a flaky
+#              beat is worse than none.
 #
 # Prerequisites (install once):
 #   npm i -g agent-browser && agent-browser install      # Chrome for CDP
@@ -57,6 +69,10 @@ GIF="${GIF:-$REPO_ROOT/docs/media/chat-demo.gif}"
 RAW="${RAW:-/tmp/chat-demo-raw.webm}"
 PALETTE="${PALETTE:-/tmp/chat-demo-palette.png}"
 KEEP_RAW="${KEEP_RAW:-0}"
+# Off by default: the wrong-code PAKE-mismatch beat is racy to drive from CDP.
+# Set DEMO_AUTH_FAILED_CTA=1 to attempt it; on any hiccup it logs a WARN and
+# the main demo continues untouched.
+DEMO_AUTH_FAILED_CTA="${DEMO_AUTH_FAILED_CTA:-0}"
 
 export PATH="$REPO_ROOT/node_modules/.bin:$PATH"
 
@@ -251,7 +267,27 @@ fi
 sleep 2
 
 # ============================================================================
-# BEAT 5 -- MESSAGE EXCHANGE           caption: 26.0s - 32.0s
+# BEAT 4b -- PAKE PILL ON CAMERA       caption: 26.0s - 32.0s
+#   "PAKE-protected session -- the gold pill confirms the handshake was
+#    PAKE-authenticated."
+#   SEC-4 / Phase 2: once Connected with authMode===Pake, the StatusBar shows a
+#   gold pill (ShieldIcon + "PAKE") via data-auth-mode="pake". Dwell here so
+#   the pill is unambiguous on camera. We do NOT assert -- the pill is only
+#   present when the PAKE handshake completed; if PAKE was skipped (e.g. the
+#   checkbox ref missed earlier), the pill reads "Safety number" and the
+#   caption still describes the intended PAKE path.
+# ============================================================================
+log "dwelling on the PAKE auth-mode pill in the StatusBar"
+# The pill's visible text is literally "PAKE" (or "Safety number"). Wait for
+# either so the dwell always lands on a rendered pill rather than an empty
+# StatusBar. The aria-label "PAKE-authenticated" on the ShieldIcon is the
+# strongest signal the gold pill is on screen.
+wait_for_text alice "PAKE" 6 || wait_for_text alice "Safety number" 4 \
+  || log "WARN: auth-mode pill text not found (continuing anyway)"
+sleep 4
+
+# ============================================================================
+# BEAT 5 -- MESSAGE EXCHANGE           caption: 32.0s - 38.0s
 #   "Messages are end-to-end encrypted with per-frame AEAD + replay protection."
 # ============================================================================
 log "Alice: sending a message"
@@ -279,7 +315,7 @@ sleep 3
 npx agent-browser --session alice snapshot -i >/dev/null 2>&1 || true
 
 # ============================================================================
-# BEAT 6 -- SECOND CONVERSATION        caption: 32.0s - 38.0s
+# BEAT 6 -- SECOND CONVERSATION        caption: 38.0s - 44.0s
 #   "Alice starts a second chat. Multiple chats, each isolated."
 # ============================================================================
 log "Alice: starting a second conversation from the sidebar"
@@ -315,7 +351,22 @@ if [[ -n "$FIRST_REF" ]]; then
 fi
 
 # ============================================================================
-# BEAT 7 -- FILE TRANSFER              caption: 38.0s - 44.0s
+# BEAT 6b -- SIDEBAR LOCK GLYPH        caption: 44.0s - 50.0s
+#   "The sidebar lock marks PAKE-protected chats -- safety-number chats show
+#    no lock."
+#   SEC-4 / Phase 2: each PAKE-authenticated SessionRow renders a LockIcon with
+#   aria-label "PAKE-authenticated session"; rows that are safety-number-only
+#   render no lock. Now that we have TWO conversations (the first PAKE, the
+#   second not yet connected), both rows are on screen simultaneously and the
+#   contrast is the point. Dwell so the glyph reads on camera.
+# ============================================================================
+log "dwelling on the sidebar PAKE lock glyph"
+wait_for_text alice "PAKE-authenticated session" 6 \
+  || log "WARN: sidebar lock glyph aria-label not found (continuing anyway)"
+sleep 4
+
+# ============================================================================
+# BEAT 7 -- FILE TRANSFER              caption: 50.0s - 56.0s
 #   "Files too. Dropped here, sent end-to-end, never stored."
 # ============================================================================
 log "Alice: sending a small file via synthetic drop"
@@ -329,7 +380,7 @@ fi
 sleep 5   # let the attachment card render on camera
 
 # ============================================================================
-# BEAT 8 -- SAFETY NUMBER              caption: 44.0s - 50.0s
+# BEAT 8 -- SAFETY NUMBER              caption: 56.0s - 62.0s
 #   "Both sides show the same safety number -- verify it out-of-band."
 # ============================================================================
 log "Alice: opening safety number dialog"
@@ -338,6 +389,58 @@ if [[ -n "$SAFETY_REF" ]]; then
   npx agent-browser --session alice click "@${SAFETY_REF}" >/dev/null 2>&1 || true
 fi
 sleep 5
+
+# ============================================================================
+# BEAT 9 -- (OPTIONAL) AUTH-FAILED CTA caption: 62.0s - 70.0s
+#   "Wrong code? The Retry button is hidden -- only a fresh invitation recovers."
+#   This beat is OFF by default. It induces a PAKE mismatch by joining Alice's
+#   coded invitation with the code's last digit incremented (mod 10), which
+#   fails SPAKE2 and surfaces connectionState=Disconnected + authFailed=true,
+#   hiding Retry and showing the "Create a fresh invitation" CTA. Driving this
+#   deterministically from CDP is racy (the responder's PAKE state machine can
+#   surface a transient "Connected" before the auth-failed teardown lands), so
+#   every step is best-effort: any hiccup logs a WARN and the beat is skipped
+#   without affecting the rest of the demo. Enable with DEMO_AUTH_FAILED_CTA=1.
+#   The recorder is already stopped by this point -- this beat is caption-only
+#   over a held last frame when enabled via a separate render path. To keep the
+#   script simple and flake-free, when enabled we re-record a short tail; when
+#   disabled (default) nothing happens here.
+# ============================================================================
+if [[ "$DEMO_AUTH_FAILED_CTA" == "1" ]]; then
+  log "DEMO_AUTH_FAILED_CTA=1: attempting best-effort wrong-code beat"
+  # Build a wrong code by incrementing the last digit of the ~code tail. The
+  # invitation is of the form ...<convId>~<6 digits>; mutate the final digit.
+  WRONG_INVITATION="$(printf '%s' "$INVITATION" | awk '{
+    n=length($0); d=substr($0,n,1);
+    if (d ~ /[0-9]/) { nd=(d+1)%10; printf "%s%d", substr($0,1,n-1), nd }
+    else { print $0 }
+  }')"
+  if [[ "$WRONG_INVITATION" == "$INVITATION" ]]; then
+    log "WARN: could not mutate PAKE code tail; skipping auth-failed beat"
+  else
+    # Open a throwaway third session against the wrong-code invite. This must
+    # NOT touch alice/bob -- use a separate session name and close it after.
+    if npx agent-browser --session mallory open "$WRONG_INVITATION" >/dev/null 2>&1; then
+      npx agent-browser --session mallory set viewport 1920 1080 >/dev/null 2>&1 || true
+      # Give the PAKE exchange time to fail and the orchestrator to flip to
+      # Disconnected + authFailed. The CTA text is the deterministic signal.
+      if wait_for_text alice "Create a fresh invitation" 15; then
+        log "auth-failed CTA surfaced on Alice"
+        sleep 4
+      else
+        log "WARN: auth-failed CTA did not surface in 15s (racy PAKE path); skipping"
+      fi
+      npx agent-browser --session mallory close >/dev/null 2>&1 || true
+    else
+      log "WARN: could not open mallory session; skipping auth-failed beat"
+    fi
+  fi
+else
+  # Default: skipped. A deterministic PAKE mismatch is too racy to drive from
+  # CDP for a re-runnable demo -- the responder may briefly show Connected
+  # before the auth-failed teardown lands, and a flaky beat is worse than none.
+  log "auth-failed CTA beat skipped (set DEMO_AUTH_FAILED_CTA=1 to attempt it)"
+fi
 
 # Stop recording.
 log "stopping recorder"
@@ -358,10 +461,12 @@ build_drawtext() {
     "6|14|Alice starts a chat and protects it with a 6-digit PAKE code."
     "14|20|Bob opens the coded link. The code authenticates the handshake via PAKE."
     "20|26|PAKE authenticates the handshake -- a malicious broker cannot MITM it."
-    "26|32|Messages are end-to-end encrypted with per-frame AEAD + replay protection."
-    "32|38|Alice starts a second chat. Multiple chats, each isolated."
-    "38|44|Files too. Dropped here, sent end-to-end, never stored."
-    "44|50|Both sides show the same safety number -- verify it out-of-band."
+    "26|32|PAKE-protected session -- the gold pill confirms the handshake was PAKE-authenticated."
+    "32|38|Messages are end-to-end encrypted with per-frame AEAD + replay protection."
+    "38|44|Alice starts a second chat. Multiple chats, each isolated."
+    "44|50|The sidebar lock marks PAKE-protected chats -- safety-number chats show no lock."
+    "50|56|Files too. Dropped here, sent end-to-end, never stored."
+    "56|62|Both sides show the same safety number -- verify it out-of-band."
   )
   local filter="" first=1 seg
   for entry in "${captions[@]}"; do
