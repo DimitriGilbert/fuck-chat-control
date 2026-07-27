@@ -84,7 +84,7 @@ export function AppShell(): React.ReactElement {
             <MenuIcon />
           </Button>
           <span className="text-foreground text-sm font-medium tracking-tight">
-            {activeId === null ? "fck-chat-control" : "Conversation"}
+            {activeId === null ? "fuck-chat-control" : "Conversation"}
           </span>
         </div>
 

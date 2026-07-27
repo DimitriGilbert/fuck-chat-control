@@ -112,7 +112,7 @@ function downloadBundle(bundle: string): void {
   const anchor = document.createElement("a");
   anchor.href = url;
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  anchor.download = `fck-chat-control-bundle-${stamp}.json`;
+  anchor.download = `fuck-chat-control-bundle-${stamp}.json`;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);

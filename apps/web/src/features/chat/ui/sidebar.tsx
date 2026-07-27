@@ -131,9 +131,9 @@ export function Sidebar({
         <a
           href="/"
           className="text-sidebar-foreground text-sm font-semibold tracking-tight hover:opacity-80"
-          aria-label="fck-chat-control home"
+          aria-label="fuck-chat-control home"
         >
-          <span className="text-sidebar-primary">fck</span>
+          <span className="text-sidebar-primary">fuck</span>
           <span className="text-sidebar-foreground">-chat-control</span>
         </a>
       </div>

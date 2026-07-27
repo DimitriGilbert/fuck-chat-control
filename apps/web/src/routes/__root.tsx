@@ -19,14 +19,14 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
         content: "width=device-width, initial-scale=1",
       },
       {
-        title: "fck-chat-control",
+        title: "fuck-chat-control",
       },
       // Open Graph / social preview. og:image is root-relative; modern crawlers
       // (Facebook, X/Twitter, Slack, Discord) resolve it against the page URL.
       // If a fixed production domain is added later, make these absolute.
       {
         property: "og:title",
-        content: "fck-chat-control",
+        content: "fuck-chat-control",
       },
       {
         property: "og:type",
