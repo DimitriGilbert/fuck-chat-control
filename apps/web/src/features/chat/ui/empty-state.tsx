@@ -23,14 +23,10 @@ import type { ConversationRecord } from "@/features/chat/store";
  */
 export function EmptyState(): React.ReactElement {
   const { state, controller, ready } = useChat();
-  // Show persisted conversations that have no live session. Live ones are
-  // already in the sidebar; duplicating them here would split attention.
-  // ConversationId is a branded Uint8Array, so byte-wise comparison is required
-  // (reference identity is not guaranteed across the repo and session map).
-  const resumable = React.useMemo(() => {
-    const live = state.sessions;
-    return state.conversations.filter((c) => !live.some((s) => idEquals(s.id, c.id)));
-  }, [state.sessions, state.conversations]);
+  // Show every conversation — the same set the sidebar lists — so the center
+  // and sidebar stay in sync. (Previously this excluded live sessions, which
+  // made the two lists show different things.)
+  const resumable = state.conversations;
 
   function handleResume(record: ConversationRecord): void {
     if (controller === null) return;
@@ -160,13 +156,4 @@ function resumeKey(record: ConversationRecord): string {
     hex += id[i].toString(16).padStart(2, "0");
   }
   return hex;
-}
-
-/** Byte-wise comparison of two ConversationIds (both are Uint8Array). */
-function idEquals(a: ConversationRecord["id"], b: ConversationRecord["id"]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
 }
