@@ -17,7 +17,7 @@
  * DurableStorage singleton all read/write through the SAME MMKV instance (one
  * KV store, one set of keys, one sync surface).
  */
-import { createMMKV } from 'react-native-mmkv';
+import { createMMKV } from "react-native-mmkv";
 
 /**
  * The single MMKV instance backing identity, the at-rest key, and the runtime
@@ -27,7 +27,7 @@ import { createMMKV } from 'react-native-mmkv';
  * key; v1 uses the default instance (no encryption at the storage layer — the
  * runtime seals its secrets via the at-rest key before they reach storage).
  */
-const storage = createMMKV({ id: 'fck-chat-v1' });
+const storage = createMMKV({ id: "fck-chat-v1" });
 
 /** The chat-runtime storage surface: sync getItem/setItem, string-only values. */
 export interface ChatRuntimeStorage {

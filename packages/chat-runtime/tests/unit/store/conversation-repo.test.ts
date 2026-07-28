@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { CryptoErrorCode, decryptAtRest, generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  CryptoErrorCode,
+  decryptAtRest,
+  generateAtRestKey,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 import { StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";

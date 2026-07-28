@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
-import { GCM_NONCE_BYTES, FRAME_HEADER_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import {
+  GCM_NONCE_BYTES,
+  FRAME_HEADER_BYTES,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { ControlSubtype, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {

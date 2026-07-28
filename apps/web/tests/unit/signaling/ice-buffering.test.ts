@@ -48,9 +48,7 @@ class FakeRtcPeerConnection {
   }
 
   public async addIceCandidate(candidate: IceCandidate): Promise<void> {
-    this.addCandidateOrder.push(
-      this.remoteDescription === null ? "pre-remote" : "post-remote",
-    );
+    this.addCandidateOrder.push(this.remoteDescription === null ? "pre-remote" : "post-remote");
     this.addCandidateLog.push(candidate);
     if (this.rejectAllAddIceCandidates || this.rejectNextAddIceCandidate) {
       this.rejectNextAddIceCandidate = false;

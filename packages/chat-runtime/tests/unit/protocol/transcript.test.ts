@@ -2,8 +2,14 @@ import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
 import { sha256 } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
-import { decodeTranscript, encodeTranscript } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import {
+  decodeTranscript,
+  encodeTranscript,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import {
   CONVERSATION_ID_BYTES,
   PROTOCOL_VERSION,

@@ -237,8 +237,8 @@ describe("LockableRepository pending auth-failed (SEC-2)", () => {
     const repo = newRepo(manager);
     const id = conversationId(7);
     // appendMessage touches ciphertext and must still throw the lock error.
-    await expect(
-      repo.appendMessage(id, "text", MessageDirection.Sent, 0),
-    ).rejects.toBeInstanceOf(AtRestLockedError);
+    await expect(repo.appendMessage(id, "text", MessageDirection.Sent, 0)).rejects.toBeInstanceOf(
+      AtRestLockedError,
+    );
   });
 });

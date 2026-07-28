@@ -9,9 +9,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
-      "@fuck-eu-chat-control/chat-runtime": fileURLToPath(
-        new URL("./src", import.meta.url),
-      ),
+      "@fuck-eu-chat-control/chat-runtime": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
   test: {

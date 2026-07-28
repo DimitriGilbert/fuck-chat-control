@@ -11,12 +11,12 @@
  * only invitations rely on the user manually comparing safety numbers AFTER
  * the handshake — a weaker guarantee if the comparison is skipped.
  */
-import * as React from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import * as Sharing from 'expo-sharing';
+import * as React from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import * as Sharing from "expo-sharing";
 
-import { useChatController, useChatState } from '../chat/mobile-chat-provider';
-import { colors } from '../ui/colors';
+import { useChatController, useChatState } from "../chat/mobile-chat-provider";
+import { colors } from "../ui/colors";
 
 export interface StartConversationScreenProps {
   readonly onStarted: () => void;
@@ -65,8 +65,8 @@ export function StartConversationScreen({
     if (invitation === null) return;
     if (await Sharing.isAvailableAsync()) {
       await Sharing.shareAsync(invitation, {
-        mimeType: 'text/plain',
-        dialogTitle: 'Share invitation',
+        mimeType: "text/plain",
+        dialogTitle: "Share invitation",
       });
     }
   }, [invitation]);
@@ -84,24 +84,21 @@ export function StartConversationScreen({
       {invitation === null ? (
         <View style={styles.body}>
           <Text style={styles.text}>
-            A fresh invitation link will be generated. Share it out-of-band with
-            the person you want to chat with.
+            A fresh invitation link will be generated. Share it out-of-band with the person you want
+            to chat with.
           </Text>
           {/*
             PAKE-coded invitation toggle (R7/F6). Opting in upgrades the
             handshake from safety-number-only to cryptographic authentication
             against a shared 6-digit secret — see the file-level docstring.
           */}
-          <Pressable
-            style={styles.toggleRow}
-            onPress={() => setRequireCode((prev) => !prev)}
-          >
+          <Pressable style={styles.toggleRow} onPress={() => setRequireCode((prev) => !prev)}>
             <View style={[styles.checkbox, requireCode ? styles.checkboxChecked : null]} />
             <View style={styles.toggleText}>
               <Text style={styles.toggleTitle}>Require PAKE code (recommended)</Text>
               <Text style={styles.toggleSub}>
-                Generates a 6-digit code the peer must enter. Cryptographically
-                blocks a malicious broker from intercepting the handshake.
+                Generates a 6-digit code the peer must enter. Cryptographically blocks a malicious
+                broker from intercepting the handshake.
               </Text>
             </View>
           </Pressable>
@@ -111,7 +108,7 @@ export function StartConversationScreen({
             disabled={busy}
           >
             <Text style={styles.primaryButtonText}>
-              {busy ? 'Generating…' : 'Generate invitation'}
+              {busy ? "Generating…" : "Generate invitation"}
             </Text>
           </Pressable>
           {error !== null ? <Text style={styles.error}>{error}</Text> : null}
@@ -131,8 +128,8 @@ export function StartConversationScreen({
               <Text style={styles.label}>PAKE code (REQUIRED by peer)</Text>
               <Text style={styles.codeValue}>{pakeCode}</Text>
               <Text style={styles.codeHelp}>
-                Share this 6-digit code over a separate channel (voice,
-                different app). The peer cannot join without it.
+                Share this 6-digit code over a separate channel (voice, different app). The peer
+                cannot join without it.
               </Text>
             </View>
           ) : null}
@@ -140,8 +137,8 @@ export function StartConversationScreen({
             <Text style={styles.primaryButtonText}>Share link</Text>
           </Pressable>
           <Text style={styles.text}>
-            Waiting for the peer to join. The chat screen opens automatically
-            once the handshake completes.
+            Waiting for the peer to join. The chat screen opens automatically once the handshake
+            completes.
           </Text>
         </View>
       )}
@@ -152,19 +149,19 @@ export function StartConversationScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
   backText: { color: colors.accent, fontSize: 16 },
-  title: { color: colors.text, fontSize: 18, fontWeight: '600' },
+  title: { color: colors.text, fontSize: 18, fontWeight: "600" },
   headerSpacer: { width: 40 },
   body: { padding: 20, gap: 16, flex: 1 },
   text: { color: colors.textMuted, fontSize: 14, lineHeight: 20 },
-  label: { color: colors.textMuted, fontSize: 12, fontWeight: '600', textTransform: 'uppercase' },
+  label: { color: colors.textMuted, fontSize: 12, fontWeight: "600", textTransform: "uppercase" },
   invitationBox: {
     backgroundColor: colors.surface,
     color: colors.text,
@@ -176,8 +173,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    flexDirection: "row",
+    alignItems: "flex-start",
     gap: 12,
     backgroundColor: colors.surface,
     padding: 14,
@@ -198,7 +195,7 @@ const styles = StyleSheet.create({
     borderColor: colors.accent,
   },
   toggleText: { flex: 1, gap: 4 },
-  toggleTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  toggleTitle: { color: colors.text, fontSize: 15, fontWeight: "600" },
   toggleSub: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   codeBlock: {
     backgroundColor: colors.surfaceAlt,
@@ -211,7 +208,7 @@ const styles = StyleSheet.create({
   codeValue: {
     color: colors.text,
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     letterSpacing: 4,
   },
   codeHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 16 },
@@ -219,9 +216,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     paddingVertical: 14,
     borderRadius: 10,
-    alignItems: 'center',
+    alignItems: "center",
   },
-  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: '600' },
+  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: "600" },
   buttonDisabled: { opacity: 0.5 },
   error: { color: colors.danger, fontSize: 13 },
 });

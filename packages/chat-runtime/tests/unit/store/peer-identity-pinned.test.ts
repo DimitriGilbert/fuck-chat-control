@@ -4,12 +4,7 @@ import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import { StoreError, StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
 
-import {
-  bytesEqual,
-  conversationId,
-  deterministicPublicKey,
-  fingerprintOf,
-} from "./_helpers";
+import { bytesEqual, conversationId, deterministicPublicKey, fingerprintOf } from "./_helpers";
 
 function newRepo(): InMemoryConversationRepository {
   return new InMemoryConversationRepository(generateAtRestKey());

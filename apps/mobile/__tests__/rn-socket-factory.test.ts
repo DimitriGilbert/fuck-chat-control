@@ -3,9 +3,9 @@
  * WebSocket event shapes (onopen/onmessage/onclose/onerror) to the
  * SignalingSocket surface chat-runtime expects.
  */
-import type { SignalingSocket } from '@fuck-eu-chat-control/chat-runtime/signaling/signaling-client';
+import type { SignalingSocket } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 
-import { rnSocketFactory } from '../src/chat/rn-socket-factory';
+import { rnSocketFactory } from "../src/chat/rn-socket-factory";
 
 interface FakeRnWebSocket {
   readyState: number;
@@ -48,7 +48,7 @@ function makeFakeRnWebSocket(): FakeRnWebSocket {
   return ws;
 }
 
-describe('rnSocketFactory', () => {
+describe("rnSocketFactory", () => {
   let originalWebSocket: typeof WebSocket;
 
   beforeEach(() => {
@@ -59,19 +59,19 @@ describe('rnSocketFactory', () => {
     globalThis.WebSocket = originalWebSocket;
   });
 
-  it('adapts RN WebSocket to the SignalingSocket surface', () => {
+  it("adapts RN WebSocket to the SignalingSocket surface", () => {
     const fake = makeFakeRnWebSocket();
     globalThis.WebSocket = jest.fn(() => fake) as unknown as typeof WebSocket;
-    const socket: SignalingSocket = rnSocketFactory('wss://broker.example/ws');
-    expect(typeof socket.send).toBe('function');
-    expect(typeof socket.close).toBe('function');
+    const socket: SignalingSocket = rnSocketFactory("wss://broker.example/ws");
+    expect(typeof socket.send).toBe("function");
+    expect(typeof socket.close).toBe("function");
     expect(socket.readyState).toBe(0);
   });
 
-  it('routes onopen to a nullary callback', () => {
+  it("routes onopen to a nullary callback", () => {
     const fake = makeFakeRnWebSocket();
     globalThis.WebSocket = jest.fn(() => fake) as unknown as typeof WebSocket;
-    const socket = rnSocketFactory('wss://broker.example/ws');
+    const socket = rnSocketFactory("wss://broker.example/ws");
     const onOpen = jest.fn();
     socket.onopen = onOpen;
     fake.__emitOpen();
@@ -79,23 +79,23 @@ describe('rnSocketFactory', () => {
     expect(onOpen.mock.calls[0]).toEqual([]);
   });
 
-  it('routes onmessage to a { data } payload and coerces non-strings', () => {
+  it("routes onmessage to a { data } payload and coerces non-strings", () => {
     const fake = makeFakeRnWebSocket();
     globalThis.WebSocket = jest.fn(() => fake) as unknown as typeof WebSocket;
-    const socket = rnSocketFactory('wss://broker.example/ws');
+    const socket = rnSocketFactory("wss://broker.example/ws");
     const onMessage = jest.fn();
     socket.onmessage = onMessage;
-    fake.__emitMessage('hello');
-    expect(onMessage).toHaveBeenCalledWith({ data: 'hello' });
+    fake.__emitMessage("hello");
+    expect(onMessage).toHaveBeenCalledWith({ data: "hello" });
     // Non-string payload (defensive) is coerced via String().
     fake.__emitMessage(42);
-    expect(onMessage).toHaveBeenLastCalledWith({ data: '42' });
+    expect(onMessage).toHaveBeenLastCalledWith({ data: "42" });
   });
 
-  it('routes onclose and onerror to nullary callbacks', () => {
+  it("routes onclose and onerror to nullary callbacks", () => {
     const fake = makeFakeRnWebSocket();
     globalThis.WebSocket = jest.fn(() => fake) as unknown as typeof WebSocket;
-    const socket = rnSocketFactory('wss://broker.example/ws');
+    const socket = rnSocketFactory("wss://broker.example/ws");
     const onClose = jest.fn();
     const onError = jest.fn();
     socket.onclose = onClose;
@@ -106,13 +106,13 @@ describe('rnSocketFactory', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
-  it('forwards send() and close() to the underlying socket', () => {
+  it("forwards send() and close() to the underlying socket", () => {
     const fake = makeFakeRnWebSocket();
     globalThis.WebSocket = jest.fn(() => fake) as unknown as typeof WebSocket;
-    const socket = rnSocketFactory('wss://broker.example/ws');
-    socket.send('frame');
-    expect(fake.send).toHaveBeenCalledWith('frame');
-    socket.close(1000, 'bye');
-    expect(fake.close).toHaveBeenCalledWith(1000, 'bye');
+    const socket = rnSocketFactory("wss://broker.example/ws");
+    socket.send("frame");
+    expect(fake.send).toHaveBeenCalledWith("frame");
+    socket.close(1000, "bye");
+    expect(fake.close).toHaveBeenCalledWith(1000, "bye");
   });
 });

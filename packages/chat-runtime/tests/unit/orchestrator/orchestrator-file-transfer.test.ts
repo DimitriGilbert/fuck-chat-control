@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
-import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  generateAtRestKey,
+  generateIdentityKeyPair,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";

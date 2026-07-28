@@ -48,8 +48,7 @@ const TURN_USERNAME_ID = "fck-web";
  */
 if (!process.env.SKIP_ENV_VALIDATION) {
   const hasTurnUrl = process.env.TURN_URL !== undefined && process.env.TURN_URL !== "";
-  const hasTurnTlsUrl =
-    process.env.TURN_TLS_URL !== undefined && process.env.TURN_TLS_URL !== "";
+  const hasTurnTlsUrl = process.env.TURN_TLS_URL !== undefined && process.env.TURN_TLS_URL !== "";
   const hasTurnSecret =
     process.env.TURN_SHARED_SECRET !== undefined && process.env.TURN_SHARED_SECRET !== "";
   if ((hasTurnUrl || hasTurnTlsUrl) && !hasTurnSecret) {
@@ -62,7 +61,6 @@ if (!process.env.SKIP_ENV_VALIDATION) {
     );
   }
 }
-
 
 /**
  * How long a minted credential is valid. coturn enforces this server-side by
@@ -101,9 +99,7 @@ export function mintTurnCredentials(
 ): { readonly username: string; readonly credential: string } {
   const expiry = now + ttlSec;
   const username = `${expiry}:${TURN_USERNAME_ID}`;
-  const credential = createHmac("sha1", secret)
-    .update(username)
-    .digest("base64");
+  const credential = createHmac("sha1", secret).update(username).digest("base64");
   return { username, credential };
 }
 
@@ -142,10 +138,7 @@ export function buildIceServers(iceEnv: IceEnv, now: number): readonly RTCIceSer
   // by OMITTING the entry (returning a degraded list) rather than throwing —
   // a partial misconfiguration must not take chat down for everyone.
   if (iceEnv.TURN_URL !== undefined && iceEnv.TURN_SHARED_SECRET !== undefined) {
-    const { username, credential } = mintTurnCredentials(
-      iceEnv.TURN_SHARED_SECRET,
-      now,
-    );
+    const { username, credential } = mintTurnCredentials(iceEnv.TURN_SHARED_SECRET, now);
     iceServers.push({
       urls: iceEnv.TURN_URL,
       username,
@@ -153,14 +146,8 @@ export function buildIceServers(iceEnv: IceEnv, now: number): readonly RTCIceSer
     });
   }
 
-  if (
-    iceEnv.TURN_TLS_URL !== undefined &&
-    iceEnv.TURN_SHARED_SECRET !== undefined
-  ) {
-    const { username, credential } = mintTurnCredentials(
-      iceEnv.TURN_SHARED_SECRET,
-      now,
-    );
+  if (iceEnv.TURN_TLS_URL !== undefined && iceEnv.TURN_SHARED_SECRET !== undefined) {
+    const { username, credential } = mintTurnCredentials(iceEnv.TURN_SHARED_SECRET, now);
     iceServers.push({
       urls: iceEnv.TURN_TLS_URL,
       username,
@@ -178,19 +165,19 @@ export function buildIceServers(iceEnv: IceEnv, now: number): readonly RTCIceSer
  * credential TTL so a cached response is always still valid when the client
  * uses it (and the browser pulls a fresh credential pair on the next session).
  */
-export default defineEventHandler((event): {
-  readonly iceServers: readonly RTCIceServer[];
-} => {
-  const now = Math.floor(Date.now() / 1000);
-  const iceServers = buildIceServers(env, now);
-  // public: the response is identical for every client (no per-user state —
-  // the username carries a constant id, not an identity). This lets the
-  // browser AND any shared CDN edge cache it for the TTL below. With no CDN
-  // this degrades to a normal fetch cache.
-  setHeader(
+export default defineEventHandler(
+  (
     event,
-    "Cache-Control",
-    `public, max-age=${CACHE_MAX_AGE_SECONDS}`,
-  );
-  return { iceServers };
-});
+  ): {
+    readonly iceServers: readonly RTCIceServer[];
+  } => {
+    const now = Math.floor(Date.now() / 1000);
+    const iceServers = buildIceServers(env, now);
+    // public: the response is identical for every client (no per-user state —
+    // the username carries a constant id, not an identity). This lets the
+    // browser AND any shared CDN edge cache it for the TTL below. With no CDN
+    // this degrades to a normal fetch cache.
+    setHeader(event, "Cache-Control", `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+    return { iceServers };
+  },
+);

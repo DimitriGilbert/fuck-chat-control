@@ -23,7 +23,11 @@ import {
   TRANSCRIPT_VERSION,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { AuthMode, Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
-import type { ConversationId, Signature, Transcript } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type {
+  ConversationId,
+  Signature,
+  Transcript,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   buildTranscript,
@@ -33,7 +37,10 @@ import {
   encodeSignatureMessage,
   type HelloComponents,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/handshake-codec";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 // HelloMessage wire layout (frozen by design doc):
 //   PROTOCOL_VERSION(1) | identityPublicKey(65) | ephemeralPublicKey(65) | sessionId(32) = 163 bytes

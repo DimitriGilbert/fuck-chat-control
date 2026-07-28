@@ -1,9 +1,6 @@
 import { Role } from "../protocol/types";
 import type { ConversationId } from "../protocol/types";
-import {
-  SignalingClient,
-  type SignalingSocketFactory,
-} from "../signaling/signaling-client";
+import { SignalingClient, type SignalingSocketFactory } from "../signaling/signaling-client";
 import { conversationIdToHex } from "../orchestrator/invitation";
 import { toPeerTransport } from "../transport/peer-transport";
 import type { PeerTransport } from "../transport/peer-transport";
@@ -127,11 +124,9 @@ export class WebRtcBridge {
           // (rather than treated as a glare collision).
           this.nego.localOfferInFlight = false;
           this.signaling.endOffer();
-          void this.adapter
-            .setRemoteDescription(sdp as SessionDescription)
-            .catch(() => {
-              // best-effort; the connection will fail and the orchestrator surfaces it
-            });
+          void this.adapter.setRemoteDescription(sdp as SessionDescription).catch(() => {
+            // best-effort; the connection will fail and the orchestrator surfaces it
+          });
         },
         onIce: (candidate: unknown): void => {
           // addIceCandidate resolves immediately when buffered pre-remote-desc;

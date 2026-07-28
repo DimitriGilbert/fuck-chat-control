@@ -19,10 +19,7 @@
         "backgroundColor": "#0a0a0a"
       }
     },
-    "plugins": [
-      "expo-document-picker",
-      "expo-sharing"
-    ],
+    "plugins": ["expo-document-picker", "expo-sharing"],
     "extra": {
       "brokerUrl:dev": "ws://10.0.2.2:8080/ws",
       "brokerUrl:prod": "wss://broker.fck-chat-control.systems/ws",

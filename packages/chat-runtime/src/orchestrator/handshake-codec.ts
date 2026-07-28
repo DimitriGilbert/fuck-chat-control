@@ -302,6 +302,9 @@ export function decodePakeConfirm(bytes: Uint8Array): PakeConfirmMessage {
       `PakeConfirm role must be 0x41 ('A') or 0x42 ('B'), got 0x${role.toString(16).padStart(2, "0")}`,
     );
   }
-  const tag = bytes.subarray(PAKE_CONFIRM_TAG_OFFSET, PAKE_CONFIRM_TAG_OFFSET + PAKE_CONFIRM_TAG_BYTES);
+  const tag = bytes.subarray(
+    PAKE_CONFIRM_TAG_OFFSET,
+    PAKE_CONFIRM_TAG_OFFSET + PAKE_CONFIRM_TAG_BYTES,
+  );
   return { role, tag };
 }

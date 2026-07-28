@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeFrameHeader, encodeFrameHeader } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import {
+  decodeFrameHeader,
+  encodeFrameHeader,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import {
   FRAME_AAD_BYTES,
   FRAME_HEADER_BYTES,
@@ -10,7 +16,11 @@ import {
   PROTOCOL_VERSION,
   SESSION_ID_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
-import { FrameType, type FrameHeader, type SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import {
+  FrameType,
+  type FrameHeader,
+  type SessionId,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function sessionId(seed: number): SessionId {
   const bytes = new Uint8Array(SESSION_ID_BYTES);

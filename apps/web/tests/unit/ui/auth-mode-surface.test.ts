@@ -4,7 +4,10 @@ import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ConversationOrchestrator } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { activeSessionView, summarizeSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import {
+  activeSessionView,
+  summarizeSession,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import type { ChatSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import type { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
 import type { ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { DataChannelTransport } from "@fuck-eu-chat-control/chat-runtime/transport/types";
-import { type PeerTransport, toPeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
+import {
+  type PeerTransport,
+  toPeerTransport,
+} from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 /**
  * Minimal neutral fake of {@link DataChannelTransport}. The real web adapter

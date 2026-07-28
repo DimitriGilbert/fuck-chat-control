@@ -21,9 +21,7 @@ const SALT_HEX = "000102030405060708090a0b0c";
 const INFO_HEX = "f0f1f2f3f4f5f6f7f8f9";
 const L = 42;
 const EXPECTED_OKM_HEX =
-  "3cb25f25faacd57a90434f64d0362f2a" +
-  "2d2d0a90cf1a5a4c5db02d56ecc4c5bf" +
-  "34007208d5b887185865";
+  "3cb25f25faacd57a90434f64d0362f2a" + "2d2d0a90cf1a5a4c5db02d56ecc4c5bf" + "34007208d5b887185865";
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);

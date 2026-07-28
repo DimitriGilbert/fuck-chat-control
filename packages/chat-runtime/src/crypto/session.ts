@@ -1,11 +1,7 @@
 import { p256 } from "@noble/curves/p256";
 
 import { deriveRole, encodePublicKey, encodeTranscript } from "../protocol/codec";
-import {
-  HKDF_TRAFFIC_KEY_BYTES,
-  INIT_TO_RESP_LABEL,
-  RESP_TO_INIT_LABEL,
-} from "../protocol/limits";
+import { HKDF_TRAFFIC_KEY_BYTES, INIT_TO_RESP_LABEL, RESP_TO_INIT_LABEL } from "../protocol/limits";
 import { ProtocolError, ProtocolErrorCode } from "../protocol/errors";
 import { AuthMode, Role } from "../protocol/types";
 import type { PublicKey, Transcript } from "../protocol/types";

@@ -225,8 +225,8 @@ function SecurityComponent() {
         </ul>
 
         <p>
-          PAKE (SPAKE2, RFC 9383) is mandatory when an invitation link contains a <code>~code</code>;
-          it authenticates the key exchange against a malicious broker. The shared 6-digit code is
+          PAKE (SPAKE2, RFC 9383) is mandatory when an invitation link contains a <code>~code</code>
+          ; it authenticates the key exchange against a malicious broker. The shared 6-digit code is
           fed to the RustCrypto <code>spake2</code> implementation (compiled to WebAssembly) and
           never crosses the wire &mdash; only the derived SPAKE2 shares do, and they are mixed into
           the session&apos;s HKDF chain alongside the ECDH secret. A peer offering

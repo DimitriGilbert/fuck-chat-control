@@ -9,7 +9,11 @@ import {
   MAX_CHUNK_PLAINTEXT_BYTES,
   sha256,
 } from "@fuck-eu-chat-control/chat-runtime/framing";
-import type { FileManifest, FrameReceiverHandlers, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type {
+  FileManifest,
+  FrameReceiverHandlers,
+  ReceivedFile,
+} from "@fuck-eu-chat-control/chat-runtime/framing";
 import { bytesEqual, forgeFrame, makePair, utf8 } from "./_helpers";
 
 function collectHandlers(): {

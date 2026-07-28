@@ -10,18 +10,18 @@
  * touch the state's interior.
  */
 export class PakeState {
-    private constructor();
-    free(): void;
-    [Symbol.dispose](): void;
-    /**
-     * The 33-byte outgoing share to send to the peer. Returned as a fresh copy
-     * so JS owns the buffer.
-     */
-    readonly outgoing_share: Uint8Array;
-    /**
-     * Which SPAKE2 side this state was started as ('A' or 'B').
-     */
-    readonly side: number;
+  private constructor();
+  free(): void;
+  [Symbol.dispose](): void;
+  /**
+   * The 33-byte outgoing share to send to the peer. Returned as a fresh copy
+   * so JS owns the buffer.
+   */
+  readonly outgoing_share: Uint8Array;
+  /**
+   * Which SPAKE2 side this state was started as ('A' or 'B').
+   */
+  readonly side: number;
 }
 
 /**
@@ -50,16 +50,16 @@ export function pake_start(role: number, code: Uint8Array, protocol_id: Uint8Arr
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-    readonly memory: WebAssembly.Memory;
-    readonly __wbg_pakestate_free: (a: number, b: number) => void;
-    readonly pake_finish: (a: number, b: number, c: number, d: number) => void;
-    readonly pake_start: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
-    readonly pakestate_outgoing_share: (a: number) => number;
-    readonly pakestate_side: (a: number) => number;
-    readonly __wbindgen_export: (a: number) => void;
-    readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
-    readonly __wbindgen_export2: (a: number, b: number) => number;
-    readonly __wbindgen_export3: (a: number, b: number, c: number) => void;
+  readonly memory: WebAssembly.Memory;
+  readonly __wbg_pakestate_free: (a: number, b: number) => void;
+  readonly pake_finish: (a: number, b: number, c: number, d: number) => void;
+  readonly pake_start: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+  readonly pakestate_outgoing_share: (a: number) => number;
+  readonly pakestate_side: (a: number) => number;
+  readonly __wbindgen_export: (a: number) => void;
+  readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
+  readonly __wbindgen_export2: (a: number, b: number) => number;
+  readonly __wbindgen_export3: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
@@ -82,4 +82,9 @@ export function initSync(module: { module: SyncInitInput } | SyncInitInput): Ini
  *
  * @returns {Promise<InitOutput>}
  */
-export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+export default function __wbg_init(
+  module_or_path?:
+    | { module_or_path: InitInput | Promise<InitInput> }
+    | InitInput
+    | Promise<InitInput>,
+): Promise<InitOutput>;

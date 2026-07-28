@@ -37,7 +37,6 @@ interface ActiveTransfer {
   lastActivity: number;
 }
 
-
 export class FrameReceiver {
   private readonly config: FrameReceiverConfig;
   private readonly replayWindow = new ReplayWindow();

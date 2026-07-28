@@ -327,9 +327,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       .map((session) => summarizeSession(session))
       .sort(compareSummaries);
     const active =
-      activeConversationId !== null
-        ? (sessions.get(keyOf(activeConversationId)) ?? null)
-        : null;
+      activeConversationId !== null ? (sessions.get(keyOf(activeConversationId)) ?? null) : null;
     const activeView = activeSessionView(active);
     return {
       activeConversationId,
@@ -502,9 +500,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     return { orchestrator, holder };
   }
 
-  function bridgePresenceCallbacks(
-    orchestrator: ConversationOrchestrator,
-  ): {
+  function bridgePresenceCallbacks(orchestrator: ConversationOrchestrator): {
     onPeerJoin: () => void;
     onPeerLeave: () => void;
     onSignalingClosed: () => void;
@@ -1261,12 +1257,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // messages must not advance the read marker (R9/F5 / Phase 8.5).
       const { MessageDirection } = await import("../store");
       const timestamp = Date.now();
-      const message = await repository.appendMessage(
-        id,
-        text,
-        MessageDirection.Sent,
-        timestamp,
-      );
+      const message = await repository.appendMessage(id, text, MessageDirection.Sent, timestamp);
       session.messages = session.messages.concat(message);
       session.lastMessagePreview = message.text;
       session.lastMessageAt = message.timestamp;
@@ -1381,8 +1372,7 @@ export function generatePakeCode(): string {
   // Compose a uint32 in unsigned-arithmetic-safe order. Each byte is at most
   // 0xff; multiplying and adding in this order keeps the running total under
   // 2^32 (no sign-bit / int32 wrap surprise).
-  const n =
-    bytes[0]! * 0x1000000 + bytes[1]! * 0x10000 + bytes[2]! * 0x100 + bytes[3]!;
+  const n = bytes[0]! * 0x1000000 + bytes[1]! * 0x10000 + bytes[2]! * 0x100 + bytes[3]!;
   return (n % 1_000_000).toString().padStart(6, "0");
 }
 

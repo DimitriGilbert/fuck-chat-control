@@ -156,6 +156,4 @@ export interface PeerConnection {
  * Injection of the factory into the bridge is a later sub-phase (A.4); this
  * type is declared now so the contract is fixed before the codemod.
  */
-export type PeerConnectionFactory = (
-  options: PeerConnectionFactoryOptions,
-) => PeerConnection;
+export type PeerConnectionFactory = (options: PeerConnectionFactoryOptions) => PeerConnection;

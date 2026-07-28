@@ -1,11 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import {
-  CONNECTION_STATE_TEXT,
-  establishPeerPair,
-  withPakeCode,
-  type PeerPair,
-} from "./_helpers";
+import { CONNECTION_STATE_TEXT, establishPeerPair, withPakeCode, type PeerPair } from "./_helpers";
 
 /**
  * Phase 10 PAKE e2e: a coded invitation triggers SPAKE2 over the data

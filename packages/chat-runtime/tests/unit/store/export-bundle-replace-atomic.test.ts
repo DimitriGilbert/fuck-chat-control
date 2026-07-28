@@ -197,9 +197,9 @@ describe("export/import bundle — CR-6 atomic Replace-mode import", () => {
     expect(msgs1[1].direction).toBe("received");
     const peer1 = await base.getPeerIdentity(conversationId(1));
     expect(peer1).not.toBeNull();
-    expect(
-      bytesEqual((peer1 as PeerIdentityRecord).publicKey, deterministicPublicKey(5)),
-    ).toBe(true);
+    expect(bytesEqual((peer1 as PeerIdentityRecord).publicKey, deterministicPublicKey(5))).toBe(
+      true,
+    );
 
     // Conversation 2: message intact.
     const msgs2 = await base.getMessages(conversationId(2));
@@ -242,9 +242,9 @@ describe("export/import bundle — CR-6 atomic Replace-mode import", () => {
     expect(await base.getDisplayName(conversationId(2))).toBe("Bob");
     const peer = await base.getPeerIdentity(conversationId(2));
     expect(peer).not.toBeNull();
-    expect(
-      bytesEqual((peer as PeerIdentityRecord).publicKey, deterministicPublicKey(9)),
-    ).toBe(true);
+    expect(bytesEqual((peer as PeerIdentityRecord).publicKey, deterministicPublicKey(9))).toBe(
+      true,
+    );
   });
 
   it("rejects a malformed bundle without mutating state (regression guard for CR-6)", async () => {

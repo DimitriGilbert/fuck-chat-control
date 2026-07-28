@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { applyTransferEvent, type TransferState } from "@fuck-eu-chat-control/chat-runtime/runtime/transfer-state";
+import {
+  applyTransferEvent,
+  type TransferState,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/transfer-state";
 
 /**
  * R9/F4 (Phase 8.5): the framing sender's transfer-id space starts at

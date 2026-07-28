@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import {
+  createChatController,
+  type ChatController,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import { stubPeerConnectionFactory } from "./_helpers";
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 

@@ -375,9 +375,7 @@ describe("perfect-negotiation glare + rollback", () => {
 
     // The renegotiation offer was applied and a fresh answer was sent.
     expect(fakePc.remoteDescription?.type).toBe("offer");
-    const answers = socket.sent
-      .map((raw) => parse(raw))
-      .filter((m) => m.t === "answer");
+    const answers = socket.sent.map((raw) => parse(raw)).filter((m) => m.t === "answer");
     expect(answers.length).toBeGreaterThanOrEqual(1);
 
     bridge.close();

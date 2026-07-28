@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  generateAtRestKey,
+  generateIdentityKeyPair,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -11,7 +14,10 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import {

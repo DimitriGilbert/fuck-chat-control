@@ -93,9 +93,7 @@ interface OrchestratorKit {
  * input that differs between the two runs (besides the per-run ephemeral ECDH
  * + transcript authMode byte) is the pakeSecret fed to deriveSessionKeys.
  */
-async function makeOrchestratorWithIdentity(
-  identity: IdentityKeyPair,
-): Promise<OrchestratorKit> {
+async function makeOrchestratorWithIdentity(identity: IdentityKeyPair): Promise<OrchestratorKit> {
   const repository = new InMemoryConversationRepository(generateAtRestKey());
   const spies = makeSpies();
   const socket = new MockSignalingSocket();
@@ -126,18 +124,12 @@ async function expectPollsConnected(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (
-      alpha.state === ConnectionState.Connected &&
-      beta.state === ConnectionState.Connected
-    ) {
+    if (alpha.state === ConnectionState.Connected && beta.state === ConnectionState.Connected) {
       return;
     }
     await tick(25);
   }
-  expect([alpha.state, beta.state]).toEqual([
-    ConnectionState.Connected,
-    ConnectionState.Connected,
-  ]);
+  expect([alpha.state, beta.state]).toEqual([ConnectionState.Connected, ConnectionState.Connected]);
 }
 
 function bytesToHex(bytes: Uint8Array): string {

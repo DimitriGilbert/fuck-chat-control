@@ -1,10 +1,16 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
-import type { ConversationRecord, ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type {
+  ConversationRecord,
+  ConversationRepository,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import { ImportMode } from "@fuck-eu-chat-control/chat-runtime/store";
 import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import {
+  createChatController,
+  type ChatController,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import { stubPeerConnectionFactory } from "./_helpers";
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
@@ -150,7 +156,7 @@ describe("createChatController", () => {
       atRestKeyManager: atRestKeyManager2,
       repositoryFactory: (key) => new InMemoryConversationRepository(key),
       socketFactory: mockSocketFactory(socket2),
-    peerConnectionFactory: stubPeerConnectionFactory(),
+      peerConnectionFactory: stubPeerConnectionFactory(),
       iceServers: [],
     });
 
@@ -230,7 +236,7 @@ describe("createChatController / repositoryFactory", () => {
         return new InMemoryConversationRepository(key);
       },
       socketFactory: mockSocketFactory(new MockSignalingSocket()),
-    peerConnectionFactory: stubPeerConnectionFactory(),
+      peerConnectionFactory: stubPeerConnectionFactory(),
       iceServers: [],
     });
     await controller.startConversation();

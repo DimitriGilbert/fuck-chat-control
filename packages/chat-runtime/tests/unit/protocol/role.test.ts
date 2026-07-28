@@ -2,7 +2,10 @@ import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
 import { deriveRole } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import { Role, type PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function pubKey(seed: number): PublicKey {

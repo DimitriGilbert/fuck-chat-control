@@ -26,10 +26,7 @@ function showRetry(connectionState: ConnectionState, authFailed: boolean): boole
   return connectionState === ConnectionState.Disconnected && !authFailed;
 }
 
-function showFreshInvitationCta(
-  connectionState: ConnectionState,
-  authFailed: boolean,
-): boolean {
+function showFreshInvitationCta(connectionState: ConnectionState, authFailed: boolean): boolean {
   return connectionState === ConnectionState.Disconnected && authFailed;
 }
 

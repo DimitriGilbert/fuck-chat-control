@@ -1,7 +1,11 @@
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto/types";
 import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-import { MessageDirection, StoreError, StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store/types";
+import {
+  MessageDirection,
+  StoreError,
+  StoreErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/store/types";
 import type {
   ConversationMessage,
   ConversationRecord,

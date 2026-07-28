@@ -122,7 +122,8 @@ export function createIdentityManager(storage: IdentityStorage): IdentityManager
       const adopted: IdentityKeyPair = {
         publicKey,
         privateKey,
-        sign: (transcript: Transcript): Promise<Signature> => signTranscript(privateKey, transcript),
+        sign: (transcript: Transcript): Promise<Signature> =>
+          signTranscript(privateKey, transcript),
       };
       const stored: StoredIdentity = {
         publicKeyBase64: bytesToBase64(publicKey),

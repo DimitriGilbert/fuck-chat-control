@@ -20,7 +20,10 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import {

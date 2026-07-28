@@ -27,23 +27,23 @@
  *     dependency order, so `rn-crypto-polyfill`'s body runs before
  *     `mobile-chat-provider`'s transitive chat-runtime graph is reached.
  */
-import { installCryptoPolyfill } from './src/chat/rn-crypto-polyfill';
+import { installCryptoPolyfill } from "./src/chat/rn-crypto-polyfill";
 
 installCryptoPolyfill();
 
-import { decodeConversationId } from '@fuck-eu-chat-control/chat-runtime/protocol/codec';
-import type { ConversationId } from '@fuck-eu-chat-control/chat-runtime/protocol/types';
-import * as React from 'react';
-import { StatusBar, StyleSheet, Text, View } from 'react-native';
+import { decodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import * as React from "react";
+import { StatusBar, StyleSheet, Text, View } from "react-native";
 
-import { ChatProvider, useChat } from './src/chat/mobile-chat-provider';
-import { ChatScreen } from './src/screens/chat-screen';
-import { HomeScreen } from './src/screens/home-screen';
-import { JoinConversationScreen } from './src/screens/join-conversation-screen';
-import { StartConversationScreen } from './src/screens/start-conversation-screen';
-import { colors } from './src/ui/colors';
+import { ChatProvider, useChat } from "./src/chat/mobile-chat-provider";
+import { ChatScreen } from "./src/screens/chat-screen";
+import { HomeScreen } from "./src/screens/home-screen";
+import { JoinConversationScreen } from "./src/screens/join-conversation-screen";
+import { StartConversationScreen } from "./src/screens/start-conversation-screen";
+import { colors } from "./src/ui/colors";
 
-type Route = 'home' | 'start' | 'join' | 'chat';
+type Route = "home" | "start" | "join" | "chat";
 
 /**
  * Parse a hex-encoded ConversationId (as produced by HomeScreen's `toHex`)
@@ -67,7 +67,7 @@ function hexToConversationId(hex: string): ConversationId {
 }
 
 function Router(): React.ReactElement {
-  const [route, setRoute] = React.useState<Route>('home');
+  const [route, setRoute] = React.useState<Route>("home");
   const [error, setError] = React.useState<string | null>(null);
   // `useChat()` (not `useChatController()`) because the provider has not turned
   // `ready` yet on the first render — `useChatController()` throws in that
@@ -82,59 +82,59 @@ function Router(): React.ReactElement {
   // emit(null) calls flip state.active non-null, so a successful resume routes
   // here even without an explicit setRoute('chat') in the handler.
   React.useEffect(() => {
-    if (state.active !== null && route !== 'chat') {
-      setRoute('chat');
+    if (state.active !== null && route !== "chat") {
+      setRoute("chat");
     }
   }, [state.active, route]);
 
-  const handleOpen = React.useCallback((hex: string) => {
-    if (controller === null) return;
-    setError(null);
-    let id: ConversationId;
-    try {
-      id = hexToConversationId(hex);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
-      return;
-    }
-    // resumeConversation handles BOTH the live-session case (cheap select,
-    // no re-handshake) and the persisted-only case (re-enter via startSession
-    // with history seeding). Do NOT call selectConversation first — it throws
-    // for non-live ids.
-    void controller.resumeConversation(id).catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : String(err));
-    });
-  }, [controller]);
+  const handleOpen = React.useCallback(
+    (hex: string) => {
+      if (controller === null) return;
+      setError(null);
+      let id: ConversationId;
+      try {
+        id = hexToConversationId(hex);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+      // resumeConversation handles BOTH the live-session case (cheap select,
+      // no re-handshake) and the persisted-only case (re-enter via startSession
+      // with history seeding). Do NOT call selectConversation first — it throws
+      // for non-live ids.
+      void controller.resumeConversation(id).catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    },
+    [controller],
+  );
 
   let screen: React.ReactElement;
   switch (route) {
-    case 'home':
+    case "home":
       screen = (
         <HomeScreen
-          onStart={() => setRoute('start')}
-          onJoin={() => setRoute('join')}
+          onStart={() => setRoute("start")}
+          onJoin={() => setRoute("join")}
           onOpen={handleOpen}
         />
       );
       break;
-    case 'start':
+    case "start":
       screen = (
         <StartConversationScreen
-          onStarted={() => setRoute('chat')}
-          onBack={() => setRoute('home')}
+          onStarted={() => setRoute("chat")}
+          onBack={() => setRoute("home")}
         />
       );
       break;
-    case 'join':
+    case "join":
       screen = (
-        <JoinConversationScreen
-          onJoined={() => setRoute('chat')}
-          onBack={() => setRoute('home')}
-        />
+        <JoinConversationScreen onJoined={() => setRoute("chat")} onBack={() => setRoute("home")} />
       );
       break;
-    case 'chat':
-      screen = <ChatScreen onLeave={() => setRoute('home')} />;
+    case "chat":
+      screen = <ChatScreen onLeave={() => setRoute("home")} />;
       break;
   }
 

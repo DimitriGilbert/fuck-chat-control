@@ -579,7 +579,10 @@ async function snapshotRepoState(repo: ConversationRepository): Promise<RepoSnap
  * Called from the atomic-Replace catch path; performs no further snapshotting
  * (the snapshot is already in hand).
  */
-async function restoreRepoState(repo: ConversationRepository, snapshot: RepoSnapshot): Promise<void> {
+async function restoreRepoState(
+  repo: ConversationRepository,
+  snapshot: RepoSnapshot,
+): Promise<void> {
   await repo.clearAll();
   for (const convo of snapshot) {
     await populateConversation(repo, convo);
@@ -705,6 +708,9 @@ function decodeBoundedBase64(input: string, maxBytes: number, field: string): Ui
         `bundle ${field} exceeds max ${maxBytes} bytes: ${message}`,
       );
     }
-    throw new StoreError(StoreErrorCode.MalformedBundle, `bundle ${field} is not valid base64: ${message}`);
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `bundle ${field} is not valid base64: ${message}`,
+    );
   }
 }

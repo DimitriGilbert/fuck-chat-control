@@ -37,9 +37,7 @@ export interface PeerTransport {
  * web `DataChannelTransport` class) through the adaptation while the
  * returned contract is always {@link PeerTransport}.
  */
-export function toPeerTransport<T extends DataChannelTransport>(
-  transport: T,
-): PeerTransport {
+export function toPeerTransport<T extends DataChannelTransport>(transport: T): PeerTransport {
   return {
     send: (bytes: Uint8Array): void => {
       transport.send(bytes);

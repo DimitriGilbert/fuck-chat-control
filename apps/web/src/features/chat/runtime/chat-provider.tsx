@@ -4,10 +4,16 @@ import {
   createChatController,
   initialChatControllerState,
 } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
-import type { ChatController, ChatControllerState } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import type {
+  ChatController,
+  ChatControllerState,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 import type { IdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
-import { InMemoryConversationRepository, setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  InMemoryConversationRepository,
+  setDurableStorage,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import { setSpake2ModuleUrl } from "@fuck-eu-chat-control/chat-runtime/crypto/pake";
 import type {
@@ -93,15 +99,17 @@ function resolveBrowserDeps(): {
 } {
   const injected = getFckConfig();
   if (injected?.brokerUrl !== undefined) {
-    const baseUrl = injected.baseUrl === undefined || injected.baseUrl === "self"
-      ? window.location.origin
-      : injected.baseUrl;
+    const baseUrl =
+      injected.baseUrl === undefined || injected.baseUrl === "self"
+        ? window.location.origin
+        : injected.baseUrl;
     // Filter out an empty injected array so the provider treats "no servers
     // configured" the same as "field absent" — both fall back to the network
     // fetch on the web build, and to host-candidate-only WebRTC on desktop.
-    const iceServers = injected.iceServers !== undefined && injected.iceServers.length > 0
-      ? injected.iceServers
-      : undefined;
+    const iceServers =
+      injected.iceServers !== undefined && injected.iceServers.length > 0
+        ? injected.iceServers
+        : undefined;
     return { brokerUrl: injected.brokerUrl, baseUrl, iceServers };
   }
   const { protocol, host, origin } = window.location;
@@ -236,9 +244,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       void Promise.all([
         identityManager.ensureLoaded(),
         atRestKeyManager.ensureLoaded(),
-        injectedIceServers !== undefined
-          ? Promise.resolve(injectedIceServers)
-          : fetchIceServers(),
+        injectedIceServers !== undefined ? Promise.resolve(injectedIceServers) : fetchIceServers(),
       ])
         .then(([, , iceServers]) => {
           if (cancelled) return;

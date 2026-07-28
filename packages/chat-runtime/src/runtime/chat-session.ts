@@ -1,20 +1,13 @@
 import { AuthMode, Role } from "../protocol/types";
 import type { ConversationId } from "../protocol/types";
 import { ConversationOrchestrator } from "../orchestrator/orchestrator";
-import type {
-  OrchestratorHandlers,
-  TransferSummary,
-} from "../orchestrator/orchestrator";
+import type { OrchestratorHandlers, TransferSummary } from "../orchestrator/orchestrator";
 import type { PeerTransport } from "../transport/peer-transport";
 import { OrchestratorError, OrchestratorErrorCode } from "../orchestrator/errors";
 import { PakeError } from "../crypto";
 import { ConnectionState } from "../signaling/state-machine";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
-import type {
-  ConversationMessage,
-  ConversationRecord,
-  ConversationRepository,
-} from "../store";
+import type { ConversationMessage, ConversationRecord, ConversationRepository } from "../store";
 import type { IdentityKeyPair } from "../crypto";
 import type { ReceivedFile } from "../framing";
 import type { IceServer, PeerConnectionFactory } from "../transport/types";

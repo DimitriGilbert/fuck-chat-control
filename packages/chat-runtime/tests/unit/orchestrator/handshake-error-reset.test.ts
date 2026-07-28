@@ -18,7 +18,10 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import {
@@ -32,7 +35,10 @@ const PKG_JS = fileURLToPath(
   new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL(
+    "../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm",
+    import.meta.url,
+  ),
 );
 
 // Synchronous init: the browser path uses fetch+WebAssembly.instantiateStreaming

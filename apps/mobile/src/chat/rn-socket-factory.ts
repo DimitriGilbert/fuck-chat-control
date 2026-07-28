@@ -13,7 +13,7 @@
 import type {
   SignalingSocket,
   SignalingSocketFactory,
-} from '@fuck-eu-chat-control/chat-runtime/signaling/signaling-client';
+} from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 
 interface RnWebSocketLike {
   readonly readyState: number;
@@ -54,7 +54,7 @@ function adaptRnSocket(raw: RnWebSocketLike): SignalingSocket {
               // frames surface as ArrayBuffers. The broker only ever emits
               // text, so coerce non-strings defensively.
               const data = event.data;
-              value({ data: typeof data === 'string' ? data : String(data) });
+              value({ data: typeof data === "string" ? data : String(data) });
             };
     },
     set onclose(value: (() => void) | null) {
@@ -77,6 +77,8 @@ function adaptRnSocket(raw: RnWebSocketLike): SignalingSocket {
  * without reloading the module.
  */
 export const rnSocketFactory: SignalingSocketFactory = (url: string): SignalingSocket => {
-  const ws = new (globalThis as unknown as { WebSocket: new (url: string) => RnWebSocketLike }).WebSocket(url);
+  const ws = new (
+    globalThis as unknown as { WebSocket: new (url: string) => RnWebSocketLike }
+  ).WebSocket(url);
   return adaptRnSocket(ws);
 };

@@ -91,9 +91,10 @@ describe("auth-failed-store (SEC-1)", () => {
     await markAuthFailedDurable(ID_A);
     expect(await getAuthFailedDurable(ID_A)).toBe(true);
 
-    const parsed = JSON.parse(
-      storage.getItem(AUTH_FAILED_STORAGE_KEY) as string,
-    ) as Record<string, true>;
+    const parsed = JSON.parse(storage.getItem(AUTH_FAILED_STORAGE_KEY) as string) as Record<
+      string,
+      true
+    >;
     expect(Object.keys(parsed)).toHaveLength(1);
   });
 
@@ -114,10 +115,7 @@ describe("auth-failed-store (SEC-1)", () => {
 
   it("ignores non-true values when reading (defensive shape check)", async () => {
     // An attacker (or buggy future writer) plants a value that is not `true`.
-    storage.setItem(
-      AUTH_FAILED_STORAGE_KEY,
-      JSON.stringify({ [hexOf(ID_A)]: false }),
-    );
+    storage.setItem(AUTH_FAILED_STORAGE_KEY, JSON.stringify({ [hexOf(ID_A)]: false }));
     // Only the literal `true` value counts as auth-failed.
     expect(await getAuthFailedDurable(ID_A)).toBe(false);
   });

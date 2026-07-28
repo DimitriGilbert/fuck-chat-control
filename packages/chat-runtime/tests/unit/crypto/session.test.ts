@@ -6,7 +6,11 @@ import {
   generateEphemeralKeyPair,
   generateIdentityKeyPair,
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
-import type { ConversationId, PublicKey, SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type {
+  ConversationId,
+  PublicKey,
+  SessionId,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { buildCanonicalTranscript, bytesEqual, conversationId, sessionId } from "./_helpers";
 

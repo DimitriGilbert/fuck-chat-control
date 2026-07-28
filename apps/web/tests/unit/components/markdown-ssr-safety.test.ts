@@ -65,22 +65,15 @@ describe("LW-25: renderMarkdown input surface is trusted docs only", () => {
     const nonDocs = importers.filter(
       (f) => !relative(SRC_ROOT, f).startsWith(join("routes", "docs") + "/"),
     );
-    expect(
-      nonDocs.map((f) => relative(SRC_ROOT, f)),
-    ).toEqual([]);
+    expect(nonDocs.map((f) => relative(SRC_ROOT, f))).toEqual([]);
   });
 
   it("every importer pulls its source via a ?raw docs/ import", () => {
     for (const f of importers) {
       const content = readFileSync(f, "utf8");
-      const match = content.match(
-        /import\s+[A-Za-z_$][\w$]*\s+from\s+["']([^"']*\.md\?raw)["']/,
-      );
+      const match = content.match(/import\s+[A-Za-z_$][\w$]*\s+from\s+["']([^"']*\.md\?raw)["']/);
       const sourcePath = match?.[1] ?? "";
-      expect(
-        sourcePath,
-        `${relative(SRC_ROOT, f)} must import a *.md?raw module`,
-      ).toBeTruthy();
+      expect(sourcePath, `${relative(SRC_ROOT, f)} must import a *.md?raw module`).toBeTruthy();
       expect(
         sourcePath.includes("/docs/"),
         `${relative(SRC_ROOT, f)}: ?raw import "${sourcePath}" must resolve under docs/`,
@@ -98,8 +91,6 @@ describe("LW-25: renderMarkdown input surface is trusted docs only", () => {
       const content = readFileSync(f, "utf8");
       return /\brenderMarkdown\b/.test(content);
     });
-    expect(
-      offenders.map((f) => relative(SRC_ROOT, f)),
-    ).toEqual([]);
+    expect(offenders.map((f) => relative(SRC_ROOT, f))).toEqual([]);
   });
 });

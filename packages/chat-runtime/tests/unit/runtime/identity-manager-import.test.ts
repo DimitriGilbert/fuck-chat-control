@@ -1,7 +1,10 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { derivePublicKeyFromPrivate, verifyTranscript } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  derivePublicKeyFromPrivate,
+  verifyTranscript,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import {
   PROTOCOL_VERSION,
@@ -17,7 +20,10 @@ import type {
   Signature,
   Transcript,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
-import { encodeConversationId, encodeSessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  encodeConversationId,
+  encodeSessionId,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 
 import {
   createIdentityManager,
@@ -96,9 +102,7 @@ describe("IdentityManager.adoptImportedIdentity (SEC-3)", () => {
       privateKeyBase64: string;
     };
     // The persisted private key is the IMPORTED one, not the original.
-    expect(parsed.privateKeyBase64).not.toBe(
-      bytesToBase64Hex(original.privateKey),
-    );
+    expect(parsed.privateKeyBase64).not.toBe(bytesToBase64Hex(original.privateKey));
     // And it round-trips back to the imported scalar exactly.
     const storedPrivate = base64ToBytesHelper(parsed.privateKeyBase64);
     expect(bytesEqual(storedPrivate, imported.privateKey)).toBe(true);

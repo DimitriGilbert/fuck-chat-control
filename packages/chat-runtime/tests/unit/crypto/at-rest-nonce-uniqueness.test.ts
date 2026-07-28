@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { encryptAtRest, generateAtRestKey, wrapKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
-  __buildAtRestNonceForTests,
-} from "@fuck-eu-chat-control/chat-runtime/crypto/at-rest";
+  encryptAtRest,
+  generateAtRestKey,
+  wrapKey,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { __buildAtRestNonceForTests } from "@fuck-eu-chat-control/chat-runtime/crypto/at-rest";
 import { GCM_NONCE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 import { bytesEqual } from "./_helpers";
@@ -134,11 +136,7 @@ function nonceTag(nonce: Uint8Array): string {
 /** Read the big-endian uint64 counter at nonce[0..8) as a Number (safe < 2^53). */
 function readCounter(nonce: Uint8Array): number {
   // DataView on the nonce's underlying buffer at the nonce's byteOffset.
-  const view = new DataView(
-    nonce.buffer,
-    nonce.byteOffset,
-    nonce.byteLength,
-  );
+  const view = new DataView(nonce.buffer, nonce.byteOffset, nonce.byteLength);
   const hi = view.getUint32(0);
   const lo = view.getUint32(4);
   return hi * 0x100000000 + lo;

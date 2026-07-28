@@ -69,7 +69,7 @@ using the TURN REST API ("time-limited credentials"):
 - `username = "<unix-expiry-seconds>:fck-web"`
 - `credential = base64( HMAC-SHA1(TURN_SHARED_SECRET, username) )`
 - credential TTL is 6 hours; the route sets `Cache-Control: public,
-  max-age=3600` so the browser re-fetches comfortably before expiry.
+max-age=3600` so the browser re-fetches comfortably before expiry.
 
 The shared secret (`TURN_SHARED_SECRET`) is read from env and used
 **only** to compute the credential — it is never serialized into any
@@ -87,13 +87,13 @@ config.
 
 ## 2. Ports
 
-| Port          | Protocol | Purpose                                                            | Required in v1?                                |
-| ------------- | -------- | ------------------------------------------------------------------ | ---------------------------------------------- |
-| 443           | HTTPS    | App + broker `/ws` + `/ice-config` (WSS after the proxy upgrades). | Yes.                                           |
-| 3478          | UDP      | STUN + TURN relay (coturn).                                        | Yes for cross-network P2P; optional for LAN.   |
-| 3478          | TCP      | TURN relay, TCP fallback for UDP-blocking networks.                | Recommended; needed on UDP-blocking networks.  |
-| 5349          | TCP      | TURN over TLS (`turns:`).                                          | Optional; requires cert/pkey mounted in coturn. |
-| 49152-49172   | UDP      | TURN relay allocation range (matches coturn `min-port`/`max-port`). | Yes when TURN is enabled; widen for more relays. |
+| Port        | Protocol | Purpose                                                             | Required in v1?                                  |
+| ----------- | -------- | ------------------------------------------------------------------- | ------------------------------------------------ |
+| 443         | HTTPS    | App + broker `/ws` + `/ice-config` (WSS after the proxy upgrades).  | Yes.                                             |
+| 3478        | UDP      | STUN + TURN relay (coturn).                                         | Yes for cross-network P2P; optional for LAN.     |
+| 3478        | TCP      | TURN relay, TCP fallback for UDP-blocking networks.                 | Recommended; needed on UDP-blocking networks.    |
+| 5349        | TCP      | TURN over TLS (`turns:`).                                           | Optional; requires cert/pkey mounted in coturn.  |
+| 49152-49172 | UDP      | TURN relay allocation range (matches coturn `min-port`/`max-port`). | Yes when TURN is enabled; widen for more relays. |
 
 The `web` service listens on **TCP 9000** inside the container
 (`ENV PORT=9000` in `apps/web/Dockerfile`,

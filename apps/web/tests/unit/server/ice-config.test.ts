@@ -70,23 +70,19 @@ describe("buildIceServers — env-driven composition", () => {
   });
 
   it("includes a STUN entry with no credentials when only STUN_URL is set", () => {
-    expect(buildIceServers({ STUN_URL }, 1_700_000_000)).toEqual([
-      { urls: STUN_URL },
-    ]);
+    expect(buildIceServers({ STUN_URL }, 1_700_000_000)).toEqual([{ urls: STUN_URL }]);
   });
 
   it("omits TURN when the URL is set but the shared secret is missing", () => {
     // Partial misconfiguration must degrade gracefully, not throw.
-    expect(
-      buildIceServers({ STUN_URL, TURN_URL }, 1_700_000_000),
-    ).toEqual([{ urls: STUN_URL }]);
+    expect(buildIceServers({ STUN_URL, TURN_URL }, 1_700_000_000)).toEqual([{ urls: STUN_URL }]);
   });
 
   it("omits TURN when the secret is set but the URL is missing", () => {
     // The symmetric partial-misconfiguration case.
-    expect(
-      buildIceServers({ STUN_URL, TURN_SHARED_SECRET: SHARED_SECRET }, 1_700_000_000),
-    ).toEqual([{ urls: STUN_URL }]);
+    expect(buildIceServers({ STUN_URL, TURN_SHARED_SECRET: SHARED_SECRET }, 1_700_000_000)).toEqual(
+      [{ urls: STUN_URL }],
+    );
   });
 
   it("mints credentials for both TURN and TURN-TLS when fully configured", () => {
@@ -110,9 +106,7 @@ describe("buildIceServers — env-driven composition", () => {
     const turn = servers[1]!;
     expect(turn.urls).toBe(TURN_URL);
     expect(turn.username).toBe(`${now + 6 * 60 * 60}:fck-web`);
-    expect(turn.credential).toBe(
-      expectedCredential(SHARED_SECRET, `${now + 6 * 60 * 60}:fck-web`),
-    );
+    expect(turn.credential).toBe(expectedCredential(SHARED_SECRET, `${now + 6 * 60 * 60}:fck-web`));
 
     const turns = servers[2]!;
     expect(turns.urls).toBe(TURN_TLS_URL);
@@ -183,4 +177,3 @@ describe("half-set TURN env — startup warning", () => {
     expect(warnSpy.mock.calls[0]![0]).toMatch(/TURN_URL nor TURN_TLS_URL is configured/);
   });
 });
-

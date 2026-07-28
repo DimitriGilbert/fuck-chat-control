@@ -330,8 +330,12 @@ export function ChatView(): React.ReactElement {
  */
 function TransfersSection(props: {
   readonly transfers: readonly import("@fuck-eu-chat-control/chat-runtime/runtime/transfer-state").TransferState[];
-  readonly controller: import("@fuck-eu-chat-control/chat-runtime/runtime/chat-controller").ChatController | null;
-  readonly activeId: import("@fuck-eu-chat-control/chat-runtime/protocol/types").ConversationId | null;
+  readonly controller:
+    | import("@fuck-eu-chat-control/chat-runtime/runtime/chat-controller").ChatController
+    | null;
+  readonly activeId:
+    | import("@fuck-eu-chat-control/chat-runtime/protocol/types").ConversationId
+    | null;
 }): React.ReactElement {
   const { transfers, controller, activeId } = props;
   return (
@@ -408,8 +412,7 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
   // surface the stronger guarantee; safety-number sessions read as such so the
   // user can tell which conversations are only verified post-hoc.
   const connected = connectionState === ConnectionState.Connected;
-  const authLabel =
-    connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
+  const authLabel = connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <StatusPill variant={variant} label={label} />
@@ -576,7 +579,8 @@ function InvitationBanner(): React.ReactElement | null {
         controller.leaveConversation(currentId);
       }
       if (next) {
-        const code = codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
+        const code =
+          codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
         setCodeDraft(code);
         await controller.startConversation({ code });
         toast.success("PAKE-protected invitation ready", {

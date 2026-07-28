@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  generateAtRestKey,
+  generateIdentityKeyPair,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";

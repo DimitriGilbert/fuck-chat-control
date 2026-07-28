@@ -3,11 +3,11 @@
  * fresh conversation (initiator) or join an existing one (responder). Lists
  * persisted conversations below.
  */
-import * as React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import * as React from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
-import { useChat } from '../chat/mobile-chat-provider';
-import { colors } from '../ui/colors';
+import { useChat } from "../chat/mobile-chat-provider";
+import { colors } from "../ui/colors";
 
 export interface HomeScreenProps {
   readonly onStart: () => void;
@@ -17,9 +17,9 @@ export interface HomeScreenProps {
 
 /** ConversationId is a branded Uint8Array; hex-encode for display + keys. */
 function toHex(id: Uint8Array): string {
-  let hex = '';
+  let hex = "";
   for (let i = 0; i < id.length; i++) {
-    hex += id[i]!.toString(16).padStart(2, '0');
+    hex += id[i]!.toString(16).padStart(2, "0");
   }
   return hex;
 }
@@ -47,11 +47,7 @@ export function HomeScreen({ onStart, onJoin, onOpen }: HomeScreenProps): React.
           {conversations.map((c) => {
             const hex = toHex(c.id);
             return (
-              <Pressable
-                key={hex}
-                style={styles.row}
-                onPress={() => onOpen(hex)}
-              >
+              <Pressable key={hex} style={styles.row} onPress={() => onOpen(hex)}>
                 <Text style={styles.rowTitle}>{hex.slice(0, 8)}</Text>
                 {c.peer !== null ? (
                   <Text style={styles.rowSub}>{c.peer.fingerprint.slice(0, 16)}…</Text>
@@ -70,26 +66,31 @@ export function HomeScreen({ onStart, onJoin, onOpen }: HomeScreenProps): React.
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   content: { padding: 20, gap: 12 },
-  title: { color: colors.text, fontSize: 28, fontWeight: '700', marginTop: 12 },
+  title: { color: colors.text, fontSize: 28, fontWeight: "700", marginTop: 12 },
   subtitle: { color: colors.textMuted, fontSize: 14, marginBottom: 8 },
   primaryButton: {
     backgroundColor: colors.accent,
     paddingVertical: 14,
     borderRadius: 10,
-    alignItems: 'center',
+    alignItems: "center",
   },
-  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: '600' },
+  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: "600" },
   secondaryButton: {
     backgroundColor: colors.surface,
     paddingVertical: 14,
     borderRadius: 10,
-    alignItems: 'center',
+    alignItems: "center",
     borderWidth: 1,
     borderColor: colors.border,
   },
-  secondaryButtonText: { color: colors.text, fontSize: 16, fontWeight: '500' },
+  secondaryButtonText: { color: colors.text, fontSize: 16, fontWeight: "500" },
   section: { marginTop: 24, gap: 8 },
-  sectionTitle: { color: colors.textMuted, fontSize: 12, fontWeight: '600', textTransform: 'uppercase' },
+  sectionTitle: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+  },
   row: {
     backgroundColor: colors.surface,
     padding: 14,
@@ -98,6 +99,6 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     gap: 4,
   },
-  rowTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  rowTitle: { color: colors.text, fontSize: 15, fontWeight: "600" },
   rowSub: { color: colors.textMuted, fontSize: 12 },
 });

@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import {
+  createChatController,
+  type ChatController,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import type { ChatFileInput } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import { stubPeerConnectionFactory } from "./_helpers";
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
@@ -194,11 +197,7 @@ describe("clearConversation releases bytes + detaches inbound handlers (R9/F2)",
       // Fire several sends without awaiting; the concurrent cap queues the
       // extras. We do NOT need to observe the queued state precisely — the
       // post-clear invariant is what we assert.
-      const sends = [
-        a.sendFile(idA, big),
-        a.sendFile(idA, big),
-        a.sendFile(idA, big),
-      ];
+      const sends = [a.sendFile(idA, big), a.sendFile(idA, big), a.sendFile(idA, big)];
       // Give the orchestrator a tick to allocate ids / queue.
       await tick(20);
 

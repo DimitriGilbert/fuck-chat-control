@@ -172,11 +172,7 @@ export interface ConversationRepository {
    * repopulating from a trusted bundle). All other callers must go through
    * {@link storePeerIdentity}, which now refuses to overwrite a pinned key.
    */
-  replacePeerIdentity(
-    id: ConversationId,
-    fingerprint: string,
-    publicKey: PublicKey,
-  ): Promise<void>;
+  replacePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void>;
   getPeerIdentity(id: ConversationId): Promise<PeerIdentityRecord | null>;
   setDisplayName(id: ConversationId, name: string): Promise<void>;
   getDisplayName(id: ConversationId): Promise<string | null>;

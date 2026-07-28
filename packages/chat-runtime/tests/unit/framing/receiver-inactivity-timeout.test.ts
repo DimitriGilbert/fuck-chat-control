@@ -300,15 +300,7 @@ describe("CR-5: FrameReceiver per-transfer inactivity timeout", () => {
       ),
     );
     await receiver.ingest(
-      await forgeFrame(
-        recvKeys.recvKey,
-        peerSessionId,
-        1,
-        FrameType.FileChunk,
-        21,
-        0,
-        data,
-      ),
+      await forgeFrame(recvKeys.recvKey, peerSessionId, 1, FrameType.FileChunk, 21, 0, data),
     );
     // The transfer completed synchronously inside handleChunk and is no
     // longer in the map, so the sweep has nothing to evict even after the

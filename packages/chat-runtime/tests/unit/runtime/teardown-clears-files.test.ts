@@ -98,12 +98,16 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
   it("still runs orchestrator.leave + bridge.close (best-effort) when zeroing succeeds", () => {
     let leaveCalled = false;
     let bridgeClosed = false;
-    const orchestrator = { leave(): void {
-      leaveCalled = true;
-    } } as unknown as ConversationOrchestrator;
-    const bridge = { close(): void {
-      bridgeClosed = true;
-    } } as unknown as WebRtcBridge;
+    const orchestrator = {
+      leave(): void {
+        leaveCalled = true;
+      },
+    } as unknown as ConversationOrchestrator;
+    const bridge = {
+      close(): void {
+        bridgeClosed = true;
+      },
+    } as unknown as WebRtcBridge;
     const session: ChatSession = {
       id: new Uint8Array(16) as ConversationId,
       orchestrator,

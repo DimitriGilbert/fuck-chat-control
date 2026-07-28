@@ -11,7 +11,10 @@ import {
   hexToConversationId,
   parseInvitation,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;

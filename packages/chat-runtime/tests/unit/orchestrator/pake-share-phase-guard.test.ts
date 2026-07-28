@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  generateAtRestKey,
+  generateIdentityKeyPair,
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   PAKE_CONFIRM_MESSAGE_BYTES,
@@ -17,13 +20,12 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
-
 import {
-  LoopbackPeerTransport,
-  mockSocketFactory,
-  MockSignalingSocket,
-} from "./_helpers";
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+
+import { LoopbackPeerTransport, mockSocketFactory, MockSignalingSocket } from "./_helpers";
 
 const SAMPLE_BASE_URL = "https://app.example";
 
@@ -149,9 +151,7 @@ describe("ConversationOrchestrator PAKE-share phase guard (CR-2)", () => {
     expect(errors.length).toBeGreaterThan(0);
     const last = errors[errors.length - 1]!;
     expect(last).toBeInstanceOf(OrchestratorError);
-    expect((last as OrchestratorError).code).toBe(
-      OrchestratorErrorCode.MalformedHandshakeMessage,
-    );
+    expect((last as OrchestratorError).code).toBe(OrchestratorErrorCode.MalformedHandshakeMessage);
     expect((last as OrchestratorError).message).toContain(
       "PAKE frame received before signature verified",
     );
@@ -177,9 +177,7 @@ describe("ConversationOrchestrator PAKE-share phase guard (CR-2)", () => {
     expect(errors.length).toBeGreaterThan(0);
     const last = errors[errors.length - 1]!;
     expect(last).toBeInstanceOf(OrchestratorError);
-    expect((last as OrchestratorError).code).toBe(
-      OrchestratorErrorCode.MalformedHandshakeMessage,
-    );
+    expect((last as OrchestratorError).code).toBe(OrchestratorErrorCode.MalformedHandshakeMessage);
     expect((last as OrchestratorError).message).toContain(
       "PAKE frame received before signature verified",
     );

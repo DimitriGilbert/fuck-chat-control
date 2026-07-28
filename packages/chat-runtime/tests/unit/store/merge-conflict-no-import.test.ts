@@ -57,9 +57,9 @@ describe("import bundle — merge peer-identity conflict does not persist (R8/F2
     // The pinned peer is UNCHANGED (existing key, never overwritten).
     const stillPinned = await target.getPeerIdentity(sharedId);
     expect(stillPinned).not.toBeNull();
-    expect(
-      bytesEqual((stillPinned as { publicKey: Uint8Array }).publicKey, existingKey),
-    ).toBe(true);
+    expect(bytesEqual((stillPinned as { publicKey: Uint8Array }).publicKey, existingKey)).toBe(
+      true,
+    );
 
     // The hostile display name did NOT overwrite the legit one.
     expect(await target.getDisplayName(sharedId)).toBe("Legit");

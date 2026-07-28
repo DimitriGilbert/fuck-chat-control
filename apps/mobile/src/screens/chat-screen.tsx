@@ -15,7 +15,7 @@
  *    later phase that wires up `expo-file-system`.
  *  - Safety number display + verify toggle.
  */
-import * as React from 'react';
+import * as React from "react";
 import {
   FlatList,
   KeyboardAvoidingView,
@@ -25,15 +25,15 @@ import {
   Text,
   TextInput,
   View,
-} from 'react-native';
-import * as DocumentPicker from 'expo-document-picker';
-import { getInfoAsync } from 'expo-file-system/legacy';
-import { MAX_INCOMPLETE_TRANSFER_BYTES } from '@fuck-eu-chat-control/chat-runtime/protocol/limits';
-import type { ConversationMessage } from '@fuck-eu-chat-control/chat-runtime/store';
-import type { ChatFileInput } from '@fuck-eu-chat-control/chat-runtime/runtime/types';
+} from "react-native";
+import * as DocumentPicker from "expo-document-picker";
+import { getInfoAsync } from "expo-file-system/legacy";
+import { MAX_INCOMPLETE_TRANSFER_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationMessage } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ChatFileInput } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 
-import { useChatController, useChatState } from '../chat/mobile-chat-provider';
-import { colors } from '../ui/colors';
+import { useChatController, useChatState } from "../chat/mobile-chat-provider";
+import { colors } from "../ui/colors";
 
 export interface ChatScreenProps {
   readonly onLeave: () => void;
@@ -86,8 +86,8 @@ async function readPickedFileToChatInput(
   const buffer = await response.arrayBuffer();
   return {
     data: new Uint8Array(buffer),
-    name: asset.name ?? 'file.bin',
-    mimeType: asset.mimeType ?? 'application/octet-stream',
+    name: asset.name ?? "file.bin",
+    mimeType: asset.mimeType ?? "application/octet-stream",
   };
 }
 
@@ -104,7 +104,7 @@ async function resolvePickedFileSize(asset: DocumentPicker.DocumentPickerAsset):
   if (asset.size !== undefined) return asset.size;
   const info = await getInfoAsync(asset.uri);
   if (!info.exists) {
-    throw new Error('Picked file does not exist or its size is unavailable');
+    throw new Error("Picked file does not exist or its size is unavailable");
   }
   return info.size;
 }
@@ -117,7 +117,7 @@ async function resolvePickedFileSize(asset: DocumentPicker.DocumentPickerAsset):
  */
 function formatSize(bytes: number): string {
   if (bytes < 1000) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB'] as const;
+  const units = ["KB", "MB", "GB"] as const;
   let value = bytes / 1000;
   let unitIndex = 0;
   while (value >= 1000 && unitIndex < units.length - 1) {
@@ -131,7 +131,7 @@ function formatSize(bytes: number): string {
 export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
   const controller = useChatController();
   const state = useChatState();
-  const [draft, setDraft] = React.useState('');
+  const [draft, setDraft] = React.useState("");
   const [error, setError] = React.useState<string | null>(null);
 
   const active = state.active;
@@ -147,7 +147,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
     if (conversationId === null) return;
     const text = draft.trim();
     if (text.length === 0) return;
-    setDraft('');
+    setDraft("");
     setError(null);
     try {
       await controller.sendText(conversationId, text);
@@ -184,7 +184,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
 
   const renderItem = ({ item }: { item: MessageRow }): React.ReactElement => {
     const m = item.message;
-    const isSent = m.direction === 'sent';
+    const isSent = m.direction === "sent";
     return (
       <View style={[styles.bubble, isSent ? styles.bubbleSent : styles.bubbleReceived]}>
         <Text style={styles.bubbleText}>{m.text}</Text>
@@ -195,7 +195,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
   return (
     <KeyboardAvoidingView
       style={styles.screen}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.header}>
         <Pressable onPress={onLeave}>
@@ -207,7 +207,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
 
       <View style={styles.safetyRow}>
         <Text style={styles.safetyNumber} numberOfLines={1}>
-          {active.safetyNumber ?? 'handshaking…'}
+          {active.safetyNumber ?? "handshaking…"}
         </Text>
         <Pressable
           style={[
@@ -218,7 +218,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
           disabled={active.safetyNumberVerified}
         >
           <Text style={styles.verifyText}>
-            {active.safetyNumberVerified ? 'Verified' : 'Mark verified'}
+            {active.safetyNumberVerified ? "Verified" : "Mark verified"}
           </Text>
         </Pressable>
       </View>
@@ -267,20 +267,20 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
   backText: { color: colors.accent, fontSize: 16 },
-  title: { color: colors.text, fontSize: 18, fontWeight: '600' },
+  title: { color: colors.text, fontSize: 18, fontWeight: "600" },
   headerSpacer: { width: 50 },
   safetyRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: 16,
     paddingVertical: 8,
     backgroundColor: colors.surface,
@@ -296,25 +296,31 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   verifyButtonDone: { backgroundColor: colors.success },
-  verifyText: { color: colors.text, fontSize: 12, fontWeight: '600' },
+  verifyText: { color: colors.text, fontSize: 12, fontWeight: "600" },
   list: { flex: 1 },
   listContent: { padding: 16, gap: 8 },
-  bubble: { maxWidth: '78%', paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12 },
-  bubbleSent: { backgroundColor: colors.sent, alignSelf: 'flex-end' },
-  bubbleReceived: { backgroundColor: colors.received, alignSelf: 'flex-start' },
+  bubble: { maxWidth: "78%", paddingVertical: 10, paddingHorizontal: 14, borderRadius: 12 },
+  bubbleSent: { backgroundColor: colors.sent, alignSelf: "flex-end" },
+  bubbleReceived: { backgroundColor: colors.received, alignSelf: "flex-start" },
   bubbleText: { color: colors.text, fontSize: 15 },
-  transferBar: { paddingHorizontal: 12, paddingVertical: 8, gap: 6, borderTopWidth: 1, borderTopColor: colors.border },
+  transferBar: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 6,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
   transferChip: {
     backgroundColor: colors.surfaceAlt,
     paddingVertical: 6,
     paddingHorizontal: 10,
     borderRadius: 8,
-    alignSelf: 'flex-start',
+    alignSelf: "flex-start",
   },
   transferText: { color: colors.text, fontSize: 12 },
   composer: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     padding: 12,
     gap: 8,
     borderTopWidth: 1,
@@ -326,10 +332,10 @@ const styles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     backgroundColor: colors.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
-  attachText: { color: colors.text, fontSize: 22, fontWeight: '400' },
+  attachText: { color: colors.text, fontSize: 22, fontWeight: "400" },
   textInput: {
     flex: 1,
     backgroundColor: colors.surfaceAlt,
@@ -345,7 +351,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     borderRadius: 20,
   },
-  sendText: { color: colors.accentText, fontSize: 15, fontWeight: '600' },
+  sendText: { color: colors.accentText, fontSize: 15, fontWeight: "600" },
   error: { color: colors.danger, fontSize: 12, paddingHorizontal: 16, paddingBottom: 8 },
-  empty: { color: colors.textMuted, padding: 20, textAlign: 'center' },
+  empty: { color: colors.textMuted, padding: 20, textAlign: "center" },
 });

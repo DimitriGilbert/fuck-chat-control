@@ -11,7 +11,7 @@
  * via `EXPO_PUBLIC_BROKER_URL` / `EXPO_PUBLIC_BASE_URL` (set in the EAS build
  * profile or `.env`) for a self-hosted deployment.
  */
-import Constants, { ExecutionEnvironment } from 'expo-constants';
+import Constants, { ExecutionEnvironment } from "expo-constants";
 
 export interface RuntimeConfig {
   /** WebSocket URL the signaling layer dials. */
@@ -27,14 +27,12 @@ export interface RuntimeConfig {
  */
 function readExtra(key: string, envOverride: string, fallback: string): string {
   const fromEnv = process.env[envOverride];
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) {
+  if (typeof fromEnv === "string" && fromEnv.length > 0) {
     return fromEnv;
   }
   const extra = Constants.expoConfig?.extra as Record<string, string | undefined> | undefined;
   const channel =
-    Constants.executionEnvironment === ExecutionEnvironment.Standalone
-      ? 'prod'
-      : 'dev';
+    Constants.executionEnvironment === ExecutionEnvironment.Standalone ? "prod" : "dev";
   const keyed = extra?.[`${key}:${channel}`];
   return keyed ?? fallback;
 }
@@ -45,16 +43,8 @@ function readExtra(key: string, envOverride: string, fallback: string): string {
  * needs a LAN IP — override via `EXPO_PUBLIC_BROKER_URL`.
  */
 export function resolveRuntimeConfig(): RuntimeConfig {
-  const brokerUrl = readExtra(
-    'brokerUrl',
-    'EXPO_PUBLIC_BROKER_URL',
-    'ws://10.0.2.2:8080/ws',
-  );
-  const baseUrl = readExtra(
-    'baseUrl',
-    'EXPO_PUBLIC_BASE_URL',
-    'http://10.0.2.2:8080',
-  );
+  const brokerUrl = readExtra("brokerUrl", "EXPO_PUBLIC_BROKER_URL", "ws://10.0.2.2:8080/ws");
+  const baseUrl = readExtra("baseUrl", "EXPO_PUBLIC_BASE_URL", "http://10.0.2.2:8080");
   return { brokerUrl, baseUrl };
 }
 
@@ -66,7 +56,11 @@ export function resolveRuntimeConfig(): RuntimeConfig {
  * posture.
  */
 export async function fetchIceServers(): Promise<
-  readonly { readonly urls: string | readonly string[]; readonly username?: string; readonly credential?: string }[]
+  readonly {
+    readonly urls: string | readonly string[];
+    readonly username?: string;
+    readonly credential?: string;
+  }[]
 > {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);

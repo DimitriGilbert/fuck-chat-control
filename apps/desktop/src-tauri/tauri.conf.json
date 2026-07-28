@@ -33,9 +33,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": [
-      "../../../icon.png"
-    ],
+    "icon": ["../../../icon.png"],
     "category": "SocialNetworking",
     "shortDescription": "E2E-encrypted chat that resists chat-control scanning",
     "longDescription": "fuck-chat-control desktop shell. Wraps the web build in a system webview; all crypto, WebRTC, and storage run natively in the page."

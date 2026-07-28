@@ -3,11 +3,11 @@
  * (or scans/picks it from a share); the controller parses the fragment and
  * runs the responder handshake.
  */
-import * as React from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as React from "react";
+import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 
-import { useChatController } from '../chat/mobile-chat-provider';
-import { colors } from '../ui/colors';
+import { useChatController } from "../chat/mobile-chat-provider";
+import { colors } from "../ui/colors";
 
 export interface JoinConversationScreenProps {
   readonly onJoined: () => void;
@@ -19,14 +19,14 @@ export function JoinConversationScreen({
   onBack,
 }: JoinConversationScreenProps): React.ReactElement {
   const controller = useChatController();
-  const [fragment, setFragment] = React.useState('');
+  const [fragment, setFragment] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const handleJoin = React.useCallback(async () => {
     const trimmed = fragment.trim();
     if (trimmed.length === 0) {
-      setError('Paste an invitation link first.');
+      setError("Paste an invitation link first.");
       return;
     }
     setBusy(true);
@@ -67,7 +67,7 @@ export function JoinConversationScreen({
           onPress={handleJoin}
           disabled={busy}
         >
-          <Text style={styles.primaryButtonText}>{busy ? 'Joining…' : 'Join'}</Text>
+          <Text style={styles.primaryButtonText}>{busy ? "Joining…" : "Join"}</Text>
         </Pressable>
         {error !== null ? <Text style={styles.error}>{error}</Text> : null}
       </View>
@@ -78,18 +78,18 @@ export function JoinConversationScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
   backText: { color: colors.accent, fontSize: 16 },
-  title: { color: colors.text, fontSize: 18, fontWeight: '600' },
+  title: { color: colors.text, fontSize: 18, fontWeight: "600" },
   headerSpacer: { width: 40 },
   body: { padding: 20, gap: 16, flex: 1 },
-  label: { color: colors.textMuted, fontSize: 12, fontWeight: '600', textTransform: 'uppercase' },
+  label: { color: colors.textMuted, fontSize: 12, fontWeight: "600", textTransform: "uppercase" },
   input: {
     backgroundColor: colors.surface,
     color: colors.text,
@@ -104,9 +104,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     paddingVertical: 14,
     borderRadius: 10,
-    alignItems: 'center',
+    alignItems: "center",
   },
-  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: '600' },
+  primaryButtonText: { color: colors.accentText, fontSize: 16, fontWeight: "600" },
   buttonDisabled: { opacity: 0.5 },
   error: { color: colors.danger, fontSize: 13 },
 });

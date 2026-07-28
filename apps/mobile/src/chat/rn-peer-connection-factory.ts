@@ -32,7 +32,7 @@
  * connected|disconnected|failed|closed`) — RN's `connectionState` uses the
  * same vocabulary, so the mapping is identity.
  */
-import { RTCPeerConnection } from 'react-native-webrtc';
+import { RTCPeerConnection } from "react-native-webrtc";
 import type {
   DataChannelTransport as DataChannelTransportInterface,
   IceCandidate,
@@ -41,7 +41,7 @@ import type {
   PeerConnectionFactoryOptions,
   PeerConnectionState,
   SessionDescription,
-} from '@fuck-eu-chat-control/chat-runtime/transport/types';
+} from "@fuck-eu-chat-control/chat-runtime/transport/types";
 
 /**
  * Structural view of the react-native-webrtc RTCDataChannel we depend on.
@@ -75,7 +75,17 @@ interface RnPeerConnectionInstance {
   setRemoteDescription(description: unknown): Promise<void>;
   addIceCandidate(candidate: unknown): Promise<void>;
   createDataChannel(label: string, options?: unknown): RnDataChannel;
-  onicecandidate: ((event: { readonly candidate: { toJSON(): { readonly candidate: string; readonly sdpMLineIndex?: number | null; readonly sdpMid?: string | null } } | null }) => void) | null;
+  onicecandidate:
+    | ((event: {
+        readonly candidate: {
+          toJSON(): {
+            readonly candidate: string;
+            readonly sdpMLineIndex?: number | null;
+            readonly sdpMid?: string | null;
+          };
+        } | null;
+      }) => void)
+    | null;
   onconnectionstatechange: ((event: unknown) => void) | null;
   ondatachannel: ((event: { readonly channel: RnDataChannel }) => void) | null;
   close(): void;
@@ -95,7 +105,7 @@ interface RnSessionDescriptionInit {
 }
 
 /** Data-channel label mirroring the web adapter. */
-const DATA_CHANNEL_LABEL = 'fck-chat-v1';
+const DATA_CHANNEL_LABEL = "fck-chat-v1";
 
 /**
  * Adapts a react-native-webrtc RTCDataChannel to the neutral
@@ -113,7 +123,7 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
     this.channel = channel;
     // RN's RTCDataChannel accepts `binaryType = 'arraybuffer'` so message
     // events surface ArrayBuffer payloads (mirrors the web adapter).
-    this.channel.binaryType = 'arraybuffer';
+    this.channel.binaryType = "arraybuffer";
     // RN dispatch is strict `<` (not DOM at-boundary); threshold 1 fires when buffered reaches 0.
     this.channel.bufferedAmountLowThreshold = 1;
     this.channel.onbufferedamountlow = (): void => {
@@ -151,7 +161,7 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
   }
 
   public get ready(): boolean {
-    return this.channel.readyState === 'open';
+    return this.channel.readyState === "open";
   }
 
   public onOpen(listener: () => void): void {
@@ -159,8 +169,8 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
   }
 
   public send(bytes: Uint8Array): void {
-    if (this.channel.readyState !== 'open') {
-      throw new Error('Cannot send on a data channel that is not open');
+    if (this.channel.readyState !== "open") {
+      throw new Error("Cannot send on a data channel that is not open");
     }
     this.channel.send(bytes);
   }
@@ -203,9 +213,7 @@ class RnPeerConnection implements PeerConnectionInterface {
       // RN's RTCIceServer.urls is `string | string[]` (mutable); the neutral
       // IceServer.urls is `string | readonly string[]`. Normalize a readonly
       // array into a mutable copy so the RN type accepts it.
-      const mappedUrls: string | string[] = Array.isArray(urls)
-        ? urls.slice()
-        : (urls as string);
+      const mappedUrls: string | string[] = Array.isArray(urls) ? urls.slice() : (urls as string);
       const mapped: RnIceServer = { urls: mappedUrls };
       if (server.username !== undefined) mapped.username = server.username;
       if (server.credential !== undefined) mapped.credential = server.credential;
@@ -213,7 +221,7 @@ class RnPeerConnection implements PeerConnectionInterface {
     });
     this.peerConnection = new RTCPeerConnection({
       iceServers,
-      bundlePolicy: 'max-bundle',
+      bundlePolicy: "max-bundle",
     }) as unknown as RnPeerConnectionInstance;
     this.peerConnection.onicecandidate = (event): void => {
       const candidate = event.candidate;
@@ -223,7 +231,7 @@ class RnPeerConnection implements PeerConnectionInterface {
       // RN's RTCIceCandidate.toJSON() returns { candidate, sdpMLineIndex,
       // sdpMid } — no usernameFragment (the DOM-only field is absent in RN).
       const init = candidate.toJSON();
-      if (typeof init.candidate !== 'string') {
+      if (typeof init.candidate !== "string") {
         return;
       }
       const neutral: IceCandidate = {
@@ -244,12 +252,12 @@ class RnPeerConnection implements PeerConnectionInterface {
 
   public async createOffer(): Promise<SessionDescription> {
     const offer = (await this.peerConnection.createOffer()) as RnSessionDescriptionInit;
-    return { type: (offer.type ?? 'offer') as SessionDescription['type'], sdp: offer.sdp };
+    return { type: (offer.type ?? "offer") as SessionDescription["type"], sdp: offer.sdp };
   }
 
   public async createAnswer(): Promise<SessionDescription> {
     const answer = (await this.peerConnection.createAnswer()) as RnSessionDescriptionInit;
-    return { type: (answer.type ?? 'answer') as SessionDescription['type'], sdp: answer.sdp };
+    return { type: (answer.type ?? "answer") as SessionDescription["type"], sdp: answer.sdp };
   }
 
   public async setLocalDescription(description: SessionDescription): Promise<void> {
@@ -279,7 +287,7 @@ class RnPeerConnection implements PeerConnectionInterface {
 
   public createDataChannel(): DataChannelTransportInterface {
     if (this.dataChannel !== null) {
-      throw new Error('A data channel has already been created');
+      throw new Error("A data channel has already been created");
     }
     const channel = this.peerConnection.createDataChannel(DATA_CHANNEL_LABEL, {
       ordered: true,

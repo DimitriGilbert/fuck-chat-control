@@ -16,9 +16,9 @@
  * onto `globalThis.crypto` so subsequent reads (the runtime accesses
  * `globalThis.crypto.subtle`) resolve to the JSI-backed implementation.
  */
-import { install } from 'react-native-quick-crypto';
+import { install } from "react-native-quick-crypto";
 
-import type { Crypto } from './crypto-types';
+import type { Crypto } from "./crypto-types";
 
 let installed = false;
 
@@ -39,9 +39,7 @@ export function installCryptoPolyfill(): void {
   if (globalWithCrypto.crypto === undefined) {
     // If install did not surface `global.crypto`, throw loudly rather than
     // let chat-runtime dereference `undefined.subtle` later.
-    throw new Error(
-      'react-native-quick-crypto install() did not populate globalThis.crypto',
-    );
+    throw new Error("react-native-quick-crypto install() did not populate globalThis.crypto");
   }
   installed = true;
 }

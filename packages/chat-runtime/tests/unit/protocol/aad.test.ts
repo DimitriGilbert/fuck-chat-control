@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import { decodeAad, encodeAad } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import {
   FRAME_AAD_BYTES,
   PROTOCOL_VERSION,
   SESSION_ID_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
-import { FrameType, type FrameAad, type SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import {
+  FrameType,
+  type FrameAad,
+  type SessionId,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function sessionId(seed: number): SessionId {
   const bytes = new Uint8Array(SESSION_ID_BYTES);

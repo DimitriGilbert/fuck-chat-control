@@ -22,7 +22,10 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import {
@@ -150,9 +153,9 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
       );
 
       // Sanity: the flag is not set yet.
-      expect(
-        await responder.repository.getAuthFailed(responder.orchestrator.conversationId!),
-      ).toBe(false);
+      expect(await responder.repository.getAuthFailed(responder.orchestrator.conversationId!)).toBe(
+        false,
+      );
 
       const { a, b } = linkLoopbackPair();
       initiator.orchestrator.attachTransport(a);
@@ -164,9 +167,9 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
       const errors = responder.spies.onError.calls.map((c) => c[0]);
       expect(errors.some((e) => isOrchError(e, OrchestratorErrorCode.IdentityChanged))).toBe(true);
       // ...and the durable authFailed flag is now set in the repo.
-      expect(
-        await responder.repository.getAuthFailed(responder.orchestrator.conversationId!),
-      ).toBe(true);
+      expect(await responder.repository.getAuthFailed(responder.orchestrator.conversationId!)).toBe(
+        true,
+      );
     });
 
     it("retry() on the same conversation throws AuthFailedRetryBlocked", async () => {
@@ -269,9 +272,9 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
       // IdentityChanged fired, this assertion would catch the misclassification.
       expect(sawIdentityChanged || sawPake).toBe(false);
       // The flag is NOT set for non-auth handshake failures.
-      expect(
-        await responder.repository.getAuthFailed(responder.orchestrator.conversationId!),
-      ).toBe(false);
+      expect(await responder.repository.getAuthFailed(responder.orchestrator.conversationId!)).toBe(
+        false,
+      );
     });
   });
 

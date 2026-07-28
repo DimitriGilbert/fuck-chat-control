@@ -20,32 +20,32 @@
  * the app entry (App.tsx) before this module's transitive chat-runtime imports
  * are evaluated. See App.tsx for the ordering proof.
  */
-import { createAtRestKeyManager } from '@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager';
-import type { AtRestKeyManager } from '@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager';
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import type { AtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import {
   createChatController,
   initialChatControllerState,
-} from '@fuck-eu-chat-control/chat-runtime/runtime/chat-controller';
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import type {
   ChatController,
   ChatControllerState,
-} from '@fuck-eu-chat-control/chat-runtime/runtime/chat-controller';
-import { createIdentityManager } from '@fuck-eu-chat-control/chat-runtime/runtime/identity-manager';
-import type { IdentityManager } from '@fuck-eu-chat-control/chat-runtime/runtime/identity-manager';
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
+import type { IdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 import {
   InMemoryConversationRepository,
   setDurableStorage,
-} from '@fuck-eu-chat-control/chat-runtime/store';
-import type { ConversationRepository } from '@fuck-eu-chat-control/chat-runtime/store';
-import type { AtRestKey } from '@fuck-eu-chat-control/chat-runtime/crypto';
-import type { IceServer } from '@fuck-eu-chat-control/chat-runtime/transport/types';
+} from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IceServer } from "@fuck-eu-chat-control/chat-runtime/transport/types";
 
-import * as React from 'react';
+import * as React from "react";
 
-import { chatStorage } from './mmkv-storage';
-import { rnPeerConnectionFactory } from './rn-peer-connection-factory';
-import { rnSocketFactory } from './rn-socket-factory';
-import { fetchIceServers, resolveRuntimeConfig } from './config';
+import { chatStorage } from "./mmkv-storage";
+import { rnPeerConnectionFactory } from "./rn-peer-connection-factory";
+import { rnSocketFactory } from "./rn-socket-factory";
+import { fetchIceServers, resolveRuntimeConfig } from "./config";
 
 export interface ChatContextValue {
   readonly controller: ChatController | null;
@@ -63,11 +63,7 @@ const initialControllerState: ChatControllerState = initialChatControllerState;
  * The controller is created inside `useEffect` (not at module load) so native
  * modules (MMKV, WebSocket, RTCPeerConnection) only run after React mounts.
  */
-export function ChatProvider({
-  children,
-}: {
-  children: React.ReactNode;
-}): React.ReactElement {
+export function ChatProvider({ children }: { children: React.ReactNode }): React.ReactElement {
   const [controller, setController] = React.useState<ChatController | null>(null);
   const [state, setState] = React.useState<ChatControllerState>(initialControllerState);
   const [ready, setReady] = React.useState(false);
@@ -161,7 +157,7 @@ export function ChatProvider({
 export function useChat(): ChatContextValue {
   const ctx = React.useContext(ChatContext);
   if (ctx === null) {
-    throw new Error('useChat must be used inside <ChatProvider>');
+    throw new Error("useChat must be used inside <ChatProvider>");
   }
   return ctx;
 }
@@ -184,7 +180,7 @@ export function useChatState(): ChatControllerState {
 export function useChatController(): ChatController {
   const { controller, ready } = useChat();
   if (!ready || controller === null) {
-    throw new Error('useChatController called before ChatProvider was ready');
+    throw new Error("useChatController called before ChatProvider was ready");
   }
   return controller;
 }

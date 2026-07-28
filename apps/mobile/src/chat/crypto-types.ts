@@ -24,38 +24,22 @@ export interface SubtleCrypto {
     extractable: boolean,
     keyUsages: readonly string[],
   ): Promise<CryptoKey>;
-  deriveBits(
-    algorithm: unknown,
-    baseKey: CryptoKey,
-    length: number,
-  ): Promise<ArrayBuffer>;
+  deriveBits(algorithm: unknown, baseKey: CryptoKey, length: number): Promise<ArrayBuffer>;
   exportKey(format: string, key: CryptoKey): Promise<JsonWebKey | ArrayBuffer>;
   generateKey(
     algorithm: unknown,
     extractable: boolean,
     keyUsages: readonly string[],
   ): Promise<CryptoKey | CryptoKeyPair>;
-  sign(
-    algorithm: unknown,
-    key: CryptoKey,
-    data: BufferSource,
-  ): Promise<ArrayBuffer>;
+  sign(algorithm: unknown, key: CryptoKey, data: BufferSource): Promise<ArrayBuffer>;
   verify(
     algorithm: unknown,
     key: CryptoKey,
     signature: BufferSource,
     data: BufferSource,
   ): Promise<boolean>;
-  encrypt(
-    algorithm: unknown,
-    key: CryptoKey,
-    data: BufferSource,
-  ): Promise<ArrayBuffer>;
-  decrypt(
-    algorithm: unknown,
-    key: CryptoKey,
-    data: BufferSource,
-  ): Promise<ArrayBuffer>;
+  encrypt(algorithm: unknown, key: CryptoKey, data: BufferSource): Promise<ArrayBuffer>;
+  decrypt(algorithm: unknown, key: CryptoKey, data: BufferSource): Promise<ArrayBuffer>;
 }
 
 export interface Crypto {

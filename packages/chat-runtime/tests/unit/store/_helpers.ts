@@ -1,6 +1,9 @@
 import { p256 } from "@noble/curves/p256";
 
-import { encodeConversationId, encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  encodeConversationId,
+  encodePublicKey,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
@@ -62,4 +65,3 @@ export class MemoryStorage implements Storage {
     this.map.set(key, value);
   }
 }
-

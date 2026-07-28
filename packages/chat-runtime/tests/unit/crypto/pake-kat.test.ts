@@ -12,7 +12,11 @@ import {
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { hkdfSha256 } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
 import type { PakeWasmModule } from "@fuck-eu-chat-control/chat-runtime/crypto";
-import { PAKE_ROLE_A, PAKE_ROLE_B, PAKE_SHARE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import {
+  PAKE_ROLE_A,
+  PAKE_ROLE_B,
+  PAKE_SHARE_BYTES,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 // CR-13: SPAKE2 known-answer test.
@@ -55,7 +59,10 @@ const PKG_JS = fileURLToPath(
   new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL(
+    "../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm",
+    import.meta.url,
+  ),
 );
 
 // Synchronous init — mirrors pake.test.ts. The browser path uses
@@ -93,8 +100,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 // Ed25519 scalar field order q = 2^252 + 27742317777372353535851937790883648493
 // (RFC 7748 / FIPS 186-5). Used by the independent JS BigInt reduction below.
-const ED25519_L =
-  7237005577332262213973186563042994240857116359379907606001950938285454250989n;
+const ED25519_L = 7237005577332262213973186563042994240857116359379907606001950938285454250989n;
 
 /**
  * Independent reimplementation of the crate's `ed25519_hash_to_scalar`
@@ -143,7 +149,7 @@ describe("CR-13 SPAKE2 known-answer test (RustCrypto spake2 v0.4.0 / RFC 9383 Ed
     const EXPECTED_PW_SCALAR_DECIMAL =
       "3515301705789368674385125653994241092664323519848410154015274772661223168839";
 
-    it("HKDF-SHA256(b\"\", b\"password\", b\"SPAKE2 pw\", 48) reduces mod q to the crate's published password scalar", async () => {
+    it('HKDF-SHA256(b"", b"password", b"SPAKE2 pw", 48) reduces mod q to the crate\'s published password scalar', async () => {
       const password = new TextEncoder().encode("password");
       const gotScalar = await passwordScalarFromCrateAlgorithm(password);
       const expected = scalarFromDecimalLE(EXPECTED_PW_SCALAR_DECIMAL);
@@ -162,8 +168,7 @@ describe("CR-13 SPAKE2 known-answer test (RustCrypto spake2 v0.4.0 / RFC 9383 Ed
     // Source: RustCrypto spake2 v0.4.0, src/lib.rs, `test_hash_ab`, line 683.
     // The crate's exact expected digest for hash_ab with the fixed 32-byte
     // X/Y/K placeholders below.
-    const EXPECTED_HASH_AB_HEX =
-      "d59d9ba920f7092565cec747b08d5b2e981d553ac32fde0f25e5b4a4cfca3efd";
+    const EXPECTED_HASH_AB_HEX = "d59d9ba920f7092565cec747b08d5b2e981d553ac32fde0f25e5b4a4cfca3efd";
 
     /**
      * Independent reimplementation of the crate's `hash_ab`

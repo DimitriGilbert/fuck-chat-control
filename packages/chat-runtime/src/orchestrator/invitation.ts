@@ -67,11 +67,7 @@ export function formatInvitation(id: ConversationId, baseUrl: string): string {
  * determined MITM who intercepts the link itself is outside the threat model
  * of the 6-digit code.
  */
-export function formatCodedInvitation(
-  id: ConversationId,
-  baseUrl: string,
-  code: string,
-): string {
+export function formatCodedInvitation(id: ConversationId, baseUrl: string, code: string): string {
   if (code.length === 0) {
     return formatInvitation(id, baseUrl);
   }
@@ -129,7 +125,8 @@ export function parseInvitation(fragment: string): ParsedInvitation {
     throw new OrchestratorError(
       OrchestratorErrorCode.MalformedInvitation,
       "invitation PAKE code tail must be exactly 6 decimal digits per PRD #90 (got: '" +
-        stripped.slice(tildeIdx + 1) + "')",
+        stripped.slice(tildeIdx + 1) +
+        "')",
     );
   }
   // Re-run hexToConversationId on the stripped fragment to surface the

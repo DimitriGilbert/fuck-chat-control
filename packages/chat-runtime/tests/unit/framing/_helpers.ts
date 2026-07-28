@@ -11,7 +11,12 @@ import {
   SESSION_ID_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { encodeSessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import type { FrameAad, FrameType, PublicKey, SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type {
+  FrameAad,
+  FrameType,
+  PublicKey,
+  SessionId,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { buildCanonicalTranscript, conversationId } from "../crypto/_helpers";
 import {

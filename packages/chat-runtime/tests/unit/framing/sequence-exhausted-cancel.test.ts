@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { encodeTransferCancelPayload, decodeTransferCancelPayload } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
-import { FramingError, FramingErrorCode, MAX_CHUNK_PLAINTEXT_BYTES } from "@fuck-eu-chat-control/chat-runtime/framing";
+import {
+  encodeTransferCancelPayload,
+  decodeTransferCancelPayload,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  ControlSubtype,
+  CONTROL_SUBTYPE_VALUES,
+  FrameType,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import {
+  FramingError,
+  FramingErrorCode,
+  MAX_CHUNK_PLAINTEXT_BYTES,
+} from "@fuck-eu-chat-control/chat-runtime/framing";
 import type { FrameReceiverHandlers } from "@fuck-eu-chat-control/chat-runtime/framing";
 
 import { bytesEqual, deterministicData, forgeFrame, makePair } from "./_helpers";
@@ -114,15 +125,7 @@ describe("sender SequenceExhausted emits a receiver-side cancel (R3/F2 / Phase 8
     controlBody[0] = ControlSubtype.TransferCancel;
     controlBody.set(cancelPayload, 1);
     await receiver.ingest(
-      await forgeFrame(
-        recvKeys.recvKey,
-        peerSessionId,
-        2,
-        FrameType.Control,
-        0,
-        0,
-        controlBody,
-      ),
+      await forgeFrame(recvKeys.recvKey, peerSessionId, 2, FrameType.Control, 0, 0, controlBody),
     );
 
     expect(receiver.activeTransferCount).toBe(0);
@@ -141,15 +144,7 @@ describe("sender SequenceExhausted emits a receiver-side cancel (R3/F2 / Phase 8
     // Receiver has no transferId=42 state; ingest must not throw and must
     // leave the receiver empty.
     await receiver.ingest(
-      await forgeFrame(
-        recvKeys.recvKey,
-        peerSessionId,
-        0,
-        FrameType.Control,
-        0,
-        0,
-        controlBody,
-      ),
+      await forgeFrame(recvKeys.recvKey, peerSessionId, 0, FrameType.Control, 0, 0, controlBody),
     );
     expect(receiver.activeTransferCount).toBe(0);
     expect(receiver.bufferedBytes).toBe(0);
@@ -168,9 +163,8 @@ async function forgeManifestPayload(
   data: Uint8Array,
 ): Promise<Uint8Array> {
   // Re-use the framing layer's encoder via the sender's import path.
-  const { encodeManifest, sha256, computeChunkCount } = await import(
-    "@fuck-eu-chat-control/chat-runtime/framing/manifest"
-  );
+  const { encodeManifest, sha256, computeChunkCount } =
+    await import("@fuck-eu-chat-control/chat-runtime/framing/manifest");
   const contentHash = await sha256(data);
   const chunkCount = computeChunkCount(size);
   return encodeManifest({

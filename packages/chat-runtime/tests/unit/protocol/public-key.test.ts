@@ -1,8 +1,14 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { decodePublicKey, encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import {
+  decodePublicKey,
+  encodePublicKey,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import { PUBLIC_KEY_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 function validPublicKey(): Uint8Array {

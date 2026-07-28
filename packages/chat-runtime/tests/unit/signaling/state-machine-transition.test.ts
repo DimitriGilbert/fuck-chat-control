@@ -101,7 +101,9 @@ describe("ConnectionStateMachine — illegal transitions throw InvalidTransition
 
   it("throws on an unknown state value", () => {
     const sm = new ConnectionStateMachine();
-    expect(() => sm.transition("bogus" as unknown as ConnectionState)).toThrow(InvalidTransitionError);
+    expect(() => sm.transition("bogus" as unknown as ConnectionState)).toThrow(
+      InvalidTransitionError,
+    );
   });
 
   it("preserves the from-state on a failed transition (no partial mutation)", () => {

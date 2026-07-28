@@ -165,9 +165,8 @@ describe("import bundle — pre-auth size bounds (R8/F3)", () => {
     // Decrypt the existing payload to recover a valid structure, then
     // hand-build a hostile payload that exceeds the cap. We re-encrypt with
     // the SAME kdf params so the import path's key derivation matches.
-    const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } = await import(
-      "@fuck-eu-chat-control/chat-runtime/crypto/at-rest"
-    );
+    const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } =
+      await import("@fuck-eu-chat-control/chat-runtime/crypto/at-rest");
     const salt = base64ToBytes(envelope.kdf.salt, MAX_SALT_BYTES);
     const nonce = base64ToBytes(envelope.aead.nonce, MAX_NONCE_BYTES);
     const ciphertext = base64ToBytes(envelope.ciphertext, MAX_ENVELOPE_CIPHERTEXT_BYTES);
@@ -216,9 +215,8 @@ describe("import bundle — pre-auth size bounds (R8/F3)", () => {
     const validBundle = await exportBundle(PASSPHRASE, source);
     const envelope = parseEnvelopeObject(validBundle);
 
-    const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } = await import(
-      "@fuck-eu-chat-control/chat-runtime/crypto/at-rest"
-    );
+    const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } =
+      await import("@fuck-eu-chat-control/chat-runtime/crypto/at-rest");
     const salt = base64ToBytes(envelope.kdf.salt, MAX_SALT_BYTES);
     const nonce = base64ToBytes(envelope.aead.nonce, MAX_NONCE_BYTES);
     const ciphertext = base64ToBytes(envelope.ciphertext, MAX_ENVELOPE_CIPHERTEXT_BYTES);

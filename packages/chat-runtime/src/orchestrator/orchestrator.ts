@@ -968,10 +968,7 @@ export class ConversationOrchestrator {
     if (this.authMode === AuthMode.Pake) {
       const code = this.pakeCode;
       if (code === null) {
-        throw new PakeError(
-          PakeErrorCode.Abort,
-          "authMode is Pake but no PAKE code is set",
-        );
+        throw new PakeError(PakeErrorCode.Abort, "authMode is Pake but no PAKE code is set");
       }
       // pakeRole/pakeLocalSideByte were computed synchronously at the top of this
       // method (before verifyTranscript). Reuse them: one source of truth for the
@@ -979,10 +976,7 @@ export class ConversationOrchestrator {
       // non-null checks are invariants (both are set iff authMode is Pake at the
       // top of this method) and guard against any future reorder.
       if (pakeRole === null || this.pakeLocalSideByte === null) {
-        throw new PakeError(
-          PakeErrorCode.Abort,
-          "PAKE role not derived before session creation",
-        );
+        throw new PakeError(PakeErrorCode.Abort, "PAKE role not derived before session creation");
       }
       const role = pakeRole;
       const sideByte = this.pakeLocalSideByte;
@@ -1112,8 +1106,7 @@ export class ConversationOrchestrator {
         "received a PakeShare message but the session authMode is not Pake",
       );
     }
-    const expectedLocalByte =
-      this.pakeSession === null ? null : this.pakeSession.sideByte;
+    const expectedLocalByte = this.pakeSession === null ? null : this.pakeSession.sideByte;
     // CR-2: by the time the share arrives, pakeSession may already be nulled
     // (pakeFinish consumed it) OR the share may race ahead of awaitPakeFinish
     // but land after verifyPeerAndComplete recorded our local side byte. Fall
@@ -1184,11 +1177,7 @@ export class ConversationOrchestrator {
     }
     this.peerPakeConfirm = null;
     const peerRole = localRole === Role.Initiator ? Role.Responder : Role.Initiator;
-    const expectedPeerTag = await derivePakeConfirmationTag(
-      pakeSecret,
-      transcriptHash,
-      peerRole,
-    );
+    const expectedPeerTag = await derivePakeConfirmationTag(pakeSecret, transcriptHash, peerRole);
     if (!ctEqual(peerTag, expectedPeerTag)) {
       throw new PakeError(
         PakeErrorCode.Mismatch,
@@ -1209,8 +1198,7 @@ export class ConversationOrchestrator {
         "received a PakeConfirm message but the session authMode is not Pake",
       );
     }
-    const expectedLocalByte =
-      this.pakeSession === null ? null : this.pakeSession.sideByte;
+    const expectedLocalByte = this.pakeSession === null ? null : this.pakeSession.sideByte;
     // By the time the confirmation arrives, pakeSession may already be nulled
     // (pakeFinish consumed it); fall back to the role we recorded as sender.
     const localSide = expectedLocalByte ?? this.pakeLocalSideByte;

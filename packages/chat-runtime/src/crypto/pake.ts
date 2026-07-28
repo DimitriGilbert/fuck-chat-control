@@ -151,10 +151,9 @@ async function loadWasm(): Promise<PakeWasmModule> {
  * in this file's AST — Metro, Vite, webpack, etc. cannot resolve, block, or
  * reject what they cannot see. The body is a perfectly normal dynamic import.
  */
-const dynamicImport = new Function(
-  "specifier",
-  "return import(specifier)",
-) as (specifier: string) => Promise<unknown>;
+const dynamicImport = new Function("specifier", "return import(specifier)") as (
+  specifier: string,
+) => Promise<unknown>;
 
 /**
  * Test-only synchronous initializer. Node-based unit tests cannot rely on the
@@ -264,10 +263,7 @@ export function pakeOutgoingShare(session: PakeSession): Uint8Array {
  * After this call the WASM state is consumed; the caller should drop the
  * {@link PakeSession} reference.
  */
-export async function pakeFinish(
-  session: PakeSession,
-  peerShare: Uint8Array,
-): Promise<Uint8Array> {
+export async function pakeFinish(session: PakeSession, peerShare: Uint8Array): Promise<Uint8Array> {
   if (session.state === null) {
     throw new PakeError(PakeErrorCode.Abort, "pakeFinish: session already finished");
   }

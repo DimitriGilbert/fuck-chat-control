@@ -26,13 +26,19 @@ import {
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { AuthMode, Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-import { decodePakeShare, encodePakeShare } from "@fuck-eu-chat-control/chat-runtime/orchestrator/handshake-codec";
+import {
+  decodePakeShare,
+  encodePakeShare,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/handshake-codec";
 
 const PKG_JS = fileURLToPath(
   new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL(
+    "../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm",
+    import.meta.url,
+  ),
 );
 
 // Synchronous init: the browser path uses fetch+WebAssembly.instantiateStreaming

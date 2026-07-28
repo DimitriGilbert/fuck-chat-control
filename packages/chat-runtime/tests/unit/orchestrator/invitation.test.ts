@@ -12,7 +12,10 @@ import {
   hexToConversationId,
   parseInvitation,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
-import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import {
+  OrchestratorError,
+  OrchestratorErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 const HEX_PATTERN = /^[0-9a-f]{32}$/;
 const SAMPLE_BASE_URL = "https://app.example";

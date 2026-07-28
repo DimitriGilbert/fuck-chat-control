@@ -7,7 +7,10 @@ import { LockableRepository } from "@fuck-eu-chat-control/chat-runtime/store/loc
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { AtRestLockedError } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import {
+  createChatController,
+  type ChatController,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 import { stubPeerConnectionFactory } from "./_helpers";
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 

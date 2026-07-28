@@ -16,7 +16,10 @@ import {
   FramingErrorCode,
   sha256,
 } from "@fuck-eu-chat-control/chat-runtime/framing";
-import type { FileManifest, FrameReceiverHandlers } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type {
+  FileManifest,
+  FrameReceiverHandlers,
+} from "@fuck-eu-chat-control/chat-runtime/framing";
 import { forgeFrame, makePair, utf8 } from "./_helpers";
 
 function countingHandlers(): { count: number; handlers: FrameReceiverHandlers } {
