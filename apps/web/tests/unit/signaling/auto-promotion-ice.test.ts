@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { Role } from "@/features/chat/protocol/types";
-import { SignalingClient } from "@/features/chat/signaling/signaling-client";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { SignalingClient } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 import type {
   SignalingHandlers,
   SignalingSocketFactory,
-} from "@/features/chat/signaling/signaling-client";
+} from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 import { MockSignalingSocket } from "./_helpers";
 
 const ROOM_ID = "00112233445566778899aabbccddeeff";

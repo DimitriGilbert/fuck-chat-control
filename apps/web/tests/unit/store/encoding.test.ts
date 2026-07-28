@@ -5,7 +5,7 @@ import {
   bytesToBase64,
   bytesToHex,
   hexToBytes,
-} from "@/features/chat/store/encoding";
+} from "@fuck-eu-chat-control/chat-runtime/store/encoding";
 
 import { bytesEqual } from "./_helpers";
 

@@ -9,17 +9,17 @@ import {
   pakeFinish,
   pakeOutgoingShare,
   sha256,
-} from "@/features/chat/crypto";
-import { hkdfSha256 } from "@/features/chat/crypto/primitives";
-import type { PakeWasmModule } from "@/features/chat/crypto";
-import { PAKE_ROLE_A, PAKE_ROLE_B, PAKE_SHARE_BYTES } from "@/features/chat/protocol/limits";
-import { Role } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { hkdfSha256 } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
+import type { PakeWasmModule } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { PAKE_ROLE_A, PAKE_ROLE_B, PAKE_SHARE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 // CR-13: SPAKE2 known-answer test.
 //
 // LAYER ASSERTED AT, AND WHY.
 //
-// The project's WASM (`src/wasm/spake2`) wraps the RustCrypto `spake2` crate
+// The project's WASM (`packages/chat-runtime/wasm/spake2`) wraps the RustCrypto `spake2` crate
 // (v0.4.0), which implements RFC 9383 using the Ed25519-SHA256 ciphersuite
 // (`Ed25519Group` is the crate's only Group impl). The WASM's `pake_start`
 // entry calls `Spake2::<Ed25519Group>::start_a` / `start_b`, which draw the
@@ -52,10 +52,10 @@ import { Role } from "@/features/chat/protocol/types";
 // project's own pake_start/pake_finish.
 
 const PKG_JS = fileURLToPath(
-  new URL("../../../src/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
+  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../../src/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
 );
 
 // Synchronous init — mirrors pake.test.ts. The browser path uses

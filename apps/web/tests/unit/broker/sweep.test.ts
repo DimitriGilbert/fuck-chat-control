@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { runSweep, startZombieSweep } from "@/features/chat/broker/sweep";
+import { runSweep, startZombieSweep } from "@fuck-eu-chat-control/chat-runtime/broker/sweep";
 
 import { MockBrokerSocket } from "./_helpers";
 

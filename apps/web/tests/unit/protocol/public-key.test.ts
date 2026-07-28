@@ -1,9 +1,9 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { decodePublicKey, encodePublicKey } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { PUBLIC_KEY_BYTES } from "@/features/chat/protocol/limits";
+import { decodePublicKey, encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { PUBLIC_KEY_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 function validPublicKey(): Uint8Array {
   return p256.getPublicKey(p256.utils.randomSecretKey(), false);

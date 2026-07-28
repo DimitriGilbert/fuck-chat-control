@@ -1,22 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import type { FileManifest, ReceivedFile } from "@/features/chat/framing";
-import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import { teardownSession } from "@/features/chat/runtime/chat-session";
-import type { ChatSession } from "@/features/chat/runtime/types";
-import type { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
+import type { FileManifest, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { ConversationOrchestrator } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { teardownSession } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-session";
+import type { ChatFileInput, ChatSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import {
   createChatController,
   type ChatController,
-} from "@/features/chat/runtime/chat-controller";
-import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import { stubPeerConnectionFactory } from "./_helpers";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { linkLoopbackPair, mockSocketFactory } from "../orchestrator/_helpers";
 
@@ -242,6 +243,7 @@ async function makeController(): Promise<ChatController> {
     atRestKeyManager,
     repositoryFactory: (key) => new InMemoryConversationRepository(key),
     socketFactory: mockSocketFactory(socket),
+    peerConnectionFactory: stubPeerConnectionFactory(),
     iceServers: [],
   });
 }
@@ -262,8 +264,8 @@ async function waitForConnected(controller: ChatController, timeoutMs = 4000): P
   throw new Error("timed out waiting for Connected");
 }
 
-function makeTextFile(text: string, name = "notes.txt", type = "text/plain"): File {
-  return new File([text], name, { type });
+function makeTextFile(text: string, name = "notes.txt", type = "text/plain"): ChatFileInput {
+  return { data: new TextEncoder().encode(text), name, mimeType: type };
 }
 
 /**

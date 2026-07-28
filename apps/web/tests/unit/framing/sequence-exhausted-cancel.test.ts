@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { encodeTransferCancelPayload, decodeTransferCancelPayload } from "@/features/chat/protocol/codec";
-import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "@/features/chat/protocol/types";
-import { FramingError, FramingErrorCode, MAX_CHUNK_PLAINTEXT_BYTES } from "@/features/chat/framing";
-import type { FrameReceiverHandlers } from "@/features/chat/framing";
+import { encodeTransferCancelPayload, decodeTransferCancelPayload } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { FramingError, FramingErrorCode, MAX_CHUNK_PLAINTEXT_BYTES } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { FrameReceiverHandlers } from "@fuck-eu-chat-control/chat-runtime/framing";
 
 import { bytesEqual, deterministicData, forgeFrame, makePair } from "./_helpers";
 
@@ -169,7 +169,7 @@ async function forgeManifestPayload(
 ): Promise<Uint8Array> {
   // Re-use the framing layer's encoder via the sender's import path.
   const { encodeManifest, sha256, computeChunkCount } = await import(
-    "@/features/chat/framing/manifest"
+    "@fuck-eu-chat-control/chat-runtime/framing/manifest"
   );
   const contentHash = await sha256(data);
   const chunkCount = computeChunkCount(size);

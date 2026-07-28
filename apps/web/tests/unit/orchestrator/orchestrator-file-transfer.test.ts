@@ -1,20 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import type { ReceivedFile } from "@/features/chat/framing";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import { generateAtRestKey, generateIdentityKeyPair } from "@/features/chat/crypto";
-import type { IdentityKeyPair } from "@/features/chat/crypto";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import type { ConversationRepository } from "@/features/chat/store";
+import type { ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
   ConversationOrchestrator,
   type OrchestratorDeps,
   type OrchestratorHandlers,
   type TransferSummary,
-} from "@/features/chat/orchestrator/orchestrator";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
 
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "../orchestrator/_helpers";
 
 const SAMPLE_BASE_URL = "https://app.example";

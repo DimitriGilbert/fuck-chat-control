@@ -5,8 +5,8 @@ import {
   deriveSessionKeys,
   generateEphemeralKeyPair,
   generateIdentityKeyPair,
-} from "@/features/chat/crypto";
-import type { ConversationId, PublicKey, SessionId } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { ConversationId, PublicKey, SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { buildCanonicalTranscript, bytesEqual, conversationId, sessionId } from "./_helpers";
 

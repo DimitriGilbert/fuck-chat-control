@@ -1,5 +1,5 @@
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
-import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
+import type { SignalingSocketFactory } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 
 export { MockSignalingSocket, parse } from "../signaling/_helpers";
 

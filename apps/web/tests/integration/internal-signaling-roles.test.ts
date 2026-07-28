@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey, generateIdentityKeyPair } from "@/features/chat/crypto";
-import type { IdentityKeyPair } from "@/features/chat/crypto";
-import { encodePublicKey } from "@/features/chat/protocol/codec";
-import { Role } from "@/features/chat/protocol/types";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationRepository } from "@/features/chat/store";
+import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
   ConversationOrchestrator,
   type OrchestratorDeps,
-} from "@/features/chat/orchestrator/orchestrator";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
 
 import { mockSocketFactory, MockSignalingSocket } from "../unit/orchestrator/_helpers";
 

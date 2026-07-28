@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveNonce } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { GCM_NONCE_BYTES, SESSION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { SessionId } from "@/features/chat/protocol/types";
+import { deriveNonce } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { GCM_NONCE_BYTES, SESSION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function sessionId(seed: number): SessionId {
   const bytes = new Uint8Array(SESSION_ID_BYTES);

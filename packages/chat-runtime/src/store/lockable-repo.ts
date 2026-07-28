@@ -1,4 +1,4 @@
-import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
+import type { ConversationId, PublicKey } from "../protocol/types";
 
 import { getAuthFailedDurable } from "./auth-failed-store";
 import { MessageDirection } from "./types";

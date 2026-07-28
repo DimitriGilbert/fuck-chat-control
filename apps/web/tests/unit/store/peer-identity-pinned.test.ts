@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import { StoreError, StoreErrorCode } from "@/features/chat/store";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { StoreError, StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
   bytesEqual,

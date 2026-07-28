@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { FrameType } from "@/features/chat/protocol/types";
+import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import {
   encodeManifest,
   FramingErrorCode,
@@ -9,8 +9,8 @@ import {
   type FrameReceiver,
   type FrameReceiverHandlers,
   sha256,
-} from "@/features/chat/framing";
-import { FrameReceiver as FrameReceiverCtor } from "@/features/chat/framing";
+} from "@fuck-eu-chat-control/chat-runtime/framing";
+import { FrameReceiver as FrameReceiverCtor } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { deterministicData, forgeFrame, makePair } from "./_helpers";
 
 // CR-5: per-transfer inactivity timeout. A silent peer must not hold buffer +

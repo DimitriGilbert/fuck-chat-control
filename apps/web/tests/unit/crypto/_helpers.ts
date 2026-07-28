@@ -4,20 +4,20 @@ import {
   encodeConversationId,
   encodePublicKey,
   encodeSessionId,
-} from "@/features/chat/protocol/codec";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import {
   CONVERSATION_ID_BYTES,
   PROTOCOL_VERSION,
   SESSION_ID_BYTES,
   TRANSCRIPT_VERSION,
-} from "@/features/chat/protocol/limits";
-import { AuthMode } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type {
   ConversationId,
   PublicKey,
   SessionId,
   Transcript,
-} from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 export function conversationId(seed: number): ConversationId {
   const bytes = new Uint8Array(CONVERSATION_ID_BYTES);

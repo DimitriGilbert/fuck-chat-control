@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { CryptoErrorCode, decryptAtRest, generateAtRestKey } from "@/features/chat/crypto";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import { MessageDirection } from "@/features/chat/store";
-import { StoreErrorCode } from "@/features/chat/store";
-import type { AtRestKey } from "@/features/chat/crypto";
+import { CryptoErrorCode, decryptAtRest, generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
+import { StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 
 import { bytesEqual, conversationId, deterministicPublicKey, fingerprintOf } from "./_helpers";
 

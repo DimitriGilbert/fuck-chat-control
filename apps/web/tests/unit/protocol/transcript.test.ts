@@ -1,9 +1,9 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { sha256 } from "@/features/chat/crypto/primitives";
-import { decodeTranscript, encodeTranscript } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
+import { sha256 } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
+import { decodeTranscript, encodeTranscript } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
 import {
   CONVERSATION_ID_BYTES,
   PROTOCOL_VERSION,
@@ -11,14 +11,14 @@ import {
   SESSION_ID_BYTES,
   TRANSCRIPT_BYTES,
   TRANSCRIPT_VERSION,
-} from "@/features/chat/protocol/limits";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import {
   AuthMode,
   type ConversationId,
   type PublicKey,
   type SessionId,
   type Transcript,
-} from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;

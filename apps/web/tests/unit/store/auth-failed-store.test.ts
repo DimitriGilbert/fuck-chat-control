@@ -1,14 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import type { ConversationId } from "@/features/chat/protocol/types";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   AUTH_FAILED_STORAGE_KEY,
   getAuthFailedDurable,
   markAuthFailedDurable,
-} from "@/features/chat/store/auth-failed-store";
-import { installLocalStorage, type MemoryStorage } from "./_helpers";
+} from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
+import { setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
+import { MemoryStorage } from "./_helpers";
 
 function conversationIdFromHex(hex: string): ConversationId {
   const bytes = new Uint8Array(hex.length / 2);
@@ -27,17 +28,12 @@ function hexOf(id: ConversationId): string {
 
 describe("auth-failed-store (SEC-1)", () => {
   let storage: MemoryStorage;
-  let teardown: () => void;
 
   beforeAll(() => {
-    // The Node test environment has no `localStorage` global; install an
-    // in-memory one for the duration of the suite. The store checks
-    // `typeof localStorage === "undefined"`, so the global must be genuinely
-    // present (not just a getter returning undefined) for the persistence path
-    // to run.
-    const installed = installLocalStorage();
-    storage = installed.storage;
-    teardown = installed.teardown;
+    // A.6: the store reads/writes through the injectable DurableStorage, not
+    // the `localStorage` global. Register an in-memory store for the suite.
+    storage = new MemoryStorage();
+    setDurableStorage(storage);
   });
 
   beforeEach(() => {
@@ -45,7 +41,8 @@ describe("auth-failed-store (SEC-1)", () => {
   });
 
   afterAll(() => {
-    teardown();
+    // Clear the registration so other suites start from a clean slate.
+    setDurableStorage(new MemoryStorage());
   });
 
   it("persists the flag across a simulated reload (fresh read returns true)", async () => {
@@ -125,20 +122,30 @@ describe("auth-failed-store (SEC-1)", () => {
     expect(await getAuthFailedDurable(ID_A)).toBe(false);
   });
 
-  it("SSR guard: getAuthFailedDurable never throws when localStorage is absent", async () => {
-    // Temporarily REMOVE the global so `typeof localStorage === "undefined"`
-    // (the exact SSR condition the store guards against). Deleting the own
-    // property on globalThis makes the bare identifier resolve to an absent
-    // binding — which is what the server boundary looks like.
-    teardown();
+  it("best-effort: getAuthFailedDurable never throws when no durable store is registered", async () => {
+    // Simulate the "platform never registered a durable store" path (e.g. a
+    // misconfigured native shell). A null-ish store that returns null for every
+    // read and ignores writes exercises the same degradation the runtime sees
+    // when `getDurableStorage()` returns null.
+    const absentStore: MemoryStorage = new MemoryStorage();
+    spyOnStorage(absentStore, "getItem", () => null);
+    spyOnStorage(absentStore, "setItem", () => undefined);
+    setDurableStorage(absentStore);
     try {
       await expect(getAuthFailedDurable(ID_A)).resolves.toBe(false);
       // markAuthFailedDurable must also be a no-op (resolve without writing).
       await expect(markAuthFailedDurable(ID_A)).resolves.toBeUndefined();
     } finally {
-      const reinstalled = installLocalStorage();
-      storage = reinstalled.storage;
-      teardown = reinstalled.teardown;
+      setDurableStorage(storage);
     }
   });
 });
+
+/** Replace a method on a MemoryStorage with a stub for the duration of a test. */
+function spyOnStorage(
+  target: MemoryStorage,
+  method: "getItem" | "setItem",
+  impl: () => string | null | void,
+): void {
+  Object.defineProperty(target, method, { value: impl, configurable: true });
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { aesGcmEncrypt, toAESKey } from "@/features/chat/crypto/primitives";
+import { aesGcmEncrypt, toAESKey } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
 
 // CR-12: AES-256-GCM known-answer test against a published NIST/CAVP vector.
 // A KAT is only meaningful if the expected ciphertext is a literal from a

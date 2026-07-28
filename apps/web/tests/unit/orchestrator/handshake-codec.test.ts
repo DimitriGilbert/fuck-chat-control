@@ -5,15 +5,15 @@ import {
   generateIdentityKeyPair,
   signTranscript,
   verifyTranscript,
-} from "@/features/chat/crypto";
-import { randomBytes } from "@/features/chat/crypto/primitives";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { randomBytes } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
 import {
   deriveRole,
   encodeConversationId,
   encodeSessionId,
   encodeSignature,
   encodeTranscript,
-} from "@/features/chat/protocol/codec";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import {
   PROTOCOL_VERSION,
   PUBLIC_KEY_BYTES,
@@ -21,9 +21,9 @@ import {
   SESSION_ID_BYTES,
   SIGNATURE_BYTES,
   TRANSCRIPT_VERSION,
-} from "@/features/chat/protocol/limits";
-import { AuthMode, Role } from "@/features/chat/protocol/types";
-import type { ConversationId, Signature, Transcript } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { AuthMode, Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId, Signature, Transcript } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   buildTranscript,
@@ -32,8 +32,8 @@ import {
   encodeHello,
   encodeSignatureMessage,
   type HelloComponents,
-} from "@/features/chat/orchestrator/handshake-codec";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/handshake-codec";
+import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 // HelloMessage wire layout (frozen by design doc):
 //   PROTOCOL_VERSION(1) | identityPublicKey(65) | ephemeralPublicKey(65) | sessionId(32) = 163 bytes

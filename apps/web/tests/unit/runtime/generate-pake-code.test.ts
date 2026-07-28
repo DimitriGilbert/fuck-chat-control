@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { generatePakeCode } from "@/features/chat/runtime/chat-controller";
+import { generatePakeCode } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
 
 /**
  * CR-4 (Phase 3b): the controller's `generatePakeCode` is the single source

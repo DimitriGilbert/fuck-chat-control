@@ -1,19 +1,19 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import type { AtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { AtRestLockedError } from "@/features/chat/runtime/at-rest-key-manager";
-import { InMemoryConversationRepository } from "@/features/chat/store/in-memory-repo";
-import { LockableRepository } from "@/features/chat/store/lockable-repo";
-import { MessageDirection } from "@/features/chat/store/types";
-import { AUTH_FAILED_STORAGE_KEY } from "@/features/chat/store/auth-failed-store";
-import { installLocalStorage, type MemoryStorage } from "./_helpers";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { AtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { AtRestLockedError } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store/in-memory-repo";
+import { LockableRepository } from "@fuck-eu-chat-control/chat-runtime/store/lockable-repo";
+import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store/types";
+import { AUTH_FAILED_STORAGE_KEY } from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
+import { setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
+import { MemoryStorage } from "./_helpers";
 
 let storage: MemoryStorage;
-let teardownLocalStorage: () => void;
 
 function conversationId(seed: number): ConversationId {
   const bytes = new Uint8Array(CONVERSATION_ID_BYTES);
@@ -102,11 +102,11 @@ function seedDurable(id: ConversationId): void {
 
 describe("LockableRepository pending auth-failed (SEC-2)", () => {
   beforeAll(() => {
-    // The Node test environment has no `localStorage` global; install an
-    // in-memory one so the durable-store fallback in getAuthFailed can run.
-    const installed = installLocalStorage();
-    storage = installed.storage;
-    teardownLocalStorage = installed.teardown;
+    // A.6: the durable auth-failed store reads/writes through the injectable
+    // DurableStorage. Register an in-memory store so the fallback path in
+    // getAuthFailed can run.
+    storage = new MemoryStorage();
+    setDurableStorage(storage);
   });
 
   beforeEach(() => {
@@ -114,7 +114,7 @@ describe("LockableRepository pending auth-failed (SEC-2)", () => {
   });
 
   afterAll(() => {
-    teardownLocalStorage();
+    setDurableStorage(new MemoryStorage());
   });
 
   it("markAuthFailed while LOCKED queues the id (does not throw, does not hit inner repo)", async () => {

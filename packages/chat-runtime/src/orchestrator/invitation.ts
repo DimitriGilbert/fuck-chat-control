@@ -1,7 +1,7 @@
-import { randomBytes } from "@/features/chat/crypto/primitives";
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { ConversationId } from "@/features/chat/protocol/types";
+import { randomBytes } from "../crypto/primitives";
+import { encodeConversationId } from "../protocol/codec";
+import { CONVERSATION_ID_BYTES } from "../protocol/limits";
+import type { ConversationId } from "../protocol/types";
 
 import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 

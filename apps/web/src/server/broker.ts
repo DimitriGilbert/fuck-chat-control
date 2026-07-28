@@ -2,10 +2,10 @@ import { defineWebSocketHandler } from "nitro";
 
 import { env } from "@fuck-eu-chat-control/env/server";
 
-import { BrokerConnection } from "../features/chat/broker/connection";
-import type { BrokerSocket } from "../features/chat/broker/room-registry";
-import { RoomRegistry } from "../features/chat/broker/room-registry";
-import { startZombieSweep } from "../features/chat/broker/sweep";
+import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
+import type { BrokerSocket } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
+import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
+import { startZombieSweep } from "@fuck-eu-chat-control/chat-runtime/broker/sweep";
 import { isOriginAllowed } from "./origin-guard";
 
 // Single shared registry + connection bookkeeping for the lifetime of the

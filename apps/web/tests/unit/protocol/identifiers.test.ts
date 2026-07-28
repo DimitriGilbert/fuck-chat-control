@@ -5,9 +5,9 @@ import {
   decodeSessionId,
   encodeConversationId,
   encodeSessionId,
-} from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { CONVERSATION_ID_BYTES, SESSION_ID_BYTES } from "@/features/chat/protocol/limits";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { CONVERSATION_ID_BYTES, SESSION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 describe("encodeConversationId / decodeConversationId (16 bytes)", () => {
   it("round-trips a 128-bit conversation id", () => {

@@ -1,13 +1,21 @@
-import { Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
+import { Role } from "../protocol/types";
+import type { ConversationId } from "../protocol/types";
 import {
   SignalingClient,
   type SignalingSocketFactory,
-} from "@/features/chat/signaling/signaling-client";
-import { DataChannelTransport, WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
-import { conversationIdToHex } from "@/features/chat/orchestrator/invitation";
-import { toPeerTransport } from "@/features/chat/orchestrator/peer-transport";
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+} from "../signaling/signaling-client";
+import { conversationIdToHex } from "../orchestrator/invitation";
+import { toPeerTransport } from "../transport/peer-transport";
+import type { PeerTransport } from "../transport/peer-transport";
+import type {
+  DataChannelTransport,
+  IceCandidate,
+  IceServer,
+  PeerConnection,
+  PeerConnectionFactory,
+  PeerConnectionState,
+  SessionDescription,
+} from "../transport/types";
 
 /**
  * Callback the bridge invokes exactly once, when the data channel is open and
@@ -24,8 +32,14 @@ export interface WebRtcBridgeOptions {
   readonly role: Role;
   /** Factory for the underlying WebSocket (testability). */
   readonly socketFactory: SignalingSocketFactory;
+  /**
+   * Platform-supplied factory that constructs the peer connection. The web
+   * adapter injects `(opts) => new WebRtcAdapter(opts)`; native adapters inject
+   * their own. Keeps the runtime free of any DOM `RTCPeerConnection` reference.
+   */
+  readonly peerConnectionFactory: PeerConnectionFactory;
   /** ICE servers. Empty array = loopback-only. */
-  readonly iceServers?: RTCIceServer[];
+  readonly iceServers?: readonly IceServer[];
   /** Invoked once when the data channel is open. */
   readonly transportReady: TransportReadyCallback;
   /** Optional callbacks that forward broker peer-presence to the orchestrator. */
@@ -69,7 +83,7 @@ const BROKER_TEARDOWN_GRACE_MS = 2_000;
  */
 export class WebRtcBridge {
   private readonly signaling: SignalingClient;
-  private readonly adapter: WebRtcAdapter;
+  private readonly adapter: PeerConnection;
   private readonly options: WebRtcBridgeOptions;
   private readonly nego: NegotiationState = {
     localOfferInFlight: false,
@@ -114,7 +128,7 @@ export class WebRtcBridge {
           this.nego.localOfferInFlight = false;
           this.signaling.endOffer();
           void this.adapter
-            .setRemoteDescription(sdp as RTCSessionDescriptionInit)
+            .setRemoteDescription(sdp as SessionDescription)
             .catch(() => {
               // best-effort; the connection will fail and the orchestrator surfaces it
             });
@@ -123,7 +137,7 @@ export class WebRtcBridge {
           // addIceCandidate resolves immediately when buffered pre-remote-desc;
           // any rejection (late/invalid candidate surfacing through the drain
           // path) is swallowed here so it never becomes an unhandled rejection.
-          void this.adapter.addIceCandidate(candidate as RTCIceCandidateInit).catch(() => {
+          void this.adapter.addIceCandidate(candidate as IceCandidate).catch(() => {
             // best-effort
           });
         },
@@ -142,12 +156,12 @@ export class WebRtcBridge {
         },
       },
     });
-    this.adapter = new WebRtcAdapter({
+    this.adapter = options.peerConnectionFactory({
       iceServers: options.iceServers,
-      onIceCandidate: (candidate: RTCIceCandidateInit): void => {
+      onIceCandidate: (candidate: IceCandidate): void => {
         this.signaling.sendIce(candidate);
       },
-      onConnectionStateChange: (state: RTCPeerConnectionState): void => {
+      onConnectionStateChange: (state: PeerConnectionState): void => {
         this.handleConnectionState(state);
       },
       onDataChannel: (transport: DataChannelTransport): void => {
@@ -262,7 +276,7 @@ export class WebRtcBridge {
       this.signaling.endOffer();
     }
     try {
-      await this.adapter.setRemoteDescription(sdp as RTCSessionDescriptionInit);
+      await this.adapter.setRemoteDescription(sdp as SessionDescription);
       const answer = await this.adapter.createAnswer();
       await this.adapter.setLocalDescription(answer);
       this.signaling.sendAnswer(answer);
@@ -290,7 +304,7 @@ export class WebRtcBridge {
     });
   }
 
-  private handleConnectionState(state: RTCPeerConnectionState): void {
+  private handleConnectionState(state: PeerConnectionState): void {
     if (this.closed) return;
     if (state === "connected") {
       this.maybeFireTransportReady();

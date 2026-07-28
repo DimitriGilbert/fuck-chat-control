@@ -5,8 +5,8 @@ import {
   formatMessage,
   forward,
   parseMessage,
-} from "@/features/chat/broker/protocol";
-import type { BrokerMessage } from "@/features/chat/broker/protocol";
+} from "@fuck-eu-chat-control/chat-runtime/broker/protocol";
+import type { BrokerMessage } from "@fuck-eu-chat-control/chat-runtime/broker/protocol";
 import { MockBrokerSocket } from "./_helpers";
 
 function roomId(seed: number): string {

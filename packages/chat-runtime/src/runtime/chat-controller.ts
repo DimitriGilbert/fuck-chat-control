@@ -1,27 +1,29 @@
-import { Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
+import { Role } from "../protocol/types";
+import type { ConversationId } from "../protocol/types";
 import {
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
-} from "@/features/chat/protocol/limits";
-import { randomBytes } from "@/features/chat/crypto/primitives";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
-import { exportBundle, importBundle, ImportMode } from "@/features/chat/store";
-import { AuthFailedRetryBlocked } from "@/features/chat/store";
-import { LockableRepository } from "@/features/chat/store/lockable-repo";
+} from "../protocol/limits";
+import { randomBytes } from "../crypto/primitives";
+import { ConnectionState } from "../signaling/state-machine";
+import type { SignalingSocketFactory } from "../signaling/signaling-client";
+import { exportBundle, importBundle, ImportMode } from "../store";
+import { AuthFailedRetryBlocked } from "../store";
+import { LockableRepository } from "../store/lockable-repo";
 import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
   ImportResult,
-} from "@/features/chat/store";
-import type { ReceivedFile } from "@/features/chat/framing";
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+} from "../store";
+import type { ReceivedFile } from "../framing";
+import type { PeerTransport } from "../transport/peer-transport";
+import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
+import type { IceServer, PeerConnectionFactory } from "../transport/types";
 
 import type { AtRestKeyManager } from "./at-rest-key-manager";
-import type { AtRestKey } from "@/features/chat/crypto";
+import type { AtRestKey } from "../crypto";
 import {
   buildOrchestrator,
   seedSessionFromHistory,
@@ -31,7 +33,7 @@ import {
   type SessionHolder,
 } from "./chat-session";
 import type { IdentityManager } from "./identity-manager";
-import type { ActiveSessionState, ChatSession, SessionSummary } from "./types";
+import type { ActiveSessionState, ChatFileInput, ChatSession, SessionSummary } from "./types";
 import { activeSessionView, summarizeSession } from "./types";
 
 export { ImportMode };
@@ -98,8 +100,14 @@ export interface ChatControllerDeps {
   readonly repositoryFactory: (atRestKey: AtRestKey) => ConversationRepository;
   /** Factory for the underlying signaling WebSocket (testability). */
   readonly socketFactory: SignalingSocketFactory;
+  /**
+   * Platform peer-connection factory. The web app injects an adapter that
+   * constructs `RTCPeerConnection`; native apps inject their own. Threaded
+   * unchanged down to {@link wireBridge} → {@link WebRtcBridge}.
+   */
+  readonly peerConnectionFactory: PeerConnectionFactory;
   /** ICE servers for WebRTC. Empty array = loopback-only. */
-  readonly iceServers?: RTCIceServer[];
+  readonly iceServers?: readonly IceServer[];
 }
 
 export interface ChatController {
@@ -139,16 +147,17 @@ export interface ChatController {
   sendText(id: ConversationId, text: string): Promise<void>;
   sendText(text: string): Promise<void>;
   /**
-   * Per-session file send. Reads the File into memory, then drives the
-   * orchestrator's sendFile. Respects the concurrent-transfer cap and the
-   * buffered-byte limit: if sending now would exceed either, the file is
-   * queued (status `queued`) and starts when a slot frees.
+   * Per-session file send. Drives the orchestrator's sendFile with a neutral
+   * {@link ChatFileInput} payload (the web UI converts its DOM `File` at the
+   * call site). Respects the concurrent-transfer cap and the buffered-byte
+   * limit: if sending now would exceed either, the file is queued (status
+   * `queued`) and starts when a slot frees.
    *
    * Returns the transfer id (allocated immediately for in-flight starts, or
    * assigned later for queued ones — callers should not assume the id is
    * non-null for queue ordering; the snapshot is the source of truth).
    */
-  sendFile(id: ConversationId, file: File): Promise<number>;
+  sendFile(id: ConversationId, file: ChatFileInput): Promise<number>;
   /** Cancel an in-flight or queued transfer on a session. */
   cancelTransfer(id: ConversationId, transferId: number): void;
   /**
@@ -473,7 +482,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * is wired by the caller after the entry point resolves the conversation id.
    */
   function buildSessionOrchestrator(): {
-    orchestrator: import("@/features/chat/orchestrator/orchestrator").ConversationOrchestrator;
+    orchestrator: ConversationOrchestrator;
     holder: SessionHolder;
   } {
     const holder: SessionHolder = { session: null };
@@ -484,6 +493,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         repository,
         socketFactory: deps.socketFactory,
         identity: deps.identityManager.get(),
+        peerConnectionFactory: deps.peerConnectionFactory,
         iceServers: deps.iceServers,
       },
       holder,
@@ -493,7 +503,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   }
 
   function bridgePresenceCallbacks(
-    orchestrator: import("@/features/chat/orchestrator/orchestrator").ConversationOrchestrator,
+    orchestrator: ConversationOrchestrator,
   ): {
     onPeerJoin: () => void;
     onPeerLeave: () => void;
@@ -544,6 +554,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       role,
       brokerUrl: deps.brokerUrl,
       socketFactory: deps.socketFactory,
+      peerConnectionFactory: deps.peerConnectionFactory,
       iceServers: deps.iceServers,
       ...presence,
     });
@@ -846,16 +857,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       onSessionChange(session);
     },
 
-    async sendFile(id: ConversationId, file: File): Promise<number> {
+    async sendFile(id: ConversationId, file: ChatFileInput): Promise<number> {
       assertNotDisposed(disposed);
       const session = findSessionOrThrow(id);
       if (session.connectionState !== ConnectionState.Connected) {
         throw new Error("cannot sendFile before the session is connected");
       }
-      const buffer = await file.arrayBuffer();
-      const data = new Uint8Array(buffer);
+      const data = file.data;
       const name = file.name === "" ? "file.bin" : file.name;
-      const mimeType = file.type === "" ? "application/octet-stream" : file.type;
+      const mimeType = file.mimeType === "" ? "application/octet-stream" : file.mimeType;
       const nameBytes = utf8Length(name);
       if (nameBytes > MAX_MANIFEST_NAME_BYTES) {
         throw new Error(`name length ${nameBytes} exceeds ${MAX_MANIFEST_NAME_BYTES}`);
@@ -1219,7 +1229,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // Build a synthetic received message and persist it through the repo so
       // the snapshot reflects what a real orchestrator onMessage would have
       // produced. We do NOT drive the orchestrator's crypto path here.
-      const { MessageDirection } = await import("@/features/chat/store");
+      const { MessageDirection } = await import("../store");
       const timestamp = Date.now();
       const message = await repository.appendMessage(
         id,
@@ -1249,7 +1259,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // real sendText path does. The critical difference from
       // __receiveMessageForTest: we do NOT bump `lastReceivedAt`, because sent
       // messages must not advance the read marker (R9/F5 / Phase 8.5).
-      const { MessageDirection } = await import("@/features/chat/store");
+      const { MessageDirection } = await import("../store");
       const timestamp = Date.now();
       const message = await repository.appendMessage(
         id,

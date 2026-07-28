@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DataChannelTransport } from "@/features/chat/signaling/webrtc-adapter";
 
-import { type PeerTransport, toPeerTransport } from "@/features/chat/orchestrator/peer-transport";
+import { type PeerTransport, toPeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 /**
  * Minimal RTCDataChannel test double. Only the surface that

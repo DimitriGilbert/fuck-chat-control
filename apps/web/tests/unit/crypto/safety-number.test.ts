@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { computeSafetyNumber } from "@/features/chat/crypto";
-import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
+import { computeSafetyNumber } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   buildCanonicalTranscript,

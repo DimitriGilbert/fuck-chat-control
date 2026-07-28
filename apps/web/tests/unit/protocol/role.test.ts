@@ -1,9 +1,9 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { deriveRole } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { Role, type PublicKey } from "@/features/chat/protocol/types";
+import { deriveRole } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { Role, type PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function pubKey(seed: number): PublicKey {
   const sk = new Uint8Array(32);

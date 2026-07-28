@@ -7,11 +7,11 @@ import {
   generateIdentityKeyPair,
   signTranscript,
   verifyTranscript,
-} from "@/features/chat/crypto";
-import { encodeSignature } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { PUBLIC_KEY_BYTES, SIGNATURE_BYTES } from "@/features/chat/protocol/limits";
-import type { Signature } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodeSignature } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { PUBLIC_KEY_BYTES, SIGNATURE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { Signature } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   buildCanonicalTranscript,

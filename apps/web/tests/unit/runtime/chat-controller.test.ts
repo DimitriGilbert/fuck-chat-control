@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationRecord, ConversationRepository } from "@/features/chat/store";
-import { ImportMode } from "@/features/chat/store";
-import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@/features/chat/runtime/chat-controller";
-import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRecord, ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { ImportMode } from "@fuck-eu-chat-control/chat-runtime/store";
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import { stubPeerConnectionFactory } from "./_helpers";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
 import { MockSignalingSocket, parse } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
@@ -88,6 +89,7 @@ async function makeController(): Promise<ControllerKit> {
     atRestKeyManager,
     repositoryFactory: (key) => new InMemoryConversationRepository(key),
     socketFactory: mockSocketFactory(socket),
+    peerConnectionFactory: stubPeerConnectionFactory(),
     iceServers: [],
   });
   return { controller, socket, identityStorage, atRestStorage };
@@ -191,6 +193,7 @@ describe("createChatController", () => {
       atRestKeyManager: atRestKeyManager2,
       repositoryFactory: (key) => new InMemoryConversationRepository(key),
       socketFactory: mockSocketFactory(socket2),
+    peerConnectionFactory: stubPeerConnectionFactory(),
       iceServers: [],
     });
 
@@ -271,6 +274,7 @@ describe("createChatController / repositoryFactory", () => {
         return new InMemoryConversationRepository(key);
       },
       socketFactory: mockSocketFactory(new MockSignalingSocket()),
+    peerConnectionFactory: stubPeerConnectionFactory(),
       iceServers: [],
     });
     await controller.startConversation();

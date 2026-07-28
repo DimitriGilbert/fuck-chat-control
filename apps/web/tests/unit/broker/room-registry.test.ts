@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { RoomRegistry, isValidRoomId } from "@/features/chat/broker/room-registry";
+import { RoomRegistry, isValidRoomId } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
 import { MockBrokerSocket } from "./_helpers";
 
 function roomId(seed: number): string {

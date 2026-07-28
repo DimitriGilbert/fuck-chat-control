@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeSignature, encodeSignature } from "@/features/chat/protocol/codec";
-import { ProtocolError, ProtocolErrorCode } from "@/features/chat/protocol/errors";
-import { SIGNATURE_BYTES } from "@/features/chat/protocol/limits";
+import { decodeSignature, encodeSignature } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { SIGNATURE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 describe("encodeSignature / decodeSignature (IEEE-P1363 r||s, 64 bytes)", () => {
   it("round-trips a 64-byte signature", () => {

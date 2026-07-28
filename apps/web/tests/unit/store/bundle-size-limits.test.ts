@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   ImportMode,
   InMemoryConversationRepository,
@@ -8,8 +8,8 @@ import {
   StoreErrorCode,
   exportBundle,
   importBundle,
-} from "@/features/chat/store";
-import { base64ToBytes, bytesToBase64 } from "@/features/chat/store/encoding";
+} from "@fuck-eu-chat-control/chat-runtime/store";
+import { base64ToBytes, bytesToBase64 } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
 import {
   ARGON2_ITERATIONS_MAX,
   ARGON2_MEMORY_MAX_BYTES,
@@ -21,7 +21,7 @@ import {
   MAX_MESSAGES_PER_CONVERSATION,
   MAX_NONCE_BYTES,
   MAX_SALT_BYTES,
-} from "@/features/chat/store/limits";
+} from "@fuck-eu-chat-control/chat-runtime/store/limits";
 
 import { conversationId } from "./_helpers";
 
@@ -166,7 +166,7 @@ describe("import bundle — pre-auth size bounds (R8/F3)", () => {
     // hand-build a hostile payload that exceeds the cap. We re-encrypt with
     // the SAME kdf params so the import path's key derivation matches.
     const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } = await import(
-      "@/features/chat/crypto/at-rest"
+      "@fuck-eu-chat-control/chat-runtime/crypto/at-rest"
     );
     const salt = base64ToBytes(envelope.kdf.salt, MAX_SALT_BYTES);
     const nonce = base64ToBytes(envelope.aead.nonce, MAX_NONCE_BYTES);
@@ -217,7 +217,7 @@ describe("import bundle — pre-auth size bounds (R8/F3)", () => {
     const envelope = parseEnvelopeObject(validBundle);
 
     const { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } = await import(
-      "@/features/chat/crypto/at-rest"
+      "@fuck-eu-chat-control/chat-runtime/crypto/at-rest"
     );
     const salt = base64ToBytes(envelope.kdf.salt, MAX_SALT_BYTES);
     const nonce = base64ToBytes(envelope.aead.nonce, MAX_NONCE_BYTES);

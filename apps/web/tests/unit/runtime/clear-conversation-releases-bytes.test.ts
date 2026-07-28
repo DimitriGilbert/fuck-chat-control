@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@/features/chat/runtime/chat-controller";
-import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import type { ChatFileInput } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import { stubPeerConnectionFactory } from "./_helpers";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { linkLoopbackPair, mockSocketFactory } from "../orchestrator/_helpers";
@@ -75,6 +77,7 @@ async function makeController(): Promise<ChatController> {
     atRestKeyManager,
     repositoryFactory: (key) => new InMemoryConversationRepository(key),
     socketFactory: mockSocketFactory(socket),
+    peerConnectionFactory: stubPeerConnectionFactory(),
     iceServers: [],
   });
 }
@@ -135,7 +138,7 @@ async function linkControllers(
   return { idA, idB };
 }
 
-function makeImageFile(): File {
+function makeImageFile(): ChatFileInput {
   // 1x1 PNG (transparent). Small valid binary payload for an image transfer.
   const png = Uint8Array.from([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -144,7 +147,7 @@ function makeImageFile(): File {
     0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
     0x42, 0x60, 0x82,
   ]);
-  return new File([png], "pixel.png", { type: "image/png" });
+  return { data: png, name: "pixel.png", mimeType: "image/png" };
 }
 
 describe("clearConversation releases bytes + detaches inbound handlers (R9/F2)", () => {
@@ -227,11 +230,11 @@ describe("clearConversation releases bytes + detaches inbound handlers (R9/F2)",
       // assertion: after clearConversation, the active snapshot's transfer
       // list is empty (queued entries dropped) and a subsequent getHistory
       // still reflects only persisted text (no transfer rows leak in).
-      const big = new File(
-        [new Uint8Array(1024 * 1024)],
-        "big.bin",
-        { type: "application/octet-stream" },
-      );
+      const big: ChatFileInput = {
+        data: new Uint8Array(1024 * 1024),
+        name: "big.bin",
+        mimeType: "application/octet-stream",
+      };
       // Fire several sends without awaiting; the concurrent cap queues the
       // extras. We do NOT need to observe the queued state precisely — the
       // post-clear invariant is what we assert.

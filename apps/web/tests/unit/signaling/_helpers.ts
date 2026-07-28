@@ -1,4 +1,4 @@
-import type { SignalingSocket } from "@/features/chat/signaling/signaling-client";
+import type { SignalingSocket } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 
 export class MockSignalingSocket implements SignalingSocket {
   public readyState = 0;

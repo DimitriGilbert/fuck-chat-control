@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import type { AtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { InMemoryConversationRepository } from "@/features/chat/store/in-memory-repo";
-import { LockableRepository } from "@/features/chat/store/lockable-repo";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { AtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store/in-memory-repo";
+import { LockableRepository } from "@fuck-eu-chat-control/chat-runtime/store/lockable-repo";
 
 /**
  * CR-7: when the {@link AtRestKeyManager} transitions to locked, the

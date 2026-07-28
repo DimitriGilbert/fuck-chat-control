@@ -6,8 +6,8 @@ import {
   GlareResolver,
   isPolite,
   resolveGlare,
-} from "@/features/chat/signaling/state-machine";
-import { Role } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 describe("ConnectionStateMachine — valid transitions", () => {
   it("starts in idle", () => {

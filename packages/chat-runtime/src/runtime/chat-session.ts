@@ -1,22 +1,23 @@
-import { AuthMode, Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
+import { AuthMode, Role } from "../protocol/types";
+import type { ConversationId } from "../protocol/types";
+import { ConversationOrchestrator } from "../orchestrator/orchestrator";
 import type {
   OrchestratorHandlers,
   TransferSummary,
-} from "@/features/chat/orchestrator/orchestrator";
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
-import { PakeError } from "@/features/chat/crypto";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
+} from "../orchestrator/orchestrator";
+import type { PeerTransport } from "../transport/peer-transport";
+import { OrchestratorError, OrchestratorErrorCode } from "../orchestrator/errors";
+import { PakeError } from "../crypto";
+import { ConnectionState } from "../signaling/state-machine";
+import type { SignalingSocketFactory } from "../signaling/signaling-client";
 import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
-} from "@/features/chat/store";
-import type { IdentityKeyPair } from "@/features/chat/crypto";
-import type { ReceivedFile } from "@/features/chat/framing";
+} from "../store";
+import type { IdentityKeyPair } from "../crypto";
+import type { ReceivedFile } from "../framing";
+import type { IceServer, PeerConnectionFactory } from "../transport/types";
 
 import type { ChatSession } from "./types";
 import { applyTransferEvent, type TransferEvent } from "./transfer-state";
@@ -49,7 +50,9 @@ export interface BuildSessionInput {
   readonly repository: ConversationRepository;
   readonly socketFactory: SignalingSocketFactory;
   readonly identity: IdentityKeyPair;
-  readonly iceServers?: RTCIceServer[];
+  /** Platform peer-connection factory (web adapter or native adapter). */
+  readonly peerConnectionFactory: PeerConnectionFactory;
+  readonly iceServers?: readonly IceServer[];
 }
 
 /**
@@ -206,7 +209,8 @@ export function wireBridge(params: {
   role: Role;
   brokerUrl: string;
   socketFactory: SignalingSocketFactory;
-  iceServers?: RTCIceServer[];
+  peerConnectionFactory: PeerConnectionFactory;
+  iceServers?: readonly IceServer[];
   onPeerJoin: () => void;
   onPeerLeave: () => void;
   onSignalingClosed: () => void;
@@ -220,6 +224,7 @@ export function wireBridge(params: {
     roomId: conversationId,
     role,
     socketFactory: params.socketFactory,
+    peerConnectionFactory: params.peerConnectionFactory,
     iceServers: params.iceServers,
     transportReady: (transport: PeerTransport): void => {
       try {

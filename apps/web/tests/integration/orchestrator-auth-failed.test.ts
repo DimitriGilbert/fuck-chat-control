@@ -8,35 +8,36 @@ import {
   generateAtRestKey,
   generateIdentityKeyPair,
   PakeError,
-} from "@/features/chat/crypto";
-import type { IdentityKeyPair, PakeWasmModule } from "@/features/chat/crypto";
-import { encodePublicKey } from "@/features/chat/protocol/codec";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import { AuthFailedRetryBlocked } from "@/features/chat/store";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationRepository } from "@/features/chat/store";
-import { AUTH_FAILED_STORAGE_KEY } from "@/features/chat/store/auth-failed-store";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IdentityKeyPair, PakeWasmModule } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { AuthFailedRetryBlocked } from "@fuck-eu-chat-control/chat-runtime/store";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { AUTH_FAILED_STORAGE_KEY } from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
 
 import {
   ConversationOrchestrator,
   type OrchestratorDeps,
   type OrchestratorHandlers,
-} from "@/features/chat/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import {
   linkLoopbackPair,
   mockSocketFactory,
   MockSignalingSocket,
 } from "../unit/orchestrator/_helpers";
-import { installLocalStorage, type MemoryStorage } from "../unit/store/_helpers";
+import { setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
+import { MemoryStorage } from "../unit/store/_helpers";
 
 const PKG_JS = fileURLToPath(
-  new URL("../../src/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
+  new URL("../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../src/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL("../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
 );
 
 // Synchronous init: the browser path uses fetch+WebAssembly.instantiateStreaming
@@ -403,16 +404,14 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
   });
 
   describe("true reload across a NEW repository (SEC-1 durable localStorage store)", () => {
-    // The Node integration environment has no `localStorage` global; install
-    // an in-memory one for the durable-store paths the orchestrator now
-    // touches during start()/join() hydration and failHandshake.
+    // A.6: the durable auth-failed store reads/writes through the injectable
+    // DurableStorage. Register an in-memory store for the orchestrator's
+    // start()/join() hydration and failHandshake paths.
     let storage: MemoryStorage;
-    let teardownLocalStorage: () => void;
 
     beforeAll(() => {
-      const installed = installLocalStorage();
-      storage = installed.storage;
-      teardownLocalStorage = installed.teardown;
+      storage = new MemoryStorage();
+      setDurableStorage(storage);
     });
 
     beforeEach(() => {
@@ -422,7 +421,7 @@ describe("ConversationOrchestrator durable auth-failed (R7/F3)", () => {
     });
 
     afterAll(() => {
-      teardownLocalStorage();
+      setDurableStorage(new MemoryStorage());
     });
 
     it("a fresh orchestrator + fresh repo on a previously-auth-failed conversation rejects retry via the durable store", async () => {

@@ -1,13 +1,13 @@
-import { generateAtRestKey, unwrapKey, wrapKey } from "@/features/chat/crypto";
-import { CryptoError, CryptoErrorCode } from "@/features/chat/crypto/errors";
-import type { AtRestKey, WrappedKey } from "@/features/chat/crypto";
-import { base64ToBytes, bytesToBase64 } from "@/features/chat/store/encoding";
+import { generateAtRestKey, unwrapKey, wrapKey } from "../crypto";
+import { CryptoError, CryptoErrorCode } from "../crypto/errors";
+import type { AtRestKey, WrappedKey } from "../crypto";
+import { base64ToBytes, bytesToBase64 } from "../store/encoding";
 
 export const AT_REST_STORAGE_KEY = "fck-chat-v1:at-rest";
 
 /**
  * Storage-shaped dependency; same surface as
- * {@link "@/features/chat/runtime/identity-manager"}.IdentityStorage but
+ * {@link "./identity-manager"}.IdentityStorage but
  * redeclared locally to keep the two modules independently usable.
  */
 export interface AtRestStorage {

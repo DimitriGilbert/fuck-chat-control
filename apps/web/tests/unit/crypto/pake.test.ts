@@ -14,8 +14,8 @@ import {
   roleToSideByte,
   sha256,
   __setWasmModuleForTests,
-} from "@/features/chat/crypto";
-import type { IdentityKeyPair, PakeWasmModule } from "@/features/chat/crypto";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IdentityKeyPair, PakeWasmModule } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   PAKE_MESSAGE_BYTES,
   PAKE_PROTOCOL_ID,
@@ -23,16 +23,16 @@ import {
   PAKE_ROLE_B,
   PAKE_SHARE_BYTES,
   PROTOCOL_VERSION,
-} from "@/features/chat/protocol/limits";
-import { AuthMode, Role } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { AuthMode, Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-import { decodePakeShare, encodePakeShare } from "@/features/chat/orchestrator/handshake-codec";
+import { decodePakeShare, encodePakeShare } from "@fuck-eu-chat-control/chat-runtime/orchestrator/handshake-codec";
 
 const PKG_JS = fileURLToPath(
-  new URL("../../../src/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
+  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
-  new URL("../../../src/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
+  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2_bg.wasm", import.meta.url),
 );
 
 // Synchronous init: the browser path uses fetch+WebAssembly.instantiateStreaming
@@ -145,7 +145,7 @@ describe("deriveSessionKeys pakeSecret binding (HKDF key schedule)", () => {
   // Reuse the session-test helper style: build a deterministic transcript and
   // feed two different pakeSecrets; the traffic keys MUST differ.
   async function makeIdentity(): Promise<IdentityKeyPair> {
-    const { generateIdentityKeyPair } = await import("@/features/chat/crypto");
+    const { generateIdentityKeyPair } = await import("@fuck-eu-chat-control/chat-runtime/crypto");
     return generateIdentityKeyPair();
   }
 
@@ -154,7 +154,7 @@ describe("deriveSessionKeys pakeSecret binding (HKDF key schedule)", () => {
     const b = await makeIdentity();
     const { buildCanonicalTranscript } = await import("./_helpers");
     const { conversationId, sessionId } = await import("./_helpers");
-    const { generateEphemeralKeyPair } = await import("@/features/chat/crypto");
+    const { generateEphemeralKeyPair } = await import("@fuck-eu-chat-control/chat-runtime/crypto");
     const ephA = await generateEphemeralKeyPair();
     const ephB = await generateEphemeralKeyPair();
     const transcript = buildCanonicalTranscript(
@@ -187,7 +187,7 @@ describe("deriveSessionKeys pakeSecret binding (HKDF key schedule)", () => {
     const b = await makeIdentity();
     const { buildCanonicalTranscript } = await import("./_helpers");
     const { conversationId, sessionId } = await import("./_helpers");
-    const { generateEphemeralKeyPair } = await import("@/features/chat/crypto");
+    const { generateEphemeralKeyPair } = await import("@fuck-eu-chat-control/chat-runtime/crypto");
     const ephA = await generateEphemeralKeyPair();
     const ephB = await generateEphemeralKeyPair();
     const transcriptBase = buildCanonicalTranscript(
@@ -227,7 +227,7 @@ describe("deriveSessionKeys pakeSecret binding (HKDF key schedule)", () => {
     const b = await makeIdentity();
     const { buildCanonicalTranscript } = await import("./_helpers");
     const { conversationId, sessionId } = await import("./_helpers");
-    const { generateEphemeralKeyPair } = await import("@/features/chat/crypto");
+    const { generateEphemeralKeyPair } = await import("@fuck-eu-chat-control/chat-runtime/crypto");
     const ephA = await generateEphemeralKeyPair();
     const ephB = await generateEphemeralKeyPair();
     const transcriptBase = buildCanonicalTranscript(

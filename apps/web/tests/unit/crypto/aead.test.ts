@@ -6,15 +6,15 @@ import {
   encryptFrame,
   generateAtRestKey,
   ReplayWindow,
-} from "@/features/chat/crypto";
-import { deriveNonce } from "@/features/chat/protocol/codec";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { deriveNonce } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import {
   GCM_NONCE_BYTES,
   PROTOCOL_VERSION,
   REPLAY_WINDOW_SEQUENCES,
-} from "@/features/chat/protocol/limits";
-import { FrameType } from "@/features/chat/protocol/types";
-import type { FrameAad, SessionId } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { FrameAad, SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { bytesEqual, sessionId } from "./_helpers";
 

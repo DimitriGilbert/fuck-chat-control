@@ -1,8 +1,8 @@
-import { derivePublicKeyFromPrivate, generateIdentityKeyPair, signTranscript } from "@/features/chat/crypto";
-import type { IdentityKeyPair } from "@/features/chat/crypto";
-import { decodePublicKey } from "@/features/chat/protocol/codec";
-import type { PublicKey, Signature, Transcript } from "@/features/chat/protocol/types";
-import { base64ToBytes, bytesToBase64 } from "@/features/chat/store/encoding";
+import { derivePublicKeyFromPrivate, generateIdentityKeyPair, signTranscript } from "../crypto";
+import type { IdentityKeyPair } from "../crypto";
+import { decodePublicKey } from "../protocol/codec";
+import type { PublicKey, Signature, Transcript } from "../protocol/types";
+import { base64ToBytes, bytesToBase64 } from "../store/encoding";
 
 export const IDENTITY_STORAGE_KEY = "fck-chat-v1:identity";
 

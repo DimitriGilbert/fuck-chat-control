@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "vp build",
-    "build:wasm:spake2": "cd src/wasm/spake2 && wasm-pack build --target web",
+    "build:wasm:spake2": "cd ../../packages/chat-runtime/wasm/spake2 && wasm-pack build --target web",
     "serve": "vp preview",
     "dev": "vp dev",
     "check-types": "tsc --noEmit",
@@ -14,6 +14,7 @@
     "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:e2e"
   },
   "dependencies": {
+    "@fuck-eu-chat-control/chat-runtime": "workspace:*",
     "@fuck-eu-chat-control/env": "workspace:*",
     "@fuck-eu-chat-control/ui": "workspace:*",
     "@noble/curves": "^1.9.7",

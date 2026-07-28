@@ -71,22 +71,41 @@ export interface PakeStateHandle {
 }
 
 /**
- * Path to the committed WASM module. Kept as a string constant so the
- * dynamic-import expression below does not trip the `no-string-arg import`
- * lint and so this is the single place to update if the pkg relocates.
+ * Default specifier of the committed WASM module, resolved relative to THIS
+ * file (`packages/chat-runtime/src/crypto/pake.ts`). Two `../` segments climb
+ * from `crypto/` → `src/` → `chat-runtime/`, then `wasm/spake2/pkg/...` lands
+ * at the committed `packages/chat-runtime/wasm/spake2/pkg/` artifacts.
  *
- * The specifier is resolved relative to THIS file
- * (`src/features/chat/crypto/pake.ts`), so three `../` segments climb from
- * `crypto/` → `chat/` → `features/` → `src/`, then `wasm/spake2/pkg/...`
- * lands at the committed `src/wasm/spake2/pkg/` artifacts in dev. In the
- * production bundle this module's chunk is emitted at `/assets/<hash>.js`;
- * URL resolution of `../../../wasm/spake2/pkg/fck_spake2.js` against that
- * URL walks up through `/assets/` to the site root and back down to
- * `/wasm/spake2/pkg/fck_spake2.js` — exactly the path the
- * `emit-spake2-pkg` vite plugin emits the pkg files to in
- * `vite.config.ts`. Both environments resolve to a real file.
+ * This default is only used when no override has been registered via
+ * {@link setSpake2ModuleUrl}. The web app overrides it at boot with the
+ * absolute URL its build serves (`/wasm/spake2/pkg/fck_spake2.js`, the path
+ * the `emit-spake2-pkg` vite plugin emits); native apps override with their
+ * platform's asset URL. Keeping a relative fallback lets Node tests resolve
+ * the committed pkg directly from the source tree.
  */
-const SPAKE2_WASM_MODULE_ID = "../../../wasm/spake2/pkg/fck_spake2.js";
+const DEFAULT_SPAKE2_MODULE_SPECIFIER = "../../wasm/spake2/pkg/fck_spake2.js";
+
+/**
+ * Override for the SPAKE2 module specifier, set by {@link setSpake2ModuleUrl}.
+ * When non-null, {@link loadWasm} imports from this URL instead of the
+ * relative default — this is how each platform points the loader at its own
+ * served/assets location without the runtime core taking a DOM dependency.
+ */
+let spake2ModuleUrl: string | null = null;
+
+/**
+ * Register the URL/specifier the SPAKE2 loader imports from. Each platform
+ * calls this once at boot BEFORE any PAKE handshake runs:
+ *  - web: `setSpake2ModuleUrl("/wasm/spake2/pkg/fck_spake2.js")` (the path
+ *    the `emit-spake2-pkg` vite plugin emits the pkg to);
+ *  - native: the platform's asset URL (e.g. a bundled resource URI).
+ *
+ * If never called, the loader falls back to the relative default that
+ * resolves against this file in the source tree (used by Node tests).
+ */
+export function setSpake2ModuleUrl(url: string): void {
+  spake2ModuleUrl = url;
+}
 
 let wasmModulePromise: Promise<PakeWasmModule> | null = null;
 
@@ -104,7 +123,7 @@ let wasmModulePromise: Promise<PakeWasmModule> | null = null;
  */
 async function loadWasm(): Promise<PakeWasmModule> {
   if (wasmModulePromise === null) {
-    const specifier = SPAKE2_WASM_MODULE_ID;
+    const specifier = spake2ModuleUrl ?? DEFAULT_SPAKE2_MODULE_SPECIFIER;
     const mod = (await import(/* @vite-ignore */ specifier)) as unknown as PakeWasmModuleBinding;
     await mod.default();
     wasmModulePromise = Promise.resolve(mod as PakeWasmModule);

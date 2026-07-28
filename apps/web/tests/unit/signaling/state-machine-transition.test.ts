@@ -4,7 +4,7 @@ import {
   ConnectionState,
   ConnectionStateMachine,
   InvalidTransitionError,
-} from "@/features/chat/signaling/state-machine";
+} from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 
 describe("ConnectionStateMachine — illegal transitions throw InvalidTransitionError", () => {
   it("throws InvalidTransitionError on idle -> connected", () => {

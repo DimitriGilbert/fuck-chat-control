@@ -1,8 +1,8 @@
 import { p256 } from "@noble/curves/p256";
 
-import { encodeConversationId, encodePublicKey } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
+import { encodeConversationId, encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 export { bytesEqual } from "../crypto/_helpers";
 

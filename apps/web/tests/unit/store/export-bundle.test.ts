@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   ImportMode,
   InMemoryConversationRepository,
   StoreErrorCode,
   exportBundle,
   importBundle,
-} from "@/features/chat/store";
-import type { ImportResult } from "@/features/chat/store";
+} from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ImportResult } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { bytesEqual, conversationId, deterministicPublicKey, fingerprintOf } from "./_helpers";
 

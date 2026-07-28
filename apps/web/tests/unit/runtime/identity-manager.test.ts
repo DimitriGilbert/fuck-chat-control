@@ -1,23 +1,23 @@
 import { describe, expect, it } from "vitest";
 
-import { signTranscript } from "@/features/chat/crypto";
+import { signTranscript } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   AuthMode,
   type ConversationId,
   type PublicKey,
   type SessionId,
   type Transcript,
-} from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import {
   PROTOCOL_VERSION,
   SESSION_ID_BYTES,
   TRANSCRIPT_VERSION,
-} from "@/features/chat/protocol/limits";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 import {
   createIdentityManager,
   IDENTITY_STORAGE_KEY,
-} from "@/features/chat/runtime/identity-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
 import { bytesEqual, fakeStorage } from "./_helpers";
 

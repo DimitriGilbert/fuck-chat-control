@@ -21,8 +21,12 @@ const appsWebRoot = dirname(fileURLToPath(import.meta.url));
  * Source-of-truth directory for the committed wasm-bindgen `--target web`
  * artifacts. `wasm-pack` rebuilds here; the build step below copies them into
  * the production output so the runtime dynamic import resolves in prod.
+ *
+ * The WASM source lives in `packages/chat-runtime/wasm/spake2/` (moved out of
+ * apps/web in Phase A.3 when the runtime became a shared package). The built
+ * `pkg/` stays committed there so CI needs no Rust toolchain.
  */
-const spake2PkgDir = resolve(appsWebRoot, "src/wasm/spake2/pkg");
+const spake2PkgDir = resolve(appsWebRoot, "../../packages/chat-runtime/wasm/spake2/pkg");
 /**
  * Output path the SPAKE2 loader resolves at runtime. `pake.ts` does
  * `import("../wasm/spake2/pkg/fck_spake2.js")` relative to its own chunk; in

@@ -1,28 +1,28 @@
 import { p256 } from "@noble/curves/p256";
 import { describe, expect, it } from "vitest";
 
-import { derivePublicKeyFromPrivate, verifyTranscript } from "@/features/chat/crypto";
-import { encodePublicKey } from "@/features/chat/protocol/codec";
+import { derivePublicKeyFromPrivate, verifyTranscript } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import {
   PROTOCOL_VERSION,
   PUBLIC_KEY_BYTES,
   SESSION_ID_BYTES,
   TRANSCRIPT_VERSION,
-} from "@/features/chat/protocol/limits";
-import { AuthMode } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type {
   ConversationId,
   PublicKey,
   SessionId,
   Signature,
   Transcript,
-} from "@/features/chat/protocol/types";
-import { encodeConversationId, encodeSessionId } from "@/features/chat/protocol/codec";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { encodeConversationId, encodeSessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 
 import {
   createIdentityManager,
   IDENTITY_STORAGE_KEY,
-} from "@/features/chat/runtime/identity-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
 import { bytesEqual, fakeStorage } from "./_helpers";
 

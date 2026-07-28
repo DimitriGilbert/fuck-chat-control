@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { randomBytes } from "@/features/chat/crypto/primitives";
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
+import { randomBytes } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 import {
   conversationIdToHex,
@@ -10,8 +10,8 @@ import {
   generateConversationId,
   hexToConversationId,
   parseInvitation,
-} from "@/features/chat/orchestrator/invitation";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
+import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;

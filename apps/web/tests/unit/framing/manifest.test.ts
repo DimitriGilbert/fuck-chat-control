@@ -5,8 +5,8 @@ import {
   MAX_INCOMPLETE_TRANSFER_BYTES,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
-} from "@/features/chat/protocol/limits";
-import { FrameType } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   decodeManifest,
@@ -15,8 +15,8 @@ import {
   FramingError,
   FramingErrorCode,
   sha256,
-} from "@/features/chat/framing";
-import type { FileManifest, FrameReceiverHandlers } from "@/features/chat/framing";
+} from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { FileManifest, FrameReceiverHandlers } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { forgeFrame, makePair, utf8 } from "./_helpers";
 
 function countingHandlers(): { count: number; handlers: FrameReceiverHandlers } {

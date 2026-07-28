@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_BUFFERED_DATA_BYTES } from "@/features/chat/protocol/limits";
-import { ControlSubtype, FrameType } from "@/features/chat/protocol/types";
+import { MAX_BUFFERED_DATA_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { ControlSubtype, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-import { decodeWireFrame, MAX_CHUNK_PLAINTEXT_BYTES } from "@/features/chat/framing";
-import type { FrameReceiverHandlers, ReceivedFile } from "@/features/chat/framing";
+import { decodeWireFrame, MAX_CHUNK_PLAINTEXT_BYTES } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { FrameReceiverHandlers, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { bytesEqual, deterministicData, makePair, utf8 } from "./_helpers";
 import type { LinkedPair } from "./_helpers";
 

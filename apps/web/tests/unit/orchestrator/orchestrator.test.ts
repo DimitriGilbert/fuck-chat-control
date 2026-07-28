@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey, generateIdentityKeyPair } from "@/features/chat/crypto";
-import type { IdentityKeyPair } from "@/features/chat/crypto";
-import { encodePublicKey } from "@/features/chat/protocol/codec";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationRepository } from "@/features/chat/store";
+import { generateAtRestKey, generateIdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
   ConversationOrchestrator,
   type OrchestratorDeps,
   type OrchestratorHandlers,
-} from "@/features/chat/orchestrator/orchestrator";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
-import type { PeerTransport } from "@/features/chat/orchestrator/peer-transport";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "./_helpers";
 

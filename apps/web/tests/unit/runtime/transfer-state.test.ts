@@ -4,7 +4,7 @@ import {
   applyTransferEvent,
   type TransferEvent,
   type TransferState,
-} from "@/features/chat/runtime/transfer-state";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/transfer-state";
 
 describe("transfer-state reducer", () => {
   const startSent: TransferEvent = {

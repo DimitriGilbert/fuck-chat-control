@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { BrokerConnection } from "@/features/chat/broker/connection";
-import { RoomRegistry } from "@/features/chat/broker/room-registry";
+import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
+import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
 import { MockBrokerSocket } from "./_helpers";
 
 function roomId(seed: number): string {

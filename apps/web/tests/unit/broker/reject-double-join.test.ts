@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { BrokerConnection } from "@/features/chat/broker/connection";
+import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
 import {
   BROKER_CLOSE_CODES,
   BROKER_CLOSE_REASONS,
   BrokerErrorCode,
-} from "@/features/chat/broker/errors";
-import { RoomRegistry } from "@/features/chat/broker/room-registry";
+} from "@fuck-eu-chat-control/chat-runtime/broker/errors";
+import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
 
 import { MockBrokerSocket } from "./_helpers";
 

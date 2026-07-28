@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import { BrowserDbConversationRepository } from "@/features/chat/store";
-import { StoreErrorCode } from "@/features/chat/store";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
+import { StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { conversationId } from "./_helpers";
 

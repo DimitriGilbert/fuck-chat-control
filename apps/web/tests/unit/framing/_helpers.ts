@@ -3,15 +3,15 @@ import {
   encryptFrame,
   generateEphemeralKeyPair,
   generateIdentityKeyPair,
-} from "@/features/chat/crypto";
-import type { SessionKeys, AESKey } from "@/features/chat/crypto";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { SessionKeys, AESKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   MAX_BUFFERED_DATA_BYTES,
   PROTOCOL_VERSION,
   SESSION_ID_BYTES,
-} from "@/features/chat/protocol/limits";
-import { encodeSessionId } from "@/features/chat/protocol/codec";
-import type { FrameAad, FrameType, PublicKey, SessionId } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { encodeSessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import type { FrameAad, FrameType, PublicKey, SessionId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { buildCanonicalTranscript, conversationId } from "../crypto/_helpers";
 import {
@@ -20,8 +20,8 @@ import {
   type FrameReceiverConfig,
   type FrameReceiverHandlers,
   type FrameTransport,
-} from "@/features/chat/framing";
-import { FrameSender } from "@/features/chat/framing";
+} from "@fuck-eu-chat-control/chat-runtime/framing";
+import { FrameSender } from "@fuck-eu-chat-control/chat-runtime/framing";
 
 interface PeerMaterial {
   readonly identityPublicKey: PublicKey;

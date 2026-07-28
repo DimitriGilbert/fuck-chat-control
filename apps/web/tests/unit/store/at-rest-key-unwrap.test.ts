@@ -5,8 +5,8 @@ import {
   generateAtRestKey,
   unwrapKey,
   wrapKey,
-} from "@/features/chat/crypto";
-import type { WrappedKey } from "@/features/chat/crypto";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { WrappedKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 
 import { bytesEqual } from "./_helpers";
 

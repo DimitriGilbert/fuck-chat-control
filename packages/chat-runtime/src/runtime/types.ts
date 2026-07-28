@@ -1,11 +1,26 @@
-import type { AuthMode, ConversationId } from "@/features/chat/protocol/types";
-import type { ConnectionState } from "@/features/chat/signaling/state-machine";
-import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
-import type { ConversationMessage, ConversationRecord } from "@/features/chat/store";
-import type { ReceivedFile } from "@/features/chat/framing";
+import type { AuthMode, ConversationId } from "../protocol/types";
+import type { ConnectionState } from "../signaling/state-machine";
+import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
+import type { ConversationMessage, ConversationRecord } from "../store";
+import type { ReceivedFile } from "../framing";
 
 import type { TransferState } from "./transfer-state";
 import type { WebRtcBridge } from "./webrtc-bridge";
+
+/**
+ * Platform-neutral file payload for outgoing transfers. Replaces the DOM
+ * `File` the web UI used to pass in — callers on every platform read their
+ * platform's file handle into a `Uint8Array` and pass {data, name, mimeType}
+ * here. The runtime never touches the DOM `File` type.
+ */
+export interface ChatFileInput {
+  /** Raw file bytes. Read into memory by the caller before sending. */
+  readonly data: Uint8Array;
+  /** Original filename; defaults to `file.bin` when the caller passes `""`. */
+  readonly name: string;
+  /** MIME type; defaults to `application/octet-stream` when the caller passes `""`. */
+  readonly mimeType: string;
+}
 
 /**
  * The per-session record held in the controller's session map. Each entry owns

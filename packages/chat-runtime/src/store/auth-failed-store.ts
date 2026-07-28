@@ -1,33 +1,21 @@
-import type { ConversationId } from "@/features/chat/protocol/types";
+import type { ConversationId } from "../protocol/types";
 
 import { bytesToHex } from "./encoding";
+import { getDurableStorage } from "./durable-storage";
 
 /**
- * localStorage key for the durable auth-failed flag.
+ * Durable key for the auth-failed flag.
  *
  * The value is a JSON-encoded `Record<string, true>` keyed by the lowercase
  * hex of the {@link ConversationId} (matching the repository's `idKey`
  * convention). The payload is plain metadata — NOT ciphertext, NOT key
- * material — so localStorage's synchronous, reload-surviving semantics are
- * exactly what the R7/F3 durability fix needs without waiting for the
- * Phase 9/10 wa-sqlite/OPFS BrowserDb.
+ * material — so a synchronous, reload-surviving KV store is exactly what
+ * the R7/F3 durability fix needs.
  */
 export const AUTH_FAILED_STORAGE_KEY = "fck-chat-v1:auth-failed";
 
-/**
- * SSR guard. The orchestrator and store modules are imported during SSR
- * (TanStack Start renders the shell on the server), where `localStorage` does
- * not exist. Every access here first checks `typeof localStorage ===
- * "undefined"` and degrades to a no-op / false read. This must NEVER throw on
- * the server.
- */
-function localStorageSafe(): Storage | null {
-  if (typeof localStorage === "undefined") return null;
-  return localStorage;
-}
-
 function readRecord(): Record<string, true> {
-  const store = localStorageSafe();
+  const store = getDurableStorage();
   if (store === null) return {};
   const raw = store.getItem(AUTH_FAILED_STORAGE_KEY);
   if (raw === null) return {};
@@ -47,7 +35,7 @@ function readRecord(): Record<string, true> {
 }
 
 function writeRecord(record: Record<string, true>): void {
-  const store = localStorageSafe();
+  const store = getDurableStorage();
   if (store === null) return;
   store.setItem(AUTH_FAILED_STORAGE_KEY, JSON.stringify(record));
 }
@@ -59,10 +47,10 @@ function keyOf(id: ConversationId): string {
 /**
  * Persist the auth-failed flag for a conversation so it survives a reload.
  *
- * SSR-safe: resolves as a no-op when `localStorage` is absent (server render).
- * Never throws — a failed write only means the flag will not survive a
- * process restart, and the caller (the orchestrator) treats persistence as
- * best-effort.
+ * Best-effort: resolves as a no-op when no durable store has been registered
+ * (the platform must call `setDurableStorage` at boot). Never throws — a
+ * failed write only means the flag will not survive a process restart, and
+ * the caller (the orchestrator) treats persistence as best-effort.
  */
 export async function markAuthFailedDurable(id: ConversationId): Promise<void> {
   const record = readRecord();
@@ -73,9 +61,10 @@ export async function markAuthFailedDurable(id: ConversationId): Promise<void> {
 /**
  * Read the durable auth-failed flag for a conversation.
  *
- * SSR-safe: returns `false` when `localStorage` is absent. This is the
- * cross-session source of truth consulted during `start()`/`join()` hydration
- * when the in-repo read is unavailable or returns a stale false.
+ * Returns `false` when no durable store has been registered or the flag is
+ * absent. This is the cross-session source of truth consulted during
+ * `start()`/`join()` hydration when the in-repo read is unavailable or
+ * returns a stale false.
  */
 export async function getAuthFailedDurable(id: ConversationId): Promise<boolean> {
   const record = readRecord();

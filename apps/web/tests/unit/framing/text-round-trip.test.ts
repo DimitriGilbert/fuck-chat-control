@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import { GCM_NONCE_BYTES, FRAME_HEADER_BYTES } from "@/features/chat/protocol/limits";
-import { ControlSubtype, FrameType } from "@/features/chat/protocol/types";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { GCM_NONCE_BYTES, FRAME_HEADER_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { ControlSubtype, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   FrameReceiver,
   FramingError,
   FramingErrorCode,
   decodeWireFrame,
-} from "@/features/chat/framing";
-import type { FrameReceiverHandlers } from "@/features/chat/framing";
+} from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { FrameReceiverHandlers } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { bytesEqual, makePair, sessionId, utf8 } from "./_helpers";
 
 function recordingHandlers(): { texts: Uint8Array[]; handlers: FrameReceiverHandlers } {

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { encryptAtRest, generateAtRestKey, wrapKey } from "@/features/chat/crypto";
+import { encryptAtRest, generateAtRestKey, wrapKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   __buildAtRestNonceForTests,
-} from "@/features/chat/crypto/at-rest";
-import { GCM_NONCE_BYTES } from "@/features/chat/protocol/limits";
+} from "@fuck-eu-chat-control/chat-runtime/crypto/at-rest";
+import { GCM_NONCE_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 import { bytesEqual } from "./_helpers";
 

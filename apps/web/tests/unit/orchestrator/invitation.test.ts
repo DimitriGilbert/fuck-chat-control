@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { randomBytes } from "@/features/chat/crypto/primitives";
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { ConversationId } from "@/features/chat/protocol/types";
+import { randomBytes } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   conversationIdToHex,
@@ -11,8 +11,8 @@ import {
   generateConversationId,
   hexToConversationId,
   parseInvitation,
-} from "@/features/chat/orchestrator/invitation";
-import { OrchestratorError, OrchestratorErrorCode } from "@/features/chat/orchestrator/errors";
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
+import { OrchestratorError, OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 const HEX_PATTERN = /^[0-9a-f]{32}$/;
 const SAMPLE_BASE_URL = "https://app.example";

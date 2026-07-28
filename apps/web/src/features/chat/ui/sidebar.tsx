@@ -19,11 +19,11 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { deriveSessionLabel } from "@/features/chat/runtime/types";
-import type { SessionSummary } from "@/features/chat/runtime/types";
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { deriveSessionLabel } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type { SessionSummary } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { CONNECTION_STATE_LABELS } from "@/features/chat/ui/chat-status";
 import { SettingsSheetTrigger } from "@/features/chat/ui/settings-sheet";
 import { sortSessions } from "@/features/chat/ui/sort-sessions";

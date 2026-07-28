@@ -23,7 +23,7 @@ import {
   TRANSCRIPT_VERSION,
   HANDSHAKE_TIMEOUT_MS,
   FRAME_PARSE_TIMEOUT_MS,
-} from "@/features/chat/protocol/limits";
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 describe("protocol v1 frozen limits", () => {
   it("pins the version and width constants", () => {

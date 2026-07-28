@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import { createChatController, type ChatController } from "@/features/chat/runtime/chat-controller";
-import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { createChatController, type ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import { stubPeerConnectionFactory } from "./_helpers";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
@@ -76,6 +77,7 @@ async function makeController(): Promise<ChatController> {
     atRestKeyManager,
     repositoryFactory: (key) => new InMemoryConversationRepository(key),
     socketFactory: mockSocketFactory(socket),
+    peerConnectionFactory: stubPeerConnectionFactory(),
     iceServers: [],
   });
 }

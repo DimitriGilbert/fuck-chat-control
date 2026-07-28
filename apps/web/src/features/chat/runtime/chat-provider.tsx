@@ -1,19 +1,22 @@
-import { createAtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
-import type { AtRestKeyManager } from "@/features/chat/runtime/at-rest-key-manager";
+import { createAtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import type { AtRestKeyManager } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import {
   createChatController,
   initialChatControllerState,
-} from "@/features/chat/runtime/chat-controller";
-import type { ChatController, ChatControllerState } from "@/features/chat/runtime/chat-controller";
-import { createIdentityManager } from "@/features/chat/runtime/identity-manager";
-import type { IdentityManager } from "@/features/chat/runtime/identity-manager";
-import { InMemoryConversationRepository } from "@/features/chat/store";
-import type { ConversationRepository } from "@/features/chat/store";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import type { ChatController, ChatControllerState } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
+import type { IdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
+import { InMemoryConversationRepository, setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { setSpake2ModuleUrl } from "@fuck-eu-chat-control/chat-runtime/crypto/pake";
 import type {
   SignalingSocket,
   SignalingSocketFactory,
-} from "@/features/chat/signaling/signaling-client";
-import type { AtRestKey } from "@/features/chat/crypto";
+} from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
+import type { PeerConnectionFactory } from "@fuck-eu-chat-control/chat-runtime/transport/types";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 
 import * as React from "react";
 
@@ -131,6 +134,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
 
     try {
       const { brokerUrl, baseUrl } = resolveBrowserDeps();
+      // Phase A.6: register the platform's durable KV store (window.localStorage)
+      // and the SPAKE2 WASM module URL the runtime imports lazily. These MUST be
+      // registered before createChatController so the runtime core (which no
+      // longer touches DOM globals directly) reads through the injected handles.
+      setDurableStorage(window.localStorage);
+      setSpake2ModuleUrl("/wasm/spake2/pkg/fck_spake2.js");
       const identityManager: IdentityManager = createIdentityManager(window.localStorage);
       const atRestKeyManager: AtRestKeyManager = createAtRestKeyManager(window.localStorage);
       disposedIdentityManager = identityManager;
@@ -162,6 +171,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
             new InMemoryConversationRepository(atRestKey);
 
+          // Phase A.4: inject the web WebRTC adapter. The runtime core calls
+          // this factory instead of `new WebRtcAdapter(...)` so the no-DOM
+          // chat-runtime package never references RTCPeerConnection directly.
+          const peerConnectionFactory: PeerConnectionFactory = (opts) => new WebRtcAdapter(opts);
+
           const instance = createChatController({
             brokerUrl,
             baseUrl,
@@ -169,6 +183,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
             atRestKeyManager,
             repositoryFactory,
             socketFactory: createBrowserSocket,
+            peerConnectionFactory,
             iceServers,
           });
           disposedController = instance;

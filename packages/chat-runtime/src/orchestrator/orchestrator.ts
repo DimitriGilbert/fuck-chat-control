@@ -12,10 +12,10 @@ import {
   sha256,
   signTranscript,
   verifyTranscript,
-} from "@/features/chat/crypto";
-import { ctEqual } from "@/features/chat/crypto/ct-equal";
-import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "@/features/chat/crypto";
-import { deriveRole, encodeSessionId, encodeTranscript } from "@/features/chat/protocol/codec";
+} from "../crypto";
+import { ctEqual } from "../crypto/ct-equal";
+import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "../crypto";
+import { deriveRole, encodeSessionId, encodeTranscript } from "../protocol/codec";
 import {
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
@@ -25,18 +25,18 @@ import {
   PAKE_ROLE_A,
   PAKE_ROLE_B,
   PROTOCOL_VERSION,
-} from "@/features/chat/protocol/limits";
-import { AuthMode, ControlSubtype, Role } from "@/features/chat/protocol/types";
-import type { ConversationId, PublicKey, Signature, Transcript } from "@/features/chat/protocol/types";
-import { FrameReceiver } from "@/features/chat/framing";
-import { FrameSender } from "@/features/chat/framing";
-import type { FrameTransport, ReceivedFile } from "@/features/chat/framing";
-import { ConnectionState, ConnectionStateMachine } from "@/features/chat/signaling/state-machine";
-import { SignalingClient } from "@/features/chat/signaling/signaling-client";
-import type { SignalingSocketFactory } from "@/features/chat/signaling/signaling-client";
-import type { ConversationMessage, ConversationRepository } from "@/features/chat/store";
-import { AuthFailedRetryBlocked, MessageDirection } from "@/features/chat/store";
-import { getAuthFailedDurable, markAuthFailedDurable } from "@/features/chat/store/auth-failed-store";
+} from "../protocol/limits";
+import { AuthMode, ControlSubtype, Role } from "../protocol/types";
+import type { ConversationId, PublicKey, Signature, Transcript } from "../protocol/types";
+import { FrameReceiver } from "../framing";
+import { FrameSender } from "../framing";
+import type { FrameTransport, ReceivedFile } from "../framing";
+import { ConnectionState, ConnectionStateMachine } from "../signaling/state-machine";
+import { SignalingClient } from "../signaling/signaling-client";
+import type { SignalingSocketFactory } from "../signaling/signaling-client";
+import type { ConversationMessage, ConversationRepository } from "../store";
+import { AuthFailedRetryBlocked, MessageDirection } from "../store";
+import { getAuthFailedDurable, markAuthFailedDurable } from "../store/auth-failed-store";
 
 import { OrchestratorError, OrchestratorErrorCode } from "./errors";
 import {
@@ -58,7 +58,7 @@ import {
   generateConversationId,
   parseInvitation,
 } from "./invitation";
-import type { PeerTransport } from "./peer-transport";
+import type { PeerTransport } from "../transport/peer-transport";
 
 // Re-export so callers can construct identity keypairs without reaching
 // into the crypto barrel (single import surface for the orchestrator).

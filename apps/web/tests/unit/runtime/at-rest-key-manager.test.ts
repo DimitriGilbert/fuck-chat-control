@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { unwrapKey, wrapKey } from "@/features/chat/crypto";
+import { unwrapKey, wrapKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   AT_REST_STORAGE_KEY,
   createAtRestKeyManager,
-} from "@/features/chat/runtime/at-rest-key-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 
 import { bytesEqual, fakeStorage } from "./_helpers";
 

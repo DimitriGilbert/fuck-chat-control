@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { hkdfSha256 } from "@/features/chat/crypto/primitives";
+import { hkdfSha256 } from "@fuck-eu-chat-control/chat-runtime/crypto/primitives";
 
 // CR-12: HKDF-SHA256 known-answer test against RFC 5869 Appendix A.1
 // "Test Case 1" (the canonical HKDF-SHA256 reference vector). A KAT is only

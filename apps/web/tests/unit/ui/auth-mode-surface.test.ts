@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import type { ConversationOrchestrator } from "@/features/chat/orchestrator/orchestrator";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import { activeSessionView, summarizeSession } from "@/features/chat/runtime/types";
-import type { ChatSession } from "@/features/chat/runtime/types";
-import type { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
-import type { ReceivedFile } from "@/features/chat/framing";
-import type { ConversationRecord } from "@/features/chat/store";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationOrchestrator } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { activeSessionView, summarizeSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type { ChatSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
+import type { ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
 
 /**
  * SEC-4 (Phase 2): prove authMode flows end-to-end from the orchestrator's
@@ -187,7 +187,7 @@ describe("authMode surface (SEC-4 / PRD #95)", () => {
 
   describe("AuthMode enum contract (guards against a value rename)", () => {
     // Phase 1's identity-manager tests already import AuthMode as a value from
-    // @/features/chat/protocol/types. These two assertions pin the exact
+    // @fuck-eu-chat-control/chat-runtime/protocol/types. These two assertions pin the exact
     // member names the UI layer (chat-view / sidebar / settings-sheet) relies
     // on; if either member is renamed, the build would still pass but the
     // rendered pill/glyph would silently break.

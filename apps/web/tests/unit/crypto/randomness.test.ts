@@ -12,15 +12,15 @@ import {
   generateIdentityKeyPair,
   ReplayWindow,
   wrapKey,
-} from "@/features/chat/crypto";
-import { PROTOCOL_VERSION } from "@/features/chat/protocol/limits";
-import { FrameType } from "@/features/chat/protocol/types";
-import type { FrameAad } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { PROTOCOL_VERSION } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { FrameAad } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { sessionId } from "./_helpers";
 
 const CRYPTO_SRC_DIR = fileURLToPath(
-  new URL("../../../src/features/chat/crypto/", import.meta.url),
+  new URL("../../../../../packages/chat-runtime/src/crypto/", import.meta.url),
 );
 
 function listTsFiles(dir: string): string[] {

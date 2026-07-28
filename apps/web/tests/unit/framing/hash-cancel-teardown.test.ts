@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { MAX_BUFFERED_DATA_BYTES } from "@/features/chat/protocol/limits";
-import { FrameType } from "@/features/chat/protocol/types";
+import { MAX_BUFFERED_DATA_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
   encodeManifest,
   FramingErrorCode,
   MAX_CHUNK_PLAINTEXT_BYTES,
   sha256,
-} from "@/features/chat/framing";
-import type { FileManifest, FrameReceiverHandlers, ReceivedFile } from "@/features/chat/framing";
+} from "@fuck-eu-chat-control/chat-runtime/framing";
+import type { FileManifest, FrameReceiverHandlers, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 import { bytesEqual, deterministicData, forgeFrame, makePair, waitFor } from "./_helpers";
 
 function collectHandlers(): {

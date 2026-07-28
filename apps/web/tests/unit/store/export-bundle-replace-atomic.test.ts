@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vitest";
 
-import { generateAtRestKey } from "@/features/chat/crypto";
-import { AtRestLockedError } from "@/features/chat/runtime/at-rest-key-manager";
+import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { AtRestLockedError } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import {
   ImportMode,
   InMemoryConversationRepository,
   StoreErrorCode,
   exportBundle,
   importBundle,
-} from "@/features/chat/store";
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
   PeerIdentityRecord,
-} from "@/features/chat/store";
-import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
+} from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import { bytesEqual, conversationId, deterministicPublicKey, fingerprintOf } from "./_helpers";
 
