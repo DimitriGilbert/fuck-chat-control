@@ -74,9 +74,10 @@ services:
     # its UDP ports too. (A UDP STUN binding test would be more end-to-end but
     # needs a STUN client binary; coturn's own turnutils_stunclient exists in
     # the image but its non-zero exit on transient packet loss makes it a
-    # flaky healthcheck. The TCP probe is the pragmatic choice.)
+    # flaky healthcheck. The TCP probe is the pragmatic choice.) Implemented
+    # via bash's /dev/tcp since the upstream image has neither nc nor curl.
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3478 && echo -e '' >&3 && exec 3>&- || exit 1"]
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3478'"]
       interval: 10s
       timeout: 5s
       retries: 5
