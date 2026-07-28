@@ -63,31 +63,3 @@ export class MemoryStorage implements Storage {
   }
 }
 
-/**
- * Install a fresh in-memory `localStorage` on `globalThis` and return the
- * instance so the test can read/write it directly. Returns a teardown that
- * restores the prior descriptor (useful for the SSR-absence test which then
- * deletes the global).
- */
-export function installLocalStorage(): {
-  storage: MemoryStorage;
-  teardown: () => void;
-} {
-  const storage = new MemoryStorage();
-  const prior = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    get: () => storage,
-  });
-  return {
-    storage,
-    teardown: () => {
-      if (prior === undefined) {
-        delete (globalThis as { localStorage?: unknown }).localStorage;
-      } else {
-        Object.defineProperty(globalThis, "localStorage", prior);
-      }
-    },
-  };
-}
-

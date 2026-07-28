@@ -18,6 +18,27 @@
  *    Aliased to `node:crypto`'s `webcrypto.CryptoKey` (the canonical type
  *    `@types/node` already provides) so values flow through without nominal
  *    friction.
+ *
+ * ----------------------------------------------------------------------------
+ * DELIBERATE RUNTIME COUPLING — READ BEFORE PORTING TO A NEW PLATFORM
+ * ----------------------------------------------------------------------------
+ * The crypto modules (`primitives.ts`, `export-bundle.ts`, `in-memory-repo.ts`,
+ * `orchestrator.ts`) call `globalThis.crypto.subtle` directly at ~9+ sites and
+ * NOT through an injectable seam. This is an intentional v1 coupling tracked
+ * for a Phase C hardening pass (extracting a `CryptoProvider` interface). The
+ * consequence for consuming apps:
+ *
+ *   - The host platform MUST install a WebCrypto implementation on
+ *     `globalThis.crypto` BEFORE importing anything from chat-runtime.
+ *   - Web browsers and Tauri (with `tauri-plugin-node`) provide
+ *     `globalThis.crypto` natively — no action needed.
+ *   - React Native / Hermes does NOT ship WebCrypto. The app entry MUST
+ *     install `react-native-quick-crypto` (or an equivalent polyfill) on
+ *     `globalThis.crypto` before any chat-runtime import is evaluated.
+ *
+ * Removing or weakening this coupling is Phase C scope; do NOT refactor it
+ * ad-hoc. If you add a new platform, satisfy the `globalThis.crypto.subtle`
+ * contract at its entry boundary rather than forking the crypto modules.
  */
 declare global {
   namespace WebAssembly {

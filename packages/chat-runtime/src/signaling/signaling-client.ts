@@ -34,7 +34,7 @@ export interface SignalingClientOptions {
   readonly roomId: string;
   readonly role: Role;
   readonly handlers: SignalingHandlers;
-  readonly socketFactory?: SignalingSocketFactory;
+  readonly socketFactory: SignalingSocketFactory;
 }
 
 export class SignalingClient {
@@ -56,7 +56,7 @@ export class SignalingClient {
     this.roomId = options.roomId;
     this.role = options.role;
     this.handlers = options.handlers;
-    this.socketFactory = options.socketFactory ?? defaultSocketFactory;
+    this.socketFactory = options.socketFactory;
     this.glare = new GlareResolver(options.role);
   }
 
@@ -220,8 +220,4 @@ export class SignalingClient {
  */
 function isHandshakeInitiation(message: BrokerMessage): boolean {
   return message.kind === "offer" || message.kind === "answer";
-}
-
-function defaultSocketFactory(url: string): SignalingSocket {
-  return new WebSocket(url) as unknown as SignalingSocket;
 }

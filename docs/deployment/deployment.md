@@ -233,12 +233,10 @@ The server env surface is intentionally tiny. From
 | `TURN_REALM`          | No       | coturn `realm` directive; defaults to `turn.fuck-chat-control.eu`.                               |
 | `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                   |
 
-Client-side (browser bundle, `packages/env/src/web.ts`):
-
-| Variable         | Required | Purpose                                                                  |
-| ---------------- | -------- | ------------------------------------------------------------------------ |
-| `VITE_STUN_URL`  | No       | Public STUN endpoint baked into the client (fallback for `/ice-config`). |
-| `VITE_TURN_URL`  | No       | Public TURN endpoint baked into the client (fallback for `/ice-config`). |
+Client-side (browser bundle, `packages/env/src/web.ts`): **none.** The
+client bakes no ICE endpoints. STUN/TURN coordinates are fetched at runtime
+from `/ice-config` (the single source), which mints per-request TURN
+credentials from the server-held `TURN_SHARED_SECRET`.
 
 \* Validation is skipped when `SKIP_ENV_VALIDATION` is set (the
 Dockerfile sets it during the build phase, then unsets it). At runtime,
@@ -251,8 +249,9 @@ with (passed to the `coturn` service via the same `apps/web/.env` file
 or compose `environment:`). It is read server-side only — the
 `/ice-config` route uses it to compute per-request HMAC-SHA1
 credentials and never serializes it into any response or log. The
-client bundle (`VITE_*`) carries only the PUBLIC STUN/TURN endpoint
-coordinates, never the secret. (See "Trust verification" below.)
+client carries no static ICE coordinates in its bundle; it receives
+the PUBLIC STUN/TURN endpoints (and per-request credentials) at runtime
+from `/ice-config`. (See "Trust verification" below.)
 
 ## 5. Logging and metadata posture
 
