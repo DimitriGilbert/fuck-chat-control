@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildIceServers, mintTurnCredentials } from "@/server/ice-config";
 
@@ -134,3 +134,53 @@ describe("buildIceServers — env-driven composition", () => {
     }
   });
 });
+
+/**
+ * The half-set warning lives at module scope (it must fire exactly once on
+ * import). Each case therefore resets the module registry, stubs the relevant
+ * TURN env vars, and dynamically re-imports `ice-config.ts` so the module-scope
+ * check re-evaluates against the freshly-stubbed `process.env`. `console.warn`
+ * is spied per-case so call counts are independent.
+ */
+describe("half-set TURN env — startup warning", () => {
+  const TURN_VARS = ["TURN_URL", "TURN_TLS_URL", "TURN_SHARED_SECRET"] as const;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    for (const k of TURN_VARS) delete process.env[k];
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    vi.resetModules();
+    for (const k of TURN_VARS) delete process.env[k];
+  });
+
+  it("does NOT warn when neither TURN var is set", async () => {
+    await import("@/server/ice-config");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("does NOT warn when both TURN_URL and TURN_SHARED_SECRET are set", async () => {
+    process.env.TURN_URL = TURN_URL;
+    process.env.TURN_SHARED_SECRET = SHARED_SECRET;
+    await import("@/server/ice-config");
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("warns exactly once when TURN_URL is set but TURN_SHARED_SECRET is missing", async () => {
+    process.env.TURN_URL = TURN_URL;
+    await import("@/server/ice-config");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toMatch(/TURN_SHARED_SECRET is missing/);
+  });
+
+  it("warns when TURN_SHARED_SECRET is set but neither TURN URL is configured", async () => {
+    process.env.TURN_SHARED_SECRET = SHARED_SECRET;
+    await import("@/server/ice-config");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toMatch(/TURN_URL nor TURN_TLS_URL is configured/);
+  });
+});
+

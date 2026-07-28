@@ -37,6 +37,34 @@ import { env } from "@fuck-eu-chat-control/env/server";
 const TURN_USERNAME_ID = "fck-web";
 
 /**
+ * One-shot startup warning for the half-set TURN misconfiguration. `buildIceServers`
+ * silently omits a TURN entry when only one of the URL/secret pair is set; without
+ * this the operator gets no signal that their relay is dark. Module-scope so it
+ * fires exactly once at import, gated on the env module's `SKIP_ENV_VALIDATION`
+ * escape hatch so tests do not spam warnings. Does NOT throw — the route keeps
+ * serving a degraded (STUN-only) list either way; this is operator visibility,
+ * not enforcement. Read from `process.env` directly (rather than the already-built
+ * `env` snapshot) so the check is independent of env-core's eager parse order.
+ */
+if (!process.env.SKIP_ENV_VALIDATION) {
+  const hasTurnUrl = process.env.TURN_URL !== undefined && process.env.TURN_URL !== "";
+  const hasTurnTlsUrl =
+    process.env.TURN_TLS_URL !== undefined && process.env.TURN_TLS_URL !== "";
+  const hasTurnSecret =
+    process.env.TURN_SHARED_SECRET !== undefined && process.env.TURN_SHARED_SECRET !== "";
+  if ((hasTurnUrl || hasTurnTlsUrl) && !hasTurnSecret) {
+    console.warn(
+      "[ice-config] TURN_URL/TURN_TLS_URL is set but TURN_SHARED_SECRET is missing — TURN relay disabled. Set both or neither.",
+    );
+  } else if (hasTurnSecret && !hasTurnUrl && !hasTurnTlsUrl) {
+    console.warn(
+      "[ice-config] TURN_SHARED_SECRET is set but neither TURN_URL nor TURN_TLS_URL is configured — TURN relay disabled. Set both or neither.",
+    );
+  }
+}
+
+
+/**
  * How long a minted credential is valid. coturn enforces this server-side by
  * comparing the expiry prefix against its own clock, so the client MUST have
  * refreshed by then. 6 hours (21600s) covers a typical browser session without

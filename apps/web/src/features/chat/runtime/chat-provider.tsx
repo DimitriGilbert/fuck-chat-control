@@ -14,7 +14,10 @@ import type {
   SignalingSocket,
   SignalingSocketFactory,
 } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
-import type { PeerConnectionFactory } from "@fuck-eu-chat-control/chat-runtime/transport/types";
+import type {
+  IceServer,
+  PeerConnectionFactory,
+} from "@fuck-eu-chat-control/chat-runtime/transport/types";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 import { getFckConfig } from "@/features/chat/runtime/fck-config";
@@ -102,13 +105,32 @@ function resolveBrowserDeps(): {
  * Uses a relative URL so it inherits the current origin (http in dev,
  * https in prod); no hard-coded host.
  */
-async function fetchIceServers(): Promise<RTCIceServer[]> {
+async function fetchIceServers(): Promise<readonly IceServer[]> {
   try {
     const response = await fetch("/ice-config");
     if (!response.ok) return [];
     const body = (await response.json()) as { readonly iceServers?: unknown };
     if (!Array.isArray(body.iceServers)) return [];
-    return body.iceServers as RTCIceServer[];
+    // Map the untyped JSON body into the neutral IceServer shape at the fetch
+    // boundary so the DOM RTCIceServer type never threads into the runtime.
+    // The /ice-config route only emits { urls, username, credential } so this
+    // is a pure contract fix — runtime behavior is unchanged. Extra DOM-only
+    // fields (e.g. credentialType, iceProvider) are intentionally dropped.
+    const raw = body.iceServers as ReadonlyArray<{
+      readonly urls: string | readonly string[];
+      readonly username?: string;
+      readonly credential?: string;
+    }>;
+    return raw.map((s): IceServer => {
+      const base: IceServer = { urls: s.urls };
+      // IceServer's fields are readonly, so build the entry with conditional
+      // spreads rather than mutating after construction.
+      return {
+        ...base,
+        ...(s.username !== undefined ? { username: s.username } : {}),
+        ...(s.credential !== undefined ? { credential: s.credential } : {}),
+      };
+    });
   } catch {
     // Swallow: the controller accepts an empty list and falls back to host
     // candidates. Surfacing this error would block chat in loopback dev/CI,
@@ -177,7 +199,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // A fetch failure MUST fall back to an empty iceServers list so
       // loopback/LAN/CI (where /ice-config may return nothing or the dev
       // server is unconfigured) keep working; the controller's
-      // `iceServers?: RTCIceServer[]` accepts undefined and treats it as
+      // `iceServers?: readonly IceServer[]` accepts undefined and treats it as
       // loopback-only.
       void Promise.all([
         identityManager.ensureLoaded(),
