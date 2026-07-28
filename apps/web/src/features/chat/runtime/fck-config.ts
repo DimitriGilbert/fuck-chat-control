@@ -9,10 +9,12 @@
  *
  * The shape here MUST mirror the object built on the Rust side:
  *   Object.defineProperty(window, '__FCK_CONFIG__', {
- *     value: { brokerUrl: "...", baseUrl: "..." }, ...
+ *     value: { brokerUrl: "...", baseUrl: "...", iceServers: [...] }, ...
  *   });
  * Keep both sides in sync.
  */
+import type { IceServer } from "@fuck-eu-chat-control/chat-runtime/transport/types";
+
 export interface FckRuntimeConfig {
   /** Absolute WebSocket URL of the signaling broker, e.g. `wss://host/ws`. */
   readonly brokerUrl?: string;
@@ -24,6 +26,17 @@ export interface FckRuntimeConfig {
    * `window.location.origin`.
    */
   readonly baseUrl?: string;
+  /**
+   * Operator-configured ICE server list (STUN/TURN/TURNS) injected by the
+   * desktop shell at build time via `FCK_ICE_SERVERS`. When present and
+   * non-empty, `resolveBrowserDeps` threads it through and the provider skips
+   * the `/ice-config` network fetch (which is a dead path inside a
+   * `tauri://` webview — `window.location.origin` is the custom-protocol
+   * asset handler, not a real HTTP server). When absent, the SPA falls back
+   * to fetching `/ice-config` at runtime. The neutral {@link IceServer} type
+   * keeps the DOM `RTCIceServer` shape out of the runtime contract.
+   */
+  readonly iceServers?: readonly IceServer[];
 }
 
 declare global {

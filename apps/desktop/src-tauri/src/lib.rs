@@ -14,6 +14,15 @@
 //!   2. The dev fallback `ws://localhost:3001/ws`, matching `build.devUrl` so
 //!      `tauri dev` talks to the `pnpm --filter web dev` server's `/ws` route.
 //!
+//! Operator-configured STUN/TURN/TURNS servers are read from the
+//! `FCK_ICE_SERVERS` env var at compile time. It holds a JSON array string
+//! (e.g. `'[{ "urls": "stun:stun.example.com:3478" }]'`). The desktop shell
+//! has no channel to fetch `/ice-config` at runtime (inside a `tauri://`
+//! webview `window.location.origin` is the custom-protocol asset handler, not
+//! a real HTTP server), so the list MUST be baked in here for an operator
+//! deployment. When unset the array is `[]` — preserving the loopback-only
+//! posture so dev/LAN builds keep working with host-candidate WebRTC.
+//!
 //! The init script is registered on the `WebviewWindowBuilder` (NOT in JSON
 //! config — `initialization_script` is a builder method only; see
 //! https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html#method.initialization_script).
@@ -36,24 +45,41 @@ const BROKER_URL: &str = match option_env!("FCK_BROKER_URL") {
 /// independently of the signaling broker.
 const BASE_URL: &str = "self";
 
+/// Operator-configured ICE servers as a JSON array string, read from
+/// `FCK_ICE_SERVERS` at compile time. Defaults to `"[]"` so loopback/LAN/CI
+/// builds keep working with host-candidate-only WebRTC. See the module docs
+/// for why this is baked in rather than fetched at runtime.
+const ICE_SERVERS_JSON: &str = match option_env!("FCK_ICE_SERVERS") {
+    Some(s) if !s.is_empty() => s,
+    _ => "[]",
+};
+
 /// Builds the JavaScript snippet that primes `window.__FCK_CONFIG__`. The
 /// object shape mirrors `FckRuntimeConfig` in
 /// `apps/web/src/features/chat/runtime/fck-config.ts` — keep them in sync.
 ///
-/// `serde_json::to_string` is used for the URL so a stray quote/backslash in a
-/// configured `FCK_BROKER_URL` cannot break out of the JS string literal.
+/// `serde_json` is used for the URL and base so a stray quote/backslash in a
+/// configured `FCK_BROKER_URL` cannot break out of the JS string literal. The
+/// ICE servers string is parsed first: `FCK_ICE_SERVERS` holds an already-JSON
+/// array, so `from_str` validates it and `to_string` re-emits canonical JSON —
+/// safe to interpolate as a bare JS array literal.
 fn build_init_script() -> String {
     let broker_url = serde_json::to_string(BROKER_URL).expect("broker URL is a finite string");
     let base_url = serde_json::to_string(BASE_URL).expect("base URL is a finite string");
+    let ice_servers = match serde_json::from_str::<serde_json::Value>(ICE_SERVERS_JSON) {
+        Ok(v) => serde_json::to_string(&v).expect("ICE servers re-serializes"),
+        Err(_) => panic!("FCK_ICE_SERVERS must be a JSON array, got: {ICE_SERVERS_JSON}"),
+    };
     format!(
         "Object.defineProperty(window, '__FCK_CONFIG__', {{\n  \
-           value: {{ brokerUrl: {broker}, baseUrl: {base} }},\n  \
+           value: {{ brokerUrl: {broker}, baseUrl: {base}, iceServers: {ice} }},\n  \
            configurable: false,\n  \
            writable: false,\n  \
            enumerable: true\n  \
          }});\n",
         broker = broker_url,
         base = base_url,
+        ice = ice_servers,
     )
 }
 

@@ -75,23 +75,38 @@ const createBrowserSocket: SignalingSocketFactory = (url: string): SignalingSock
  * — translated back to `window.location.origin` here so the rest of the
  * runtime never needs to know about the injection.
  *
+ * `iceServers` is threaded through when the desktop shell bakes in an
+ * operator-configured STUN/TURN list (via `FCK_ICE_SERVERS`). Inside a
+ * `tauri://` webview, `window.location.origin` is the custom-protocol asset
+ * handler, not a real HTTP server, so a relative `/ice-config` fetch is a
+ * dead path — the provider uses the injected list directly in that case.
+ * Returns `undefined` on the web build so the provider falls through to
+ * `fetchIceServers()`.
+ *
  * Only called inside a `useEffect` (browser-only) so `window` is guaranteed
  * present.
  */
 function resolveBrowserDeps(): {
   brokerUrl: string;
   baseUrl: string;
+  iceServers: readonly IceServer[] | undefined;
 } {
   const injected = getFckConfig();
   if (injected?.brokerUrl !== undefined) {
     const baseUrl = injected.baseUrl === undefined || injected.baseUrl === "self"
       ? window.location.origin
       : injected.baseUrl;
-    return { brokerUrl: injected.brokerUrl, baseUrl };
+    // Filter out an empty injected array so the provider treats "no servers
+    // configured" the same as "field absent" — both fall back to the network
+    // fetch on the web build, and to host-candidate-only WebRTC on desktop.
+    const iceServers = injected.iceServers !== undefined && injected.iceServers.length > 0
+      ? injected.iceServers
+      : undefined;
+    return { brokerUrl: injected.brokerUrl, baseUrl, iceServers };
   }
   const { protocol, host, origin } = window.location;
   const brokerUrl = `${protocol === "https:" ? "wss" : "ws"}://${host}/ws`;
-  return { brokerUrl, baseUrl: origin };
+  return { brokerUrl, baseUrl: origin, iceServers: undefined };
 }
 
 /**
@@ -104,10 +119,19 @@ function resolveBrowserDeps(): {
  *
  * Uses a relative URL so it inherits the current origin (http in dev,
  * https in prod); no hard-coded host.
+ *
+ * Mirrors the mobile adapter's `fetchIceServers`
+ * (`apps/mobile/src/chat/config.ts`): an `AbortController` + 5-second timeout
+ * guarantees an unresponsive `/ice-config` cannot hang controller construction.
+ * The two adapters stay intentionally decoupled (no shared helper) — the
+ * mobile build cannot import browser-only globals and the web build should
+ * not grow a dependency on the Expo config module.
  */
 async function fetchIceServers(): Promise<readonly IceServer[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
-    const response = await fetch("/ice-config");
+    const response = await fetch("/ice-config", { signal: controller.signal });
     if (!response.ok) return [];
     const body = (await response.json()) as { readonly iceServers?: unknown };
     if (!Array.isArray(body.iceServers)) return [];
@@ -132,10 +156,13 @@ async function fetchIceServers(): Promise<readonly IceServer[]> {
       };
     });
   } catch {
-    // Swallow: the controller accepts an empty list and falls back to host
-    // candidates. Surfacing this error would block chat in loopback dev/CI,
-    // where /ice-config legitimately returns nothing.
+    // Swallow (covers both network errors and the abort timeout): the
+    // controller accepts an empty list and falls back to host candidates.
+    // Surfacing this error would block chat in loopback dev/CI, where
+    // /ice-config legitimately returns nothing.
     return [];
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -173,7 +200,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
     let cancelled = false;
 
     try {
-      const { brokerUrl, baseUrl } = resolveBrowserDeps();
+      const { brokerUrl, baseUrl, iceServers: injectedIceServers } = resolveBrowserDeps();
       // Phase A.6: register the platform's durable KV store (window.localStorage)
       // and the SPAKE2 WASM module URL the runtime imports lazily. These MUST be
       // registered before createChatController so the runtime core (which no
@@ -201,10 +228,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // server is unconfigured) keep working; the controller's
       // `iceServers?: readonly IceServer[]` accepts undefined and treats it as
       // loopback-only.
+      //
+      // Phase 6: inside the desktop shell, `/ice-config` is a dead path
+      // (tauri:// webview has no HTTP origin), so when the shell injects a
+      // non-empty `iceServers` list via `__FCK_CONFIG__` we use it directly
+      // and skip the network fetch.
       void Promise.all([
         identityManager.ensureLoaded(),
         atRestKeyManager.ensureLoaded(),
-        fetchIceServers(),
+        injectedIceServers !== undefined
+          ? Promise.resolve(injectedIceServers)
+          : fetchIceServers(),
       ])
         .then(([, , iceServers]) => {
           if (cancelled) return;
