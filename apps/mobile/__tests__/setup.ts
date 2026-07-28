@@ -56,15 +56,21 @@ jest.mock('react-native-mmkv', () => {
   };
 });
 
-// Mock expo-constants so config.ts reads a stable shape.
-jest.mock('expo-constants', () => ({
-  executionContext: 'default',
-  expoConfig: {
-    extra: {
-      'brokerUrl:dev': 'ws://10.0.2.2:8080/ws',
-      'brokerUrl:prod': 'wss://broker.example/ws',
-      'baseUrl:dev': 'http://10.0.2.2:8080',
-      'baseUrl:prod': 'https://example',
+// Mock expo-constants so config.ts reads a stable shape. The mock factory
+// pulls the real `ExecutionEnvironment` enum via requireActual so the mock
+// and the source under test agree on the literal ('storeClient' / 'standalone').
+jest.mock('expo-constants', () => {
+  const { ExecutionEnvironment } = jest.requireActual('expo-constants');
+  return {
+    executionEnvironment: ExecutionEnvironment.StoreClient,
+    ExecutionEnvironment,
+    expoConfig: {
+      extra: {
+        'brokerUrl:dev': 'ws://10.0.2.2:8080/ws',
+        'brokerUrl:prod': 'wss://broker.example/ws',
+        'baseUrl:dev': 'http://10.0.2.2:8080',
+        'baseUrl:prod': 'https://example',
+      },
     },
-  },
-}));
+  };
+});

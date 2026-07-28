@@ -11,7 +11,7 @@
  * via `EXPO_PUBLIC_BROKER_URL` / `EXPO_PUBLIC_BASE_URL` (set in the EAS build
  * profile or `.env`) for a self-hosted deployment.
  */
-import Constants from 'expo-constants';
+import Constants, { ExecutionEnvironment } from 'expo-constants';
 
 export interface RuntimeConfig {
   /** WebSocket URL the signaling layer dials. */
@@ -32,7 +32,9 @@ function readExtra(key: string, envOverride: string, fallback: string): string {
   }
   const extra = Constants.expoConfig?.extra as Record<string, string | undefined> | undefined;
   const channel =
-    Constants.executionContext === 'store' ? 'prod' : 'dev';
+    Constants.executionEnvironment === ExecutionEnvironment.Standalone
+      ? 'prod'
+      : 'dev';
   const keyed = extra?.[`${key}:${channel}`];
   return keyed ?? fallback;
 }
@@ -66,9 +68,13 @@ export function resolveRuntimeConfig(): RuntimeConfig {
 export async function fetchIceServers(): Promise<
   readonly { readonly urls: string | readonly string[]; readonly username?: string; readonly credential?: string }[]
 > {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
   try {
     const { baseUrl } = resolveRuntimeConfig();
-    const response = await fetch(`${baseUrl}/ice-config`);
+    const response = await fetch(`${baseUrl}/ice-config`, {
+      signal: controller.signal,
+    });
     if (!response.ok) return [];
     const body = (await response.json()) as { readonly iceServers?: unknown };
     if (!Array.isArray(body.iceServers)) return [];
@@ -79,5 +85,7 @@ export async function fetchIceServers(): Promise<
     }[];
   } catch {
     return [];
+  } finally {
+    clearTimeout(timeout);
   }
 }
