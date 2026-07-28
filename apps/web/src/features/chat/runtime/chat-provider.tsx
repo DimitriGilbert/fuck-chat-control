@@ -17,6 +17,7 @@ import type {
 import type { PeerConnectionFactory } from "@fuck-eu-chat-control/chat-runtime/transport/types";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
+import { getFckConfig } from "@/features/chat/runtime/fck-config";
 
 import * as React from "react";
 
@@ -61,13 +62,30 @@ const createBrowserSocket: SignalingSocketFactory = (url: string): SignalingSock
   adaptBrowserSocket(new WebSocket(url));
 
 /**
- * Builds the controller deps from the current `window.location`. Only called
- * inside a `useEffect` (browser-only) so `window` is guaranteed present.
+ * Builds the controller deps for the browser. Reads the desktop shell's
+ * injected {@link FckRuntimeConfig} (via `window.__FCK_CONFIG__`) FIRST so the
+ * Tauri webview can dial a deployed broker; on the web build nothing is
+ * injected and it falls back to deriving both from `window.location`.
+ *
+ * The `baseUrl: "self"` sentinel means "use the page's own origin" (assets
+ * ship inside the desktop shell's `frontendDist`, so same-origin is correct)
+ * — translated back to `window.location.origin` here so the rest of the
+ * runtime never needs to know about the injection.
+ *
+ * Only called inside a `useEffect` (browser-only) so `window` is guaranteed
+ * present.
  */
 function resolveBrowserDeps(): {
   brokerUrl: string;
   baseUrl: string;
 } {
+  const injected = getFckConfig();
+  if (injected?.brokerUrl !== undefined) {
+    const baseUrl = injected.baseUrl === undefined || injected.baseUrl === "self"
+      ? window.location.origin
+      : injected.baseUrl;
+    return { brokerUrl: injected.brokerUrl, baseUrl };
+  }
   const { protocol, host, origin } = window.location;
   const brokerUrl = `${protocol === "https:" ? "wss" : "ws"}://${host}/ws`;
   return { brokerUrl, baseUrl: origin };

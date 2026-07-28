@@ -14,7 +14,7 @@ apps/web/src/routeTree.gen.ts
 # wasm-pack regenerates pkg/.gitignore on every build; the six built artifacts
 # inside pkg/ are force-tracked, so we must ignore only the regenerated
 # .gitignore itself to keep the tree clean across rebuilds.
-apps/web/src/wasm/spake2/pkg/.gitignore
+packages/chat-runtime/wasm/spake2/pkg/.gitignore
 
 # Environment variables
 .env
@@ -58,3 +58,9 @@ coverage
 .cache
 tmp
 temp
+
+# Tauri (desktop app) build artifacts. The committed sources live in
+# apps/desktop/src-tauri; only the compiled Rust target/ and the tauri dev
+# build of the frontend are gitignored.
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/

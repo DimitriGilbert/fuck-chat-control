@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "fuck-chat-control",
+  "version": "0.1.0",
+  "identifier": "eu.fuck-chat-control.desktop",
+  "build": {
+    "frontendDist": "../web/.output/public",
+    "devUrl": "http://localhost:3001",
+    "beforeDevCommand": "pnpm --filter web dev",
+    "beforeBuildCommand": "pnpm --filter web build && node scripts/copy-shell.js"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "fuck-chat-control",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 720,
+        "minHeight": 540,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "create": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: tauri: asset: http://asset.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://* wss://*; font-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; img-src 'self' data: blob: tauri: asset: http://asset.localhost http://localhost:3001; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://* wss://* http://localhost:3001; font-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "../../../icon.png"
+    ],
+    "category": "Network",
+    "shortDescription": "E2E-encrypted chat that resists chat-control scanning",
+    "longDescription": "fuck-chat-control desktop shell. Wraps the web build in a system webview; all crypto, WebRTC, and storage run natively in the page."
+  },
+  "plugins": {}
+}
