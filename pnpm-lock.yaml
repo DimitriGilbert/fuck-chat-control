@@ -182,6 +182,34 @@ importers:
         specifier: ^8.18.0
         version: 8.21.0
 
+  packages/chat-runtime:
+    dependencies:
+      '@noble/curves':
+        specifier: ^1.9.7
+        version: 1.9.7
+      hash-wasm:
+        specifier: ^4.12.0
+        version: 4.12.0
+    devDependencies:
+      '@fuck-eu-chat-control/config':
+        specifier: workspace:*
+        version: link:../config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.1
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@22.20.1)(@vitest/browser-preview@4.1.9(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0))(vitest@4.1.9))(jsdom@29.1.1(@noble/hashes@2.2.0))(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0))
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
+
   packages/config: {}
 
   packages/env:

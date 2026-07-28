@@ -1,57 +1,19 @@
-import type { DataChannelTransport } from "@/features/chat/signaling/webrtc-adapter";
-
 /**
- * Receive-capable transport contract consumed by the orchestrator.
+ * Re-export of the platform-neutral {@link PeerTransport} contract and
+ * {@link toPeerTransport} adapter, whose canonical definitions now live in
+ * `@fuck-eu-chat-control/chat-runtime` (`packages/chat-runtime/src/transport`).
  *
- * `FrameTransport` (framing) is send-only. During the orchestrator's
- * handshake phase, inbound bytes are plaintext handshake messages, not
- * yet encrypted frames — so the orchestrator needs a transport that can
- * also deliver received bytes via {@link setOnMessage}.
+ * Historically this file owned those definitions and reached into the
+ * web-only `webrtc-adapter` for `DataChannelTransport`, which created a
+ * circular dependency once the runtime core moves into the chat-runtime
+ * package. The neutral types now live with the runtime; the adapter there
+ * is generic over the {@link DataChannelTransport} interface.
  *
- * After the handshake completes, the same underlying transport is handed
- * to `FrameSender` (it satisfies `FrameTransport`) and its inbound stream
- * is rerouted to `FrameReceiver.ingest`.
- *
- * `setOnDrain` is the orchestrator-facing alias for the underlying
- * `DataChannelTransport.setDrainListener`; see {@link toPeerTransport}.
+ * The chat-runtime package alias is not wired into `apps/web/tsconfig.json`
+ * yet (that lands in sub-phase A.7), so this module imports via a relative
+ * path. A.7 will swap the relative path for the
+ * `@fuck-eu-chat-control/chat-runtime` alias and consumers will be free to
+ * import directly from the package.
  */
-export interface PeerTransport {
-  send(bytes: Uint8Array): void;
-  readonly ready: boolean;
-  readonly bufferedAmount: number;
-  setOnMessage(handler: ((bytes: Uint8Array) => void) | null): void;
-  setOnDrain(handler: (() => void) | null): void;
-  close(): void;
-}
-
-/**
- * Adapt a {@link DataChannelTransport} into a {@link PeerTransport}.
- *
- * `DataChannelTransport` structurally satisfies every member of
- * {@link PeerTransport} except the drain method name (it exposes
- * `setDrainListener`, framing depends on that name). This thin wrapper
- * maps `setOnDrain` → `setDrainListener` and passes everything else
- * through, keeping the framing-facing public surface stable.
- */
-export function toPeerTransport(transport: DataChannelTransport): PeerTransport {
-  return {
-    send: (bytes: Uint8Array): void => {
-      transport.send(bytes);
-    },
-    get ready(): boolean {
-      return transport.ready;
-    },
-    get bufferedAmount(): number {
-      return transport.bufferedAmount;
-    },
-    setOnMessage: (handler: ((bytes: Uint8Array) => void) | null): void => {
-      transport.setOnMessage(handler);
-    },
-    setOnDrain: (handler: (() => void) | null): void => {
-      transport.setDrainListener(handler);
-    },
-    close: (): void => {
-      transport.close();
-    },
-  };
-}
+export { toPeerTransport } from "../../../../../../packages/chat-runtime/src/transport/peer-transport";
+export type { PeerTransport } from "../../../../../../packages/chat-runtime/src/transport/peer-transport";
