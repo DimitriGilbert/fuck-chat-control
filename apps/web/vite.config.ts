@@ -88,7 +88,14 @@ export default defineConfig({
     tanstackStart({ spa: { enabled: true } }),
     ...nitro({
       features: { websocket: true },
-      handlers: [{ route: "/ws", handler: "./src/server/broker.ts" }],
+      handlers: [
+        { route: "/ws", handler: "./src/server/broker.ts" },
+        // Phase 0: GET /ice-config mints time-limited TURN credentials from the
+        // server-held TURN_SHARED_SECRET and returns the public STUN/TURN/TURNS
+        // endpoints. The client fetches this at boot and passes the result into
+        // createChatController. See src/server/ice-config.ts.
+        { route: "/ice-config", handler: "./src/server/ice-config.ts" },
+      ],
       // Pre-compress every public asset >1KB (the ~1MB JS/CSS/WASM bundle +
       // prerendered HTML) to gzip + brotli at build time. Nitro negotiates the
       // best encoding per request via Accept-Encoding, so the client downloads

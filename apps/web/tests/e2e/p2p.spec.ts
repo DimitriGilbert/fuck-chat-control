@@ -9,7 +9,10 @@ import { CONNECTION_STATE_TEXT, establishPeerPair } from "./_helpers";
  * matching safety number. These tests are the make-or-break proof the chat
  * actually works between two browsers.
  *
- * Loopback WebRTC needs no STUN; the config's empty iceServers list is correct.
+ * Loopback WebRTC needs no STUN. The /ice-config endpoint returns an empty
+ * iceServers list when no STUN/TURN env is configured (the CI/dev baseline),
+ * and the chat-provider falls back to [] on any fetch failure — so loopback
+ * P2P here always gathers host candidates only.
  * Timeouts are generous because ICE on loopback can take a few seconds and the
  * dev server SSR-compiles on first boot.
  */

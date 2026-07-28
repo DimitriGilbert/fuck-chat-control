@@ -70,6 +70,32 @@ function resolveBrowserDeps(): {
   return { brokerUrl, baseUrl: origin };
 }
 
+/**
+ * Phase 0: fetch the ICE server list (STUN/TURN/TURNS, with freshly minted
+ * TURN credentials) from the same-origin /ice-config route. Returns `[]` on
+ * any failure — network error, non-2xx, malformed body, or an empty config —
+ * so that loopback/LAN/CI deployments (where the endpoint may be unconfigured
+ * or absent) keep working with host-candidate-only WebRTC. A failed fetch
+ * MUST NOT break controller construction.
+ *
+ * Uses a relative URL so it inherits the current origin (http in dev,
+ * https in prod); no hard-coded host.
+ */
+async function fetchIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const response = await fetch("/ice-config");
+    if (!response.ok) return [];
+    const body = (await response.json()) as { readonly iceServers?: unknown };
+    if (!Array.isArray(body.iceServers)) return [];
+    return body.iceServers as RTCIceServer[];
+  } catch {
+    // Swallow: the controller accepts an empty list and falls back to host
+    // candidates. Surfacing this error would block chat in loopback dev/CI,
+    // where /ice-config legitimately returns nothing.
+    return [];
+  }
+}
+
 const initialControllerState: ChatControllerState = initialChatControllerState;
 
 export interface ChatContextValue {
@@ -116,8 +142,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // be resident first. Constructing eagerly led to "get() called before
       // ensureLoaded()" throwing inside the effect, which left `controller`
       // null and `ready` false forever — the start button never enabled.
-      void Promise.all([identityManager.ensureLoaded(), atRestKeyManager.ensureLoaded()])
-        .then(() => {
+      //
+      // Phase 0: in parallel, fetch /ice-config so we can pass STUN/TURN
+      // servers (with freshly minted TURN credentials) into the controller.
+      // The fetch is intentionally NOT in the critical path of
+      // ensureLoaded — it shares the same Promise.all only for concurrency.
+      // A fetch failure MUST fall back to an empty iceServers list so
+      // loopback/LAN/CI (where /ice-config may return nothing or the dev
+      // server is unconfigured) keep working; the controller's
+      // `iceServers?: RTCIceServer[]` accepts undefined and treats it as
+      // loopback-only.
+      void Promise.all([
+        identityManager.ensureLoaded(),
+        atRestKeyManager.ensureLoaded(),
+        fetchIceServers(),
+      ])
+        .then(([, , iceServers]) => {
           if (cancelled) return;
           const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
             new InMemoryConversationRepository(atRestKey);
@@ -129,7 +169,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
             atRestKeyManager,
             repositoryFactory,
             socketFactory: createBrowserSocket,
-            iceServers: [],
+            iceServers,
           });
           disposedController = instance;
           setController(instance);

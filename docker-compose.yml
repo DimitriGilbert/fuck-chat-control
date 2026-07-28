@@ -28,3 +28,56 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+
+  # Phase 0: STUN + TURN relay for cross-network WebRTC P2P. Unlike `web`
+  # (which is HTTP behind traefik), TURN/STUN speak UDP and cannot be proxied
+  # by an HTTP reverse proxy — so coturn uses `ports:` (published on the host)
+  # rather than `expose:`. Operators MUST publish 3478/udp, 3478/tcp, 5349/tcp
+  # (TLS), and the full relay range 49152-49172/udp on the host firewall.
+  #
+  # The shared secret is read from .env (TURN_SHARED_SECRET) — NEVER baked into
+  # the image. coturn expands $TURN_SHARED_SECRET into static-auth-secret at
+  # startup; the web app mints per-request HMAC-SHA1 credentials from the same
+  # secret via /ice-config. See deploy/coturn/turnserver.conf.
+  coturn:
+    image: coturn/coturn:4.15.0
+    restart: unless-stopped
+    volumes:
+      - ./deploy/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    env_file:
+      - path: apps/web/.env
+        required: false
+    environment:
+      # Explicit passthrough so the secret + realm reach coturn even when the
+      # operator exports them in the compose environment rather than .env.
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:-}
+      TURN_REALM: ${TURN_REALM:-turn.fuck-chat-control.eu}
+    ports:
+      # STUN + TURN (RFC 5766) on UDP and TCP. 3478/udp is the primary path
+      # for WebRTC relay; 3478/tcp is the TCP fallback for networks that block
+      # UDP (symmetric NATs, hostile corporate Wi-Fi).
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      # TURN over TLS (turns:) on 5349. Requires cert/pkey to be mounted into
+      # the container (see turnserver.conf). If you don't terminate TURN-TLS,
+      # leave the cert commented and this port is simply unused by coturn —
+      # keep it published so operators who enable TLS later don't forget.
+      - "5349:5349/tcp"
+      # Relay allocation range. MUST match min-port/max-port in turnserver.conf
+      # and MUST be published in full on the host (coturn allocates one of
+      # these per relayed endpoint). Widen the range + host publish if you
+      # expect more than ~10 concurrent relays.
+      - "49152-49172:49152-49172/udp"
+    # coturn ships no healthcheck binary. The cheapest readiness signal that
+    # works without extra tooling is a TCP connect to 3478 — if coturn is
+    # accepting TCP on its primary listener it has finished startup and bound
+    # its UDP ports too. (A UDP STUN binding test would be more end-to-end but
+    # needs a STUN client binary; coturn's own turnutils_stunclient exists in
+    # the image but its non-zero exit on transient packet loss makes it a
+    # flaky healthcheck. The TCP probe is the pragmatic choice.)
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/3478 && echo -e '' >&3 && exec 3>&- || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
