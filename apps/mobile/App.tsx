@@ -31,53 +31,123 @@ import { installCryptoPolyfill } from './src/chat/rn-crypto-polyfill';
 
 installCryptoPolyfill();
 
-import { ChatProvider, useChatState } from './src/chat/mobile-chat-provider';
+import { decodeConversationId } from '@fuck-eu-chat-control/chat-runtime/protocol/codec';
+import type { ConversationId } from '@fuck-eu-chat-control/chat-runtime/protocol/types';
+import * as React from 'react';
+import { StatusBar, StyleSheet, Text, View } from 'react-native';
+
+import { ChatProvider, useChat } from './src/chat/mobile-chat-provider';
 import { ChatScreen } from './src/screens/chat-screen';
 import { HomeScreen } from './src/screens/home-screen';
 import { JoinConversationScreen } from './src/screens/join-conversation-screen';
 import { StartConversationScreen } from './src/screens/start-conversation-screen';
-import * as React from 'react';
-import { StatusBar } from 'react-native';
+import { colors } from './src/ui/colors';
 
 type Route = 'home' | 'start' | 'join' | 'chat';
 
+/**
+ * Parse a hex-encoded ConversationId (as produced by HomeScreen's `toHex`)
+ * back into a branded `ConversationId`. Delegates length + brand validation to
+ * the runtime's canonical `decodeConversationId`; the hex→bytes step is local
+ * because codec.ts exposes no hex-string helper.
+ */
+function hexToConversationId(hex: string): ConversationId {
+  if (hex.length % 2 !== 0) {
+    throw new Error(`conversation id hex must have even length, got ${hex.length}`);
+  }
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (Number.isNaN(byte)) {
+      throw new Error(`conversation id hex has a non-hex character at offset ${i * 2}`);
+    }
+    bytes[i] = byte;
+  }
+  return decodeConversationId(bytes);
+}
+
 function Router(): React.ReactElement {
   const [route, setRoute] = React.useState<Route>('home');
-  const state = useChatState();
+  const [error, setError] = React.useState<string | null>(null);
+  // `useChat()` (not `useChatController()`) because the provider has not turned
+  // `ready` yet on the first render — `useChatController()` throws in that
+  // window (mobile-chat-provider.tsx:186-189), which would crash Router before
+  // the user ever sees the home screen. `controller` is null only until the
+  // provider's async construction resolves; by the time `state.conversations`
+  // populates enough to render a tappable row, it is non-null. The handler
+  // below guards for the early window.
+  const { controller, state } = useChat();
   // Auto-switch to the chat screen once an active conversation exists and the
-  // handshake begins producing messages or an invitation.
+  // handshake begins producing messages or an invitation. resumeConversation's
+  // emit(null) calls flip state.active non-null, so a successful resume routes
+  // here even without an explicit setRoute('chat') in the handler.
   React.useEffect(() => {
     if (state.active !== null && route !== 'chat') {
       setRoute('chat');
     }
   }, [state.active, route]);
 
+  const handleOpen = React.useCallback((hex: string) => {
+    if (controller === null) return;
+    setError(null);
+    let id: ConversationId;
+    try {
+      id = hexToConversationId(hex);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    // resumeConversation handles BOTH the live-session case (cheap select,
+    // no re-handshake) and the persisted-only case (re-enter via startSession
+    // with history seeding). Do NOT call selectConversation first — it throws
+    // for non-live ids.
+    void controller.resumeConversation(id).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, [controller]);
+
+  let screen: React.ReactElement;
   switch (route) {
     case 'home':
-      return (
+      screen = (
         <HomeScreen
           onStart={() => setRoute('start')}
           onJoin={() => setRoute('join')}
-          onOpen={() => setRoute('chat')}
+          onOpen={handleOpen}
         />
       );
+      break;
     case 'start':
-      return (
+      screen = (
         <StartConversationScreen
           onStarted={() => setRoute('chat')}
           onBack={() => setRoute('home')}
         />
       );
+      break;
     case 'join':
-      return (
+      screen = (
         <JoinConversationScreen
           onJoined={() => setRoute('chat')}
           onBack={() => setRoute('home')}
         />
       );
+      break;
     case 'chat':
-      return <ChatScreen onLeave={() => setRoute('home')} />;
+      screen = <ChatScreen onLeave={() => setRoute('home')} />;
+      break;
   }
+
+  return (
+    <View style={styles.root}>
+      {screen}
+      {error !== null ? (
+        <View style={styles.errorBar}>
+          <Text style={styles.errorText}>{error}</Text>
+        </View>
+      ) : null}
+    </View>
+  );
 }
 
 export default function App(): React.ReactElement {
@@ -88,3 +158,13 @@ export default function App(): React.ReactElement {
     </ChatProvider>
   );
 }
+
+const styles = StyleSheet.create({
+  root: { flex: 1 },
+  errorBar: {
+    backgroundColor: colors.danger,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+  },
+  errorText: { color: colors.text, fontSize: 13 },
+});

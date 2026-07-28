@@ -27,6 +27,8 @@ import {
   View,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
+import { getInfoAsync } from 'expo-file-system/legacy';
+import { MAX_INCOMPLETE_TRANSFER_BYTES } from '@fuck-eu-chat-control/chat-runtime/protocol/limits';
 import type { ConversationMessage } from '@fuck-eu-chat-control/chat-runtime/store';
 import type { ChatFileInput } from '@fuck-eu-chat-control/chat-runtime/runtime/types';
 
@@ -48,7 +50,24 @@ interface MessageRow {
  * read it as bytes when ` responseType === 'arraybuffer' ` is requested on
  * some RN runtimes, but the reliable cross-platform path is `fetch(uri).then(r
  * => r.arrayBuffer())` (Hermes + RN's fetch supports file:// reads on both
- * platforms). Returns null when the user cancels or the read fails.
+ * platforms).
+ *
+ * Contract:
+ *  - User cancels the picker → returns `null` (silent no-op).
+ *  - File is too large, or its size cannot be determined → throws. A null
+ *    return would silently drop the user's tap; throwing surfaces the cause
+ *    via the caller's `setError`.
+ *
+ * Pre-flight size check: the runtime's
+ * {@link MAX_INCOMPLETE_TRANSFER_BYTES} cap (64 MiB) otherwise runs only inside
+ * `FrameSender.sendFile` AFTER the bytes are already resident in JS heap, so a
+ * multi-GB pick would OOM before the cap could refuse. We therefore resolve
+ * the size BEFORE the `arrayBuffer()` call — preferring `asset.size` (populated
+ * by the picker on iOS and most Android `file://` URIs), and falling back to
+ * `expo-file-system/legacy.getInfoAsync` for Android `content://` URIs where
+ * the picker leaves `size` undefined. If the size still cannot be determined
+ * (`getInfoAsync` returns `exists:false` or no `size`) the file is treated as
+ * too large rather than read blindly.
  */
 async function readPickedFileToChatInput(
   result: DocumentPicker.DocumentPickerResult,
@@ -56,6 +75,13 @@ async function readPickedFileToChatInput(
   if (result.canceled) return null;
   const asset = result.assets?.[0];
   if (asset === undefined) return null;
+
+  const size = await resolvePickedFileSize(asset);
+  if (size > MAX_INCOMPLETE_TRANSFER_BYTES) {
+    const mib = MAX_INCOMPLETE_TRANSFER_BYTES / (1024 * 1024);
+    throw new Error(`File exceeds ${mib} MiB transfer limit`);
+  }
+
   const response = await fetch(asset.uri);
   const buffer = await response.arrayBuffer();
   return {
@@ -63,6 +89,24 @@ async function readPickedFileToChatInput(
     name: asset.name ?? 'file.bin',
     mimeType: asset.mimeType ?? 'application/octet-stream',
   };
+}
+
+/**
+ * Resolve a picked asset's byte size BEFORE any `arrayBuffer()` read.
+ * `asset.size` is populated by the picker on iOS and most Android `file://`
+ * URIs but is frequently undefined on Android `content://` URIs; in that case
+ * stat via `expo-file-system/legacy.getInfoAsync` (the SDK 57 main entry's
+ * `getInfoAsync` is a throwing deprecation shim — the working API lives under
+ * `/legacy`). Throws if the size cannot be determined so the caller surfaces a
+ * user-visible error instead of no-opping.
+ */
+async function resolvePickedFileSize(asset: DocumentPicker.DocumentPickerAsset): Promise<number> {
+  if (asset.size !== undefined) return asset.size;
+  const info = await getInfoAsync(asset.uri);
+  if (!info.exists) {
+    throw new Error('Picked file does not exist or its size is unavailable');
+  }
+  return info.size;
 }
 
 /**
