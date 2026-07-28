@@ -3,9 +3,9 @@ import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { nitro } from "nitro/vite";
 import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig, type Connect, type Plugin } from "vite";
 
 // All plugin factories above (tanstackStart, tailwindcss, nitro, viteReact)
 // return the real `vite` package's `Plugin` type. `defineConfig` is imported
@@ -47,15 +47,14 @@ const spake2PkgFiles = [
 
 /**
  * Emits the committed SPAKE2 wasm-bindgen `pkg/` artifacts into the
- * production output so the dynamic `import("../wasm/spake2/pkg/fck_spake2.js")`
+ * production output so the dynamic `import("/wasm/spake2/pkg/fck_spake2.js")`
  * in `pake.ts` resolves at runtime. The `pkg/` is pre-built (wasm-pack output,
  * committed so CI needs no Rust toolchain) and lives outside Vite's module
  * graph, so neither `new URL(..., import.meta.url)` nor the lazy `import()`
  * would otherwise emit the files — without this plugin the production deploy
  * 404s on `/wasm/spake2/pkg/fck_spake2.js` and PAKE silently fails.
  *
- * Dev is unaffected: `vp dev` serves the source `pkg/` directly via the
- * filesystem, so the relative import resolves to the committed file.
+ * Dev serving is handled by the companion {@link serveSpake2PkgPlugin}.
  */
 function emitSpake2PkgPlugin(): Plugin {
   return {
@@ -71,6 +70,91 @@ function emitSpake2PkgPlugin(): Plugin {
           source,
         });
       }
+    },
+  };
+}
+
+/**
+ * Maps a served `pkg/` filename to its HTTP `Content-Type`. The loader only
+ * fetches `.js` (the wasm-bindgen entry, served as JavaScript so the dynamic
+ * `import()` evaluates it) and `.wasm` (the binary module, served with the
+ * streaming MIME so `WebAssembly.instantiateStreaming` accepts it). Other
+ * committed artifacts (`.d.ts`, `package.json`, `README.md`) are served as
+ * plain text so a stray request never binary-dumps to the console.
+ */
+function spake2ContentType(fileName: string): string {
+  if (fileName.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (fileName.endsWith(".wasm")) return "application/wasm";
+  return "text/plain; charset=utf-8";
+}
+
+/**
+ * Serves the committed SPAKE2 `pkg/` from `packages/chat-runtime/wasm/spake2/pkg/`
+ * at the URL `/wasm/spake2/pkg/<file>` during `vp dev`. The runtime loader
+ * (`chat-provider.tsx`) pins the import to that absolute URL (the same path
+ * {@link emitSpake2PkgPlugin} emits in prod), but the `pkg/` lives outside the
+ * apps/web root so Vite's default static serving never reaches it — without
+ * this middleware the dev import 404s and PAKE silently fails (the
+ * p2p-pake e2e regression).
+ *
+ * Mirrors `emitSpake2PkgPlugin`'s `apply: "build"` with `apply: "serve"` so
+ * the two plugins split cleanly across dev vs prod. Path-traversal is blocked
+ * by resolving the requested name under {@link spake2PkgDir} and rejecting
+ * anything that escapes it; unknown files fall through to Vite's 404.
+ */
+function serveSpake2PkgPlugin(): Plugin {
+  const route = `/${spake2OutputDir}/`;
+  return {
+    name: "serve-spake2-pkg",
+    apply: "serve",
+    configureServer(server) {
+      // Mount at the `route` prefix: connect only invokes the handler when the
+      // pathname starts with `/wasm/spake2/pkg/`, so unrelated requests pay no
+      // cost, and `req.url` is rewritten to the portion AFTER the prefix (per
+      // connect's mount semantics — `req.originalUrl` keeps the full path, and
+      // `req.url` retains a single leading slash, e.g. `/fck_spake2.js`).
+      // The handler signature is Vite's `Connect.NextHandleFunction`.
+      const handler: Connect.NextHandleFunction = async (req, res, next) => {
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          next();
+          return;
+        }
+        // req.url is the suffix after the mount prefix and may carry a query;
+        // drop the query and any leading slash so it is a bare file name.
+        const url = req.url ?? "";
+        const queryIndex = url.indexOf("?");
+        const urlPath = queryIndex === -1 ? url : url.slice(0, queryIndex);
+        const fileName = urlPath.startsWith("/") ? urlPath.slice(1) : urlPath;
+        if (fileName === "" || fileName.includes("..") || fileName.includes("/")) {
+          // Empty, escaped, or nested paths are not part of the committed pkg.
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        const absolutePath = resolve(spake2PkgDir, fileName);
+        // Defense-in-depth against traversal: the resolved path must stay
+        // inside spake2PkgDir even if the `..`/`/` guards above were bypassed.
+        if (relative(spake2PkgDir, absolutePath).startsWith("..")) {
+          res.statusCode = 404;
+          res.end();
+          return;
+        }
+        try {
+          const body = await readFile(absolutePath);
+          res.setHeader("Content-Type", spake2ContentType(fileName));
+          res.setHeader("Content-Length", body.byteLength);
+          if (req.method === "HEAD") {
+            res.end();
+            return;
+          }
+          res.end(body);
+        } catch {
+          // Missing file (or unreadable) → let the client see a clean 404.
+          res.statusCode = 404;
+          res.end();
+        }
+      };
+      server.middlewares.use(route, handler);
     },
   };
 }
@@ -128,5 +212,6 @@ export default defineConfig({
     }),
     viteReact(),
     emitSpake2PkgPlugin(),
+    serveSpake2PkgPlugin(),
   ],
 });
