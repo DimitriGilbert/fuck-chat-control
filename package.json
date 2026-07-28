@@ -20,7 +20,7 @@
     "hooks:setup": "vp config",
     "dev:web": "vp run --filter web dev",
     "dev:desktop": "pnpm --filter desktop dev",
-    "build:desktop": "pnpm --filter desktop build",
+    "build:desktop": "pnpm --filter desktop build:desktop",
     "check:rust": "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "test:desktop": "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml",
     "dev:mobile": "pnpm --filter mobile start",
