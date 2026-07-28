@@ -114,7 +114,8 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
     // RN's RTCDataChannel accepts `binaryType = 'arraybuffer'` so message
     // events surface ArrayBuffer payloads (mirrors the web adapter).
     this.channel.binaryType = 'arraybuffer';
-    this.channel.bufferedAmountLowThreshold = 0;
+    // RN dispatch is strict `<` (not DOM at-boundary); threshold 1 fires when buffered reaches 0.
+    this.channel.bufferedAmountLowThreshold = 1;
     this.channel.onbufferedamountlow = (): void => {
       const listener = this.drainListener;
       if (listener !== null) {

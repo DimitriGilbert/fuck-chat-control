@@ -244,4 +244,20 @@ describe('rnPeerConnectionFactory', () => {
     expect(received.byteLength).toBe(2);
     pc.close();
   });
+
+  it('sets bufferedAmountLowThreshold to 1 so RN strict-< dispatch can fire', () => {
+    // react-native-webrtc's bufferedamountlow dispatch is strict `<`:
+    // `if (bufferedAmount < bufferedAmountLowThreshold)`. With threshold 0 the
+    // guard is `0 < 0` → never true → the drain listener never runs and
+    // FrameSender.waitForDrain blocks forever once buffered crosses
+    // MAX_BUFFERED_DATA_BYTES. Threshold 1 makes `0 < 1` fire when buffered
+    // drains back to 0. The web adapter keeps 0 because the DOM fires at the
+    // boundary — do NOT "fix" the RN value back to 0.
+    const onDataChannel = jest.fn();
+    const pc = rnPeerConnectionFactory({ onDataChannel }) as PeerConnection;
+    const fakeChannel = makeFakeDataChannel();
+    fakePc.__emitDataChannel(fakeChannel);
+    expect(fakeChannel.bufferedAmountLowThreshold).toBe(1);
+    pc.close();
+  });
 });
