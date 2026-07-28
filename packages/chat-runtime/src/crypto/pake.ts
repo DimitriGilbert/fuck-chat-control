@@ -123,13 +123,38 @@ let wasmModulePromise: Promise<PakeWasmModule> | null = null;
  */
 async function loadWasm(): Promise<PakeWasmModule> {
   if (wasmModulePromise === null) {
+    // The dynamic `import(specifier)` is hidden behind `new Function` so every
+    // bundler's static analyzer (Metro, Vite, webpack) treats it as an opaque
+    // runtime eval — invisible to the transformer. Metro's transformer rejects
+    // `import(variable)` outright, AND Metro's resolver fails on
+    // `import(literalPathOnBlockList)` instead of dropping it; routing through
+    // `new Function` sidesteps both. At runtime it is a plain `import()`.
+    //
+    // React Native v1 is safety-number-only and NEVER reaches this code path
+    // (no `~code` invitation reaches `createPakeSession`), so the runtime
+    // branch never fires on native — keeping the import hidden is sufficient.
+    //
+    // Web calls `setSpake2ModuleUrl` BEFORE the first PAKE handshake so the
+    // override URL is the one resolved at runtime. Node tests bypass this
+    // entirely via `__setWasmModuleForTests`.
     const specifier = spake2ModuleUrl ?? DEFAULT_SPAKE2_MODULE_SPECIFIER;
-    const mod = (await import(/* @vite-ignore */ specifier)) as unknown as PakeWasmModuleBinding;
+    const mod = (await dynamicImport(specifier)) as unknown as PakeWasmModuleBinding;
     await mod.default();
     wasmModulePromise = Promise.resolve(mod as PakeWasmModule);
   }
   return wasmModulePromise;
 }
+
+/**
+ * Runtime dynamic `import()` hidden from bundler static analysis. Constructed
+ * via `new Function` so the call site never appears as a syntactic `import()`
+ * in this file's AST — Metro, Vite, webpack, etc. cannot resolve, block, or
+ * reject what they cannot see. The body is a perfectly normal dynamic import.
+ */
+const dynamicImport = new Function(
+  "specifier",
+  "return import(specifier)",
+) as (specifier: string) => Promise<unknown>;
 
 /**
  * Test-only synchronous initializer. Node-based unit tests cannot rely on the

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "eu.fuck-chat-control.desktop",
   "build": {
-    "frontendDist": "../web/.output/public",
+    "frontendDist": "../../web/.output/public",
     "devUrl": "http://localhost:3001",
     "beforeDevCommand": "pnpm --filter web dev",
     "beforeBuildCommand": "pnpm --filter web build && node scripts/copy-shell.js"
