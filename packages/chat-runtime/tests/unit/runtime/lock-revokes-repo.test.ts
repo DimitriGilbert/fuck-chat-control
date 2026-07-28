@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -13,42 +13,6 @@ import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtim
 
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
-
-/**
- * Stub RTCPeerConnection: the controller constructs a WebRtcBridge per
- * session, which needs a global RTCPeerConnection. We never drive its
- * internals here — the lock contract is asserted at the repository + state
- * level, mirroring chat-controller.test.ts.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(_type: string, _fn: (event: unknown) => void): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
 
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
@@ -85,14 +49,6 @@ async function makeController(): Promise<ChatController> {
 }
 
 describe("lock() revokes repository access (R9/F1)", () => {
-  beforeEach((): void => {
-    installStubRtc();
-  });
-
-  afterEach((): void => {
-    restoreRtc();
-  });
-
   it("LockableRepository throws AtRestLockedError on every ciphertext-touching method while locked", async (): Promise<void> => {
     const storage = fakeStorage();
     const manager = createAtRestKeyManager(storage);

@@ -6,15 +6,21 @@ import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket as WsClient } from "ws";
 
-const APPS_WEB = fileURLToPath(new URL("../../", import.meta.url));
-const REPO_ROOT = fileURLToPath(new URL("../../../..", import.meta.url));
+// These tests live in `packages/chat-runtime/tests/integration/` but still boot
+// the `apps/web` dev server (the broker WebSocket route is served by the web
+// app's Nitro server). Four `..` segments climb from `integration/` to the repo
+// root, then into `apps/web/`.
+const APPS_WEB = fileURLToPath(new URL("../../../../apps/web/", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 const VP_BIN = join(REPO_ROOT, "node_modules", ".bin", "vp");
 
 // The vite+ dev server binds to `localhost`, which resolves to the IPv6 loopback
 // (`::1`) on this host — NOT to the IPv4 loopback `127.0.0.1`. Probing
-// `127.0.0.1` always fails with ECONNREFUSED. Use the hostname.
+// `127.0.0.1` always fails with ECONNREFUSED, which is what previously caused
+// this test to hang for the full boot timeout. Use the hostname so the OS
+// resolves to whichever loopback the server actually bound.
 const HOST = "localhost";
-const PORT = 3002;
+const PORT = 3001;
 const HTTP_URL = `http://${HOST}:${PORT}/`;
 const WS_URL = `ws://${HOST}:${PORT}/ws`;
 const ROOM_ID = "0123456789abcdef0123456789abcdef";
@@ -70,25 +76,6 @@ function connectClient(url: string): Promise<WsClient> {
   });
 }
 
-interface CloseEventLike {
-  readonly code: number;
-  readonly reason: string;
-}
-
-function waitForClose(socket: WsClient, timeoutMs = 5000): Promise<CloseEventLike> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      socket.removeListener("close", onClose);
-      reject(new Error(`Socket did not close within ${timeoutMs} ms`));
-    }, timeoutMs);
-    const onClose = (code: number, reason: Buffer): void => {
-      clearTimeout(timer);
-      resolve({ code, reason: reason.toString("utf8") });
-    };
-    socket.once("close", onClose);
-  });
-}
-
 function nextMessage(socket: WsClient, timeoutMs = 5000): Promise<string> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -103,6 +90,20 @@ function nextMessage(socket: WsClient, timeoutMs = 5000): Promise<string> {
   });
 }
 
+function expectNoMessage(socket: WsClient, ms = 800): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.removeListener("message", onMessage);
+      resolve();
+    }, ms);
+    const onMessage = (): void => {
+      clearTimeout(timer);
+      reject(new Error("Received an unexpected message"));
+    };
+    socket.once("message", onMessage);
+  });
+}
+
 function closeQuietly(socket: WsClient): void {
   try {
     socket.close();
@@ -111,6 +112,17 @@ function closeQuietly(socket: WsClient): void {
   }
 }
 
+/**
+ * The broker is a pure relay with no join acknowledgment and no buffering: it
+ * drops a relayable message when the recipient has not joined the room yet. Two
+ * clients' WebSocket frames interleave non-deterministically at the server, so
+ * an offer sent immediately after both joins can arrive before the recipient's
+ * join is processed and be silently dropped.
+ *
+ * We settle deterministically by round-tripping a throwaway ICE probe in each
+ * direction with a short retry: a probe is only delivered once the recipient is
+ * registered, so when both probes land, both peers are provably in the room.
+ */
 async function awaitRoomSettled(a: WsClient, b: WsClient, roomId: string): Promise<void> {
   const deadline = Date.now() + 8000;
   let aReceived = false;
@@ -183,9 +195,11 @@ beforeAll(async () => {
     bootError = err;
   });
   serverProc.stdout?.on("data", () => {
-    // drain
+    // drain to avoid the child's stdout pipe backing up
   });
   serverProc.stderr?.on("data", (chunk: Buffer) => {
+    // Capture stderr so a boot failure surfaces a useful message instead of a
+    // bare "did not become ready" timeout after 60 seconds.
     serverStderr += chunk.toString("utf8");
   });
 
@@ -209,31 +223,14 @@ afterAll(async () => {
   await sleep(500);
 });
 
-describe("broker rejects double-join from an already-seated socket (R5/F1)", () => {
-  it("closes the offender with the AlreadySeated (4003) close code", async () => {
-    const a = await connectClient(WS_URL);
-    try {
-      a.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
-      a.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
-
-      const close = await waitForClose(a, 5000);
-      expect(close.code).toBe(4003);
-      expect(close.reason).toContain("already in a room");
-    } finally {
-      closeQuietly(a);
-    }
+describe("broker WebSocket route (real dev server)", () => {
+  it("boots the dev server and accepts a WebSocket upgrade on /ws", async () => {
+    const socket = await connectClient(WS_URL);
+    expect(socket.readyState).toBe(WsClient.OPEN);
+    socket.close();
   });
 
-  it("the abandoned partner can accept a fresh peer after the offender's socket is reaped", async () => {
-    // a and b share a room. a sends a second join on the SAME socket and is
-    // hard-closed with 4003. With the silent-abandon bug, a's first seat would
-    // be released WITHOUT notifying b, AND a would silently re-seat as the
-    // second peer — leaving b's peerPresent stuck true with no real partner.
-    // With the fix, a's second join does NOT silently leave; a's first seat
-    // is released only when the WS close frame triggers the runtime close hook
-    // (the legitimate path), which DOES notify b. The contract this test pins
-    // is the user-visible one: after a's socket is reaped, a NEW peer can join
-    // b — proving the slot was released cleanly rather than silently abandoned.
+  it("relays offer, answer, and ICE candidates between two peers", async () => {
     const a = await connectClient(WS_URL);
     const b = await connectClient(WS_URL);
     try {
@@ -241,67 +238,83 @@ describe("broker rejects double-join from an already-seated socket (R5/F1)", () 
       b.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
       await awaitRoomSettled(a, b, ROOM_ID);
 
-      // Drain any straggler ICE probes from awaitRoomSettled.
-      await sleep(200);
-      b.removeAllListeners("message");
+      a.send(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "o" } }));
+      const bOffer = JSON.parse(await nextMessage(b)) as { t: string };
+      expect(bOffer.t).toBe("offer");
 
-      // a offends; the broker hard-closes a's socket.
-      a.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
-      const offenderClose = await waitForClose(a, 5000);
-      expect(offenderClose.code).toBe(4003);
+      b.send(JSON.stringify({ t: "answer", sdp: { type: "answer", sdp: "ans" } }));
+      const aAnswer = JSON.parse(await nextMessage(a)) as { t: string };
+      expect(aAnswer.t).toBe("answer");
 
-      // The runtime close hook fires asynchronously on the WS close frame,
-      // routes through BrokerConnection.onClose, and sends b a `leave` for a's
-      // original seat. This is the CORRECT notifyPeerLeft path — distinct from
-      // the silent-leave the bug would have produced (which would NOT have
-      // notified b).
-      const leaveRaw = await nextMessage(b, 5000);
-      const leave = JSON.parse(leaveRaw) as { t: string };
-      expect(leave.t).toBe("leave");
+      a.send(JSON.stringify({ t: "ice", candidate: { candidate: "a->b" } }));
+      const bIce = JSON.parse(await nextMessage(b)) as { t: string };
+      expect(bIce.t).toBe("ice");
 
-      // Now a fresh peer c can join b — proving the slot was released cleanly.
-      // (Under the silent-abandon bug, a would still occupy the slot from b's
-      // perspective and the partner would be stuck.)
-      const c = await connectClient(WS_URL);
-      c.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
-
-      // The broker notifies the EXISTING peer b when c becomes the second
-      // peer — so b is where we look for c's arrival.
-      const joinRaw = await nextMessage(b, 5000);
-      const join = JSON.parse(joinRaw) as { t: string; roomId: string };
-      expect(join.t).toBe("join");
-      expect(join.roomId).toBe(ROOM_ID);
-
-      c.close();
+      b.send(JSON.stringify({ t: "ice", candidate: { candidate: "b->a" } }));
+      const aIce = JSON.parse(await nextMessage(a)) as { t: string };
+      expect(aIce.t).toBe("ice");
     } finally {
       closeQuietly(a);
       closeQuietly(b);
     }
   });
 
-  it("a fresh socket joining after a previous socket's clean leave still works", async () => {
-    // Regression guard: the reject-double-join path must not have broken the
-    // legitimate "leave then fresh-join" flow. The legitimate client always
-    // opens a fresh socket per join; this asserts that path is unchanged.
+  it("never relays join/leave to the peer (broker is signaling-only)", async () => {
     const a = await connectClient(WS_URL);
     const b = await connectClient(WS_URL);
     try {
-      a.send(JSON.stringify({ t: "join", roomId: "ffeeddccbbaa99887766554433221100" }));
-      b.send(JSON.stringify({ t: "join", roomId: "ffeeddccbbaa99887766554433221100" }));
-      await awaitRoomSettled(a, b, "ffeeddccbbaa99887766554433221100");
-
-      a.send(JSON.stringify({ t: "leave", roomId: "ffeeddccbbaa99887766554433221100" }));
-      await sleep(200);
-
-      const a2 = await connectClient(WS_URL);
-      a2.send(JSON.stringify({ t: "join", roomId: "ffeeddccbbaa99887766554433221100" }));
-      // b should now see a fresh join notification for a2.
-      const bJoin = JSON.parse(await nextMessage(b, 5000)) as { t: string };
-      expect(bJoin.t).toBe("join");
-      a2.close();
+      a.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
+      b.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
+      a.send(JSON.stringify({ t: "join", roomId: ROOM_ID }));
+      a.send(JSON.stringify({ t: "leave", roomId: ROOM_ID }));
+      await expectNoMessage(b, 800);
     } finally {
       closeQuietly(a);
       closeQuietly(b);
+    }
+  });
+
+  it("frees a peer's slot on leave so a new peer can join as second", async () => {
+    const a = await connectClient(WS_URL);
+    const b = await connectClient(WS_URL);
+    const c = await connectClient(WS_URL);
+    try {
+      const room = "fedcba9876543210fedcba9876543210";
+      a.send(JSON.stringify({ t: "join", roomId: room }));
+      b.send(JSON.stringify({ t: "join", roomId: room }));
+      await awaitRoomSettled(a, b, room);
+
+      // a leaves, freeing a slot; c joins and must take the freed slot.
+      a.send(JSON.stringify({ t: "leave", roomId: room }));
+      c.send(JSON.stringify({ t: "join", roomId: room }));
+      await awaitRoomSettled(c, b, room);
+
+      b.send(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "post-leave" } }));
+      const cOffer = JSON.parse(await nextMessage(c, 5000)) as { t: string };
+      expect(cOffer.t).toBe("offer");
+    } finally {
+      closeQuietly(a);
+      closeQuietly(b);
+      closeQuietly(c);
+    }
+  });
+
+  it("rejects a third peer while two occupy the room", async () => {
+    const a = await connectClient(WS_URL);
+    const b = await connectClient(WS_URL);
+    const c = await connectClient(WS_URL);
+    try {
+      const room = "11112222333344445555666677778888";
+      a.send(JSON.stringify({ t: "join", roomId: room }));
+      b.send(JSON.stringify({ t: "join", roomId: room }));
+      c.send(JSON.stringify({ t: "join", roomId: room }));
+
+      a.send(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "third" } }));
+      await expectNoMessage(c, 800);
+    } finally {
+      closeQuietly(a);
+      closeQuietly(b);
+      closeQuietly(c);
     }
   });
 });

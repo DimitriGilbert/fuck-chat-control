@@ -11,7 +11,10 @@
  *
  *  - `WebAssembly.Module` — referenced by pake.ts's `initSync` binding shape.
  *    `WebAssembly` is part of ES2017+ and present on every target; `lib:
- *    ES2022` omits the namespace declaration.
+ *    ES2022` omits the namespace declaration. Tests also call
+ *    `WebAssembly.compile(bytes)` as a value, so the global is declared both
+ *    as a namespace (for the `Module` type) and as a `var` (for the runtime
+ *    object) with the `compile` member typed.
  *  - `BufferSource` — the DOM `ArrayBufferView | ArrayBuffer` union used in
  *    the same binding shape.
  *  - `CryptoKey` — the opaque key handle returned by `SubtleCrypto.importKey`.
@@ -46,6 +49,13 @@ declare global {
       // Opaque — callers only pass compiled modules through.
     }
   }
+
+  // `lib: ES2022` declares `WebAssembly` only as a namespace; tests and wasm
+  // bindings also use it as a value (`WebAssembly.compile(bytes)`). Declare the
+  // runtime object with the members consumed by the package + its tests.
+  const WebAssembly: {
+    compile(bytes: BufferSource): Promise<WebAssembly.Module>;
+  };
 
   type BufferSource = ArrayBufferView | ArrayBuffer;
 

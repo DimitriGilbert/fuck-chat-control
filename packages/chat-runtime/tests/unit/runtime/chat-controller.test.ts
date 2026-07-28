@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationRecord, ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -10,48 +10,6 @@ import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtim
 
 import { MockSignalingSocket, parse } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
-
-/**
- * Minimal RTCPeerConnection stub. The chat-controller constructs a
- * WebRtcBridge per active conversation, which in turn constructs a
- * WebRtcAdapter (which needs a global RTCPeerConnection). We install a stub
- * only so the bridge can be built and immediately torn down; we never drive
- * its internals — the live negotiation is validated by Playwright + the
- * two-browser run.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(_type: string, _fn: (event: unknown) => void): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
-
-afterEach(() => {
-  restoreRtc();
-});
 
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
@@ -100,7 +58,6 @@ describe("createChatController", () => {
   let controller: ChatController;
 
   beforeEach(async () => {
-    installStubRtc();
     kit = await makeController();
     controller = kit.controller;
   });
@@ -254,7 +211,6 @@ describe("createChatController", () => {
 
 describe("createChatController / repositoryFactory", () => {
   it("invokes the repository factory with the loaded at-rest key", async () => {
-    installStubRtc();
     const identityStorage = fakeStorage();
     const atRestStorage = fakeStorage();
     const identityManager = createIdentityManager(identityStorage);

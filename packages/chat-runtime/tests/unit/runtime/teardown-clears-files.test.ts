@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { FileManifest, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 import type { ConversationOrchestrator } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
@@ -178,42 +178,6 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
 // lived (bare sendQueues.delete/clear, clearAll not setting detached, etc.).
 // ---------------------------------------------------------------------------
 
-/**
- * Stub RTCPeerConnection: the controller constructs a WebRtcBridge per
- * session, which needs a global RTCPeerConnection. We never drive its
- * internals — transfers are parked through the loopback-transport test seam
- * so the bridge stays idle. Mirrors clear-conversation-releases-bytes.test.ts.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(_type: string, _fn: (event: unknown) => void): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
-
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
 
@@ -370,14 +334,6 @@ async function waitForSending(
 }
 
 describe("CR-8: leaveConversation drains the send queue (rejects + zeroes)", () => {
-  beforeEach((): void => {
-    installStubRtc();
-  });
-
-  afterEach((): void => {
-    restoreRtc();
-  });
-
   it("rejects a queued send with 'conversation cleared' and zeroes its byte buffer", async (): Promise<void> => {
     const a = await makeController();
     const b = await makeController();
@@ -441,14 +397,6 @@ describe("CR-8: leaveConversation drains the send queue (rejects + zeroes)", () 
 });
 
 describe("CR-8: dispose drains every session's send queue", () => {
-  beforeEach((): void => {
-    installStubRtc();
-  });
-
-  afterEach((): void => {
-    restoreRtc();
-  });
-
   it("multiple sessions with queued sends all reject on dispose", async (): Promise<void> => {
     // Two pairs of controllers so we have two queued sends on two distinct
     // sessions of one controller (A1 and A2 each have their own send queue).
@@ -517,14 +465,6 @@ describe("CR-8: dispose drains every session's send queue", () => {
 });
 
 describe("CR-9: clearAll reaches parity with clearConversation", () => {
-  beforeEach((): void => {
-    installStubRtc();
-  });
-
-  afterEach((): void => {
-    restoreRtc();
-  });
-
   it("clearAll zeroes receivedFiles, clears transfers, sets detached, drops queued sends, and a late inbound frame is DROPPED", async (): Promise<void> => {
     const sender = await makeController();
     const receiver = await makeController();

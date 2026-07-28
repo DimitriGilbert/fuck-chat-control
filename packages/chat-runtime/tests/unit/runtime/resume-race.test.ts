@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -9,39 +9,6 @@ import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtim
 
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
-
-/**
- * Stub RTCPeerConnection — the controller constructs a WebRtcBridge per
- * session which needs a global RTCPeerConnection. We never drive its
- * internals here; the resume-race fix is asserted at the controller-snapshot
- * level via the test seam `__receiveMessageForTest`.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
 
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
@@ -78,13 +45,6 @@ async function makeController(): Promise<ChatController> {
 }
 
 describe("resumeConversation seeding race (R9/F3 / Phase 8.5)", () => {
-  beforeEach(() => {
-    installStubRtc();
-  });
-  afterEach(() => {
-    restoreRtc();
-  });
-
   it("seeds the session snapshot from history on resume (messages are populated)", async () => {
     const controller = await makeController();
     // Start a fresh conversation and persist a message via the test seam so

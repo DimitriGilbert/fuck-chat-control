@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
@@ -11,42 +11,6 @@ import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/st
 
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { linkLoopbackPair, mockSocketFactory } from "../orchestrator/_helpers";
-
-/**
- * Stub RTCPeerConnection: the controller constructs a WebRtcBridge per
- * session, which needs a global RTCPeerConnection. We never drive its
- * internals here — the transfer lifecycle is driven through the loopback
- * transport test seam, exactly like file-transfer.test.ts.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(_type: string, _fn: (event: unknown) => void): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
 
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
@@ -151,14 +115,6 @@ function makeImageFile(): ChatFileInput {
 }
 
 describe("clearConversation releases bytes + detaches inbound handlers (R9/F2)", () => {
-  beforeEach((): void => {
-    installStubRtc();
-  });
-
-  afterEach((): void => {
-    restoreRtc();
-  });
-
   it("after clearConversation: transfers empty, receivedFiles cleared + byte buffers zeroed, late inbound frame does NOT repopulate snapshot", async (): Promise<void> => {
     const sender = await makeController();
     const receiver = await makeController();

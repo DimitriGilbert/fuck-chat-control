@@ -10,7 +10,8 @@
   },
   "scripts": {
     "check-types": "tsc --noEmit",
-    "test:unit": "vitest run"
+    "test:unit": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@noble/curves": "^1.9.7",

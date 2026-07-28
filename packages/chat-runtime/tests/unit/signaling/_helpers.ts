@@ -1,14 +1,5 @@
 import type { SignalingSocket } from "@fuck-eu-chat-control/chat-runtime/signaling/signaling-client";
 
-/**
- * Web-local signaling test doubles shared by the tests that stay in apps/web
- * (`glare-rollback`, and the `webrtc-bridge*` tests that reach across dirs).
- *
- * The canonical copy of these helpers now lives in the chat-runtime package
- * (`packages/chat-runtime/tests/unit/signaling/_helpers.ts`) for the neutral
- * tests that moved there. This file holds only the surface the web-only tests
- * still consume.
- */
 export class MockSignalingSocket implements SignalingSocket {
   public readyState = 0;
   public readonly sent: string[] = [];

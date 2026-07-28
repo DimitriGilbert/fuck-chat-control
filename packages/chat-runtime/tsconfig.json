@@ -2,7 +2,11 @@
   "extends": "@fuck-eu-chat-control/config/tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2022"],
-    "noUncheckedIndexedAccess": false
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "@fuck-eu-chat-control/chat-runtime": ["./src/index.ts"],
+      "@fuck-eu-chat-control/chat-runtime/*": ["./src/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts"]
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "tests/**/*.ts"]
 }

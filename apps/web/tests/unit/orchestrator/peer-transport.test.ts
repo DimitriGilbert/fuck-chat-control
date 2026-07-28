@@ -2,8 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import { DataChannelTransport } from "@/features/chat/signaling/webrtc-adapter";
 
-import { type PeerTransport, toPeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
-
 /**
  * Minimal RTCDataChannel test double. Only the surface that
  * DataChannelTransport actually reads is implemented.
@@ -147,98 +145,5 @@ describe("DataChannelTransport.setOnMessage", () => {
     const payload = new Uint8Array([255]);
     channel.fireMessage(payload.buffer);
     expect(handler).not.toHaveBeenCalled();
-  });
-});
-
-describe("toPeerTransport", () => {
-  it("returns a PeerTransport that delegates send", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-
-    const sendSpy = vi.spyOn(channel, "send");
-    const payload = new Uint8Array([7, 8, 9]);
-    peer.send(payload);
-
-    expect(sendSpy).toHaveBeenCalledTimes(1);
-    expect(sendSpy.mock.calls[0]![0]).toBe(payload);
-  });
-
-  it("exposes ready === true when channel is open", () => {
-    const { transport } = makeTransport();
-    const peer = toPeerTransport(transport);
-    expect(peer.ready).toBe(true);
-  });
-
-  it("exposes ready === false when channel is closed", () => {
-    const { transport, channel } = makeTransport();
-    channel.readyState = "closed";
-    const peer = toPeerTransport(transport);
-    expect(peer.ready).toBe(false);
-  });
-
-  it("reflects bufferedAmount from the underlying channel", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-    channel.bufferedAmount = 42;
-    expect(peer.bufferedAmount).toBe(42);
-  });
-
-  it("delegates setOnMessage to the underlying transport", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-
-    const received: Uint8Array[] = [];
-    peer.setOnMessage((bytes) => {
-      received.push(bytes);
-    });
-
-    const payload = new Uint8Array([11, 22, 33]);
-    channel.fireMessage(payload.buffer);
-    expect(received.length).toBe(1);
-    assertBytesEqual(received[0]!, payload);
-  });
-
-  it("routes setOnDrain(fn) to the underlying setDrainListener", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-
-    const drainHandler = vi.fn();
-    peer.setOnDrain(drainHandler);
-
-    channel.fireBufferedAmountLow();
-    expect(drainHandler).toHaveBeenCalledTimes(1);
-  });
-
-  it("routes setOnDrain(null) to detach the drain listener", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-
-    const drainHandler = vi.fn();
-    peer.setOnDrain(drainHandler);
-    peer.setOnDrain(null);
-
-    channel.fireBufferedAmountLow();
-    expect(drainHandler).not.toHaveBeenCalled();
-  });
-
-  it("closes the underlying channel", () => {
-    const { transport, channel } = makeTransport();
-    const peer = toPeerTransport(transport);
-    peer.close();
-    expect(channel.readyState).toBe("closed");
-    expect(peer.ready).toBe(false);
-  });
-
-  it("the returned value satisfies the PeerTransport shape", () => {
-    const { transport } = makeTransport();
-    const peer: PeerTransport = toPeerTransport(transport);
-
-    // Touch each member to confirm the surface is present.
-    expect(typeof peer.send).toBe("function");
-    expect(typeof peer.ready).toBe("boolean");
-    expect(typeof peer.bufferedAmount).toBe("number");
-    expect(typeof peer.setOnMessage).toBe("function");
-    expect(typeof peer.setOnDrain).toBe("function");
-    expect(typeof peer.close).toBe("function");
   });
 });

@@ -13,42 +13,6 @@ import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport
 import { MockSignalingSocket } from "../signaling/_helpers";
 import { linkLoopbackPair, mockSocketFactory } from "../orchestrator/_helpers";
 
-/**
- * Stub RTCPeerConnection: the controller constructs a WebRtcBridge per
- * session, which needs a global RTCPeerConnection. We never drive its
- * internals here — we cross-wire two controllers' orchestrators directly via
- * the loopback-transport test seam, so the bridge stays idle.
- */
-interface StubEventTarget {
-  addEventListener(_type: string, _fn: (event: unknown) => void): void;
-}
-
-class StubRtcPeerConnection implements StubEventTarget {
-  public connectionState: RTCPeerConnectionState = "new";
-  public addEventListener(_type: string, _fn: (event: unknown) => void): void {
-    // no-op
-  }
-  public close(): void {
-    // no-op
-  }
-}
-
-const originalRtc = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-
-function installStubRtc(): void {
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function () {
-    return new StubRtcPeerConnection();
-  };
-}
-
-function restoreRtc(): void {
-  if (originalRtc === undefined) {
-    delete (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  } else {
-    (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = originalRtc;
-  }
-}
-
 const BASE_URL = "https://app.example";
 const BROKER_URL = "wss://broker.example";
 
@@ -187,13 +151,11 @@ describe("createChatController / file transfer", () => {
   let controllerB: ChatController;
 
   beforeEach(async () => {
-    installStubRtc();
     controllerA = await makeController();
     controllerB = await makeController();
   });
 
   afterEach(() => {
-    restoreRtc();
     controllerA.dispose();
     controllerB.dispose();
   });
