@@ -17,6 +17,7 @@ import { ctEqual } from "../crypto/ct-equal";
 import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "../crypto";
 import { deriveRole, encodeSessionId, encodeTranscript } from "../protocol/codec";
 import {
+  HANDSHAKE_TIMEOUT_MS,
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
@@ -107,6 +108,16 @@ export interface TransferSummary {
 export interface OrchestratorDeps {
   readonly brokerUrl: string;
   readonly baseUrl: string;
+  /**
+   * Public base URL used as the PREFIX of every generated invitation link
+   * (MEDIUM-E). Distinct from {@link baseUrl} (used for asset fetches and any
+   * same-origin relative URL) because the desktop shell's asset origin
+   * (`tauri://localhost`) is NOT a URL a responder can open. When unset the
+   * orchestrator falls back to {@link baseUrl} so non-desktop callers — which
+   * format invitations from the same origin that serves assets — see no
+   * behavior change.
+   */
+  readonly publicBaseUrl?: string;
   readonly repository: ConversationRepository;
   readonly socketFactory: SignalingSocketFactory;
   readonly identity: IdentityKeyPair;
@@ -123,6 +134,15 @@ export interface OrchestratorDeps {
    * bridge still see the Waiting/Signaling transitions.
    */
   readonly useInternalSignaling?: boolean;
+  /**
+   * Override the PAKE handshake await timeout (default
+   * {@link HANDSHAKE_TIMEOUT_MS}). Test-only seam: production must leave this
+   * unset so the canonical 30s constant bounds the awaits. Unit tests inject a
+   * small value so the timeout-rejection path is observable without waiting
+   * the real 30 seconds and without fighting fake timers against the real
+   * async WASM crypto.
+   */
+  readonly handshakeTimeoutMsOverride?: number;
 }
 
 const HELLO_BYTES = 163;
@@ -143,12 +163,27 @@ const SIGNATURE_MESSAGE_BYTES = 65;
  */
 export class ConversationOrchestrator {
   private readonly brokerUrl: string;
-  private readonly baseUrl: string;
+  /**
+   * Prefix of every generated invitation link (MEDIUM-E). Defaults to
+   * {@link baseUrl} when the caller did not supply a distinct public origin,
+   * preserving the legacy behavior for non-desktop callers. Used ONLY as the
+   * prefix argument to {@link formatInvitation} / {@link formatCodedInvitation};
+   * asset-resolution paths (e.g. `/ice-config`, `/wasm/...`) live outside the
+   * orchestrator, in the platform providers, so this field carries the single
+   * base the orchestrator itself cares about.
+   */
+  private readonly publicBaseUrl: string;
   private readonly repository: ConversationRepository;
   private readonly socketFactory: SignalingSocketFactory;
   private readonly identity: IdentityKeyPair;
   private readonly handlers: OrchestratorHandlers;
   private readonly useInternalSignaling: boolean;
+  /**
+   * Effective PAKE handshake await timeout. Defaults to
+   * {@link HANDSHAKE_TIMEOUT_MS}; overridden only via the test-only
+   * {@link OrchestratorDeps.handshakeTimeoutMsOverride} seam.
+   */
+  private readonly handshakeTimeoutMs: number;
 
   /**
    * Authoritative transition validator (R6/F6 + R7/F2). All state changes
@@ -209,6 +244,27 @@ export class ConversationOrchestrator {
   /** Resolver for the peer-confirm promise; set by `runPakeConfirmation`. */
   private pakeConfirmResolve: ((tag: Uint8Array) => void) | null = null;
   /**
+   * Rejector paired with {@link pakeConfirmResolve}; same role as
+   * {@link pakePeerShareReject} for the confirmation-tag await.
+   */
+  private pakeConfirmReject: ((err: unknown) => void) | null = null;
+  /**
+   * Timer handle for the {@link awaitPakeFinish} handshake-timeout. Armed when
+   * the await begins, cleared on every exit path (share arrives normally,
+   * timeout fires, or {@link teardownSession} rejects the parked resolver).
+   * Kept as a field so teardown can clear a dangling timer when it rejects the
+   * resolver out from under the race — prevents a late timer callback firing
+   * into an already-settled promise or after teardown. Null when no await is
+   * in flight.
+   */
+  private pakeShareTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Timer handle for the {@link runPakeConfirmation} handshake-timeout. Same
+   * lifecycle as {@link pakeShareTimeoutHandle}; armed when the confirm await
+   * begins, cleared on every exit path.
+   */
+  private pakeConfirmTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  /**
    * The local SPAKE2 side byte ('A'=0x41 / 'B'=0x42). Recorded when the local
    * share is sent so the confirmation handler can validate the peer's role
    * byte even after `pakeSession` has been consumed by `pakeFinish`.
@@ -265,12 +321,13 @@ export class ConversationOrchestrator {
 
   constructor(deps: OrchestratorDeps) {
     this.brokerUrl = deps.brokerUrl;
-    this.baseUrl = deps.baseUrl;
+    this.publicBaseUrl = deps.publicBaseUrl ?? deps.baseUrl;
     this.repository = deps.repository;
     this.socketFactory = deps.socketFactory;
     this.identity = deps.identity;
     this.handlers = deps.handlers ?? {};
     this.useInternalSignaling = deps.useInternalSignaling ?? true;
+    this.handshakeTimeoutMs = deps.handshakeTimeoutMsOverride ?? HANDSHAKE_TIMEOUT_MS;
   }
 
   get state(): ConnectionState {
@@ -404,8 +461,8 @@ export class ConversationOrchestrator {
     }
     const invitation =
       code !== undefined && code.length > 0
-        ? formatCodedInvitation(id, this.baseUrl, code)
-        : formatInvitation(id, this.baseUrl);
+        ? formatCodedInvitation(id, this.publicBaseUrl, code)
+        : formatInvitation(id, this.publicBaseUrl);
     this.invitationLink = invitation;
     this.connectSignaling();
     this.setState(ConnectionState.Waiting);
@@ -1089,9 +1146,17 @@ export class ConversationOrchestrator {
    * Resolver for the peer-share promise. Set by {@link awaitPakeFinish} and
    * resolved by {@link handlePakeShare} once the peer's SPAKE2 share lands.
    * Kept as a field (not a local) because the share may arrive before
-   * `awaitPakeFinish` is entered.
+   * `awaitPakeFinish` is entered. Paired with {@link pakePeerShareReject} so
+   * {@link teardownSession} can reject the parked promise (settling the
+   * coroutine) without going through the timeout path.
    */
   private pakePeerShareResolve: ((share: Uint8Array) => void) | null = null;
+  /**
+   * Rejector paired with {@link pakePeerShareResolve}. Captured so
+   * {@link teardownSession} can drive a `PakeError(Cancelled)` into the parked
+   * promise. Nulled alongside the resolver on every settle path.
+   */
+  private pakePeerShareReject: ((err: unknown) => void) | null = null;
 
   /**
    * Receive the peer's SPAKE2 share and resolve anyone waiting in
@@ -1127,7 +1192,10 @@ export class ConversationOrchestrator {
     }
     this.peerPakeShare = share;
     const resolve = this.pakePeerShareResolve;
+    // Clear both the resolver and its paired rejector; the await is settling
+    // normally, so any pending timeout/teardown callback must find null and no-op.
     this.pakePeerShareResolve = null;
+    this.pakePeerShareReject = null;
     resolve?.(share);
   }
 
@@ -1135,6 +1203,14 @@ export class ConversationOrchestrator {
    * Block until the peer's SPAKE2 share arrives, then run `pakeFinish` to
    * derive the shared secret. Throws a {@link PakeError} on any failure; the
    * caller ({@link verifyPeerAndComplete}) propagates it to `failHandshake`.
+   *
+   * The await is bounded by {@link HANDSHAKE_TIMEOUT_MS}: a silent peer that
+   * never delivers its share cannot park this coroutine (and the session) in
+   * `Verifying` forever. On timeout a `PakeError(Timeout)` is thrown via the
+   * resolver so the rejection propagates through `verifyPeerAndComplete` →
+   * `failHandshake` → `Disconnected`. The timer is cleared on every exit path
+   * (normal delivery, timeout, or {@link teardownSession} rejecting the parked
+   * resolver) so no dangling callback ever fires into a settled promise.
    */
   private async awaitPakeFinish(): Promise<Uint8Array> {
     const session = this.pakeSession;
@@ -1143,14 +1219,54 @@ export class ConversationOrchestrator {
     }
     let peerShare = this.peerPakeShare;
     if (peerShare === null) {
-      peerShare = await new Promise<Uint8Array>((resolve) => {
-        this.pakePeerShareResolve = resolve;
-      });
+      peerShare = await this.awaitPakeShareBounded();
     }
     this.peerPakeShare = null;
     const secret = await pakeFinish(session, peerShare);
     this.pakeSession = null;
     return secret;
+  }
+
+  /**
+   * Race the peer-share promise against {@link HANDSHAKE_TIMEOUT_MS}. Resolves
+   * with the peer's share when {@link handlePakeShare} lands it, or rejects
+   * with `PakeError(Timeout)` when the timer fires first. The timer is cleared
+   * on both paths. Double-settle-safe: {@link handlePakeShare} and
+   * {@link teardownSession} both null the resolver before acting, so a late
+   * timer callback (cleared but racing the clear) finds `null` and is a no-op.
+   */
+  private awaitPakeShareBounded(): Promise<Uint8Array> {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      // Capture the reject so the timeout / teardown can drive it. The
+      // resolve/reject pair is only ever called once: the first of {share
+      // delivery, timeout, teardown} to reach the resolver wins; the resolver
+      // AND its paired rejector are nulled by all three paths before acting,
+      // so a racing late callback finds null and no-ops.
+      this.pakePeerShareResolve = (share: Uint8Array): void => {
+        if (this.pakeShareTimeoutHandle !== null) {
+          clearTimeout(this.pakeShareTimeoutHandle);
+          this.pakeShareTimeoutHandle = null;
+        }
+        this.pakePeerShareReject = null;
+        resolve(share);
+      };
+      this.pakePeerShareReject = reject;
+      this.pakeShareTimeoutHandle = setTimeout(() => {
+        this.pakeShareTimeoutHandle = null;
+        // Only reject if OUR resolver is still the parked one. If the share
+        // arrived first, handlePakeShare already nulled the field and we no-op.
+        if (this.pakePeerShareResolve !== null) {
+          this.pakePeerShareResolve = null;
+          this.pakePeerShareReject = null;
+          reject(
+            new PakeError(
+              PakeErrorCode.Timeout,
+              `awaitPakeFinish timed out after ${this.handshakeTimeoutMs}ms with no peer share`,
+            ),
+          );
+        }
+      }, this.handshakeTimeoutMs);
+    });
   }
 
   /**
@@ -1168,12 +1284,12 @@ export class ConversationOrchestrator {
     const localTag = await derivePakeConfirmationTag(pakeSecret, transcriptHash, localRole);
     const localSideByte = localRole === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
     this.transport?.send(encodePakeConfirm(localSideByte, localTag));
-    // Await the peer's confirmation tag.
+    // Await the peer's confirmation tag, bounded by HANDSHAKE_TIMEOUT_MS so a
+    // silent peer cannot hold the session in Verifying forever after the share
+    // exchange completed. Same double-settle-safe pattern as awaitPakeShareBounded.
     let peerTag = this.peerPakeConfirm;
     if (peerTag === null) {
-      peerTag = await new Promise<Uint8Array>((resolve) => {
-        this.pakeConfirmResolve = resolve;
-      });
+      peerTag = await this.awaitPakeConfirmBounded();
     }
     this.peerPakeConfirm = null;
     const peerRole = localRole === Role.Initiator ? Role.Responder : Role.Initiator;
@@ -1184,6 +1300,39 @@ export class ConversationOrchestrator {
         "PAKE confirmation tag mismatch (wrong code or tampering); aborting handshake",
       );
     }
+  }
+
+  /**
+   * Race the peer-confirm-tag promise against {@link HANDSHAKE_TIMEOUT_MS}.
+   * Mirrors {@link awaitPakeShareBounded}: resolves when {@link handlePakeConfirm}
+   * delivers the tag, rejects with `PakeError(Timeout)` on timeout. Timer
+   * cleared on every path; double-settle-safe via the null-before-act guard.
+   */
+  private awaitPakeConfirmBounded(): Promise<Uint8Array> {
+    return new Promise<Uint8Array>((resolve, reject) => {
+      this.pakeConfirmResolve = (tag: Uint8Array): void => {
+        if (this.pakeConfirmTimeoutHandle !== null) {
+          clearTimeout(this.pakeConfirmTimeoutHandle);
+          this.pakeConfirmTimeoutHandle = null;
+        }
+        this.pakeConfirmReject = null;
+        resolve(tag);
+      };
+      this.pakeConfirmReject = reject;
+      this.pakeConfirmTimeoutHandle = setTimeout(() => {
+        this.pakeConfirmTimeoutHandle = null;
+        if (this.pakeConfirmResolve !== null) {
+          this.pakeConfirmResolve = null;
+          this.pakeConfirmReject = null;
+          reject(
+            new PakeError(
+              PakeErrorCode.Timeout,
+              `runPakeConfirmation timed out after ${this.handshakeTimeoutMs}ms with no peer confirm`,
+            ),
+          );
+        }
+      }, this.handshakeTimeoutMs);
+    });
   }
 
   /**
@@ -1216,7 +1365,10 @@ export class ConversationOrchestrator {
     }
     this.peerPakeConfirm = tag;
     const resolve = this.pakeConfirmResolve;
+    // Clear both the resolver and its paired rejector; the await is settling
+    // normally, so any pending timeout/teardown callback must find null and no-op.
     this.pakeConfirmResolve = null;
+    this.pakeConfirmReject = null;
     resolve?.(tag);
   }
 
@@ -1382,8 +1534,39 @@ export class ConversationOrchestrator {
     this.pakeSession = null;
     this.peerPakeShare = null;
     this.peerPakeConfirm = null;
-    this.pakePeerShareResolve = null;
-    this.pakeConfirmResolve = null;
+    // Reject any parked PAKE resolvers BEFORE nulling them so the coroutine
+    // parked in `verifyPeerAndComplete` (awaiting `awaitPakeFinish` /
+    // `runPakeConfirmation`) actually settles instead of leaking when the
+    // session is torn out from under it. The `Cancelled` code distinguishes a
+    // teardown-driven rejection from a genuine `Timeout`.
+    //
+    // Clear the timeout timers FIRST so a pending timer callback cannot race
+    // the rejection we're about to raise and double-settle the promise. After
+    // clearing, only one path can settle each parked promise: this rejection.
+    if (this.pakeShareTimeoutHandle !== null) {
+      clearTimeout(this.pakeShareTimeoutHandle);
+      this.pakeShareTimeoutHandle = null;
+    }
+    if (this.pakeConfirmTimeoutHandle !== null) {
+      clearTimeout(this.pakeConfirmTimeoutHandle);
+      this.pakeConfirmTimeoutHandle = null;
+    }
+    if (this.pakePeerShareReject !== null) {
+      this.pakePeerShareResolve = null;
+      const reject = this.pakePeerShareReject;
+      this.pakePeerShareReject = null;
+      reject(new PakeError(PakeErrorCode.Cancelled, "PAKE await cancelled: session torn down"));
+    } else {
+      this.pakePeerShareResolve = null;
+    }
+    if (this.pakeConfirmReject !== null) {
+      this.pakeConfirmResolve = null;
+      const reject = this.pakeConfirmReject;
+      this.pakeConfirmReject = null;
+      reject(new PakeError(PakeErrorCode.Cancelled, "PAKE await cancelled: session torn down"));
+    } else {
+      this.pakeConfirmResolve = null;
+    }
     this.pakeLocalSideByte = null;
     // CR-15: clear the test-only send-key mirror so a stale key never leaks
     // across a session boundary. Production code never reads this field.

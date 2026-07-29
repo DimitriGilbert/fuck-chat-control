@@ -95,7 +95,10 @@ function Router(): React.ReactElement {
       try {
         id = hexToConversationId(hex);
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : String(err));
+        // Redact internal detail (hex length / offset / decode internals) from
+        // the user-visible error bar. The original is kept for diagnostics.
+        console.warn("hexToConversationId failed", err);
+        setError("That conversation link could not be read.");
         return;
       }
       // resumeConversation handles BOTH the live-session case (cheap select,
@@ -103,7 +106,11 @@ function Router(): React.ReactElement {
       // with history seeding). Do NOT call selectConversation first — it throws
       // for non-live ids.
       void controller.resumeConversation(id).catch((err: unknown) => {
-        setError(err instanceof Error ? err.message : String(err));
+        // Upstream throws leak internal identifiers (e.g. unknown conversation
+        // id, broker/turn URLs, SDP from transport errors). Surface a generic
+        // message; keep the original for diagnostics only.
+        console.warn("resumeConversation failed", err);
+        setError("Could not resume the conversation.");
       });
     },
     [controller],

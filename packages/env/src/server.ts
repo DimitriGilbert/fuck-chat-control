@@ -9,6 +9,17 @@ export const env = createEnv({
     // sets it in production — see apps/web/src/server/broker.ts.
     CORS_ORIGIN: z.url().optional(),
     NODE_ENV: z.enum(["development", "production", "test"]),
+    // MEDIUM-E (Dokploy fix): PUBLIC_BASE_URL is the public web origin used as
+    // the PREFIX of every generated invitation link
+    // (e.g. "https://chat.example.com"). Distinct from the asset-resolution
+    // origin — in Dokploy the web container's runtime env (set inside the
+    // container AFTER compose interpolation) is the single source of truth, so
+    // this MUST be a runtime read (process.env via @t3-oss/env-core), NOT a
+    // build-time bake. Served to the SPA by /ice-config alongside iceServers;
+    // the SPA falls back to window.location.origin when unset.
+    // Kept optional + `.url()` so loopback/LAN/CI deployments (which format
+    // invitations from window.location.origin) keep working.
+    PUBLIC_BASE_URL: z.string().url().optional(),
     // Phase 0: ICE public endpoints + the server-held shared secret used to
     // mint time-limited TURN credentials (REST API / HMAC-SHA1). The secret
     // NEVER leaves the server — only ephemeral username/credential pairs reach

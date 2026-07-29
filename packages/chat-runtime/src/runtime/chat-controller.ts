@@ -92,6 +92,16 @@ export interface ChatControllerDeps {
   readonly brokerUrl: string;
   /** Base URL used to format invitation links. */
   readonly baseUrl: string;
+  /**
+   * Public base URL used as the PREFIX of every generated invitation link.
+   * MEDIUM-E: distinct from {@link baseUrl} because the asset-resolution base
+   * (used for `/ice-config`, `/wasm/...`) is often NOT a publicly reachable
+   * origin — e.g. the desktop shell's `tauri://localhost` asset handler is
+   * unusable as an invitation prefix. When unset, the controller falls back to
+   * {@link baseUrl} so non-desktop callers (which format invitations from the
+   * same origin that serves assets) see no behavior change.
+   */
+  readonly publicBaseUrl?: string;
   /** Owns the device identity. */
   readonly identityManager: IdentityManager;
   /** Owns the at-rest key used to seal history. */
@@ -488,6 +498,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       {
         brokerUrl: deps.brokerUrl,
         baseUrl: deps.baseUrl,
+        publicBaseUrl: deps.publicBaseUrl ?? deps.baseUrl,
         repository,
         socketFactory: deps.socketFactory,
         identity: deps.identityManager.get(),

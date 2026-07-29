@@ -64,3 +64,20 @@ temp
 # build of the frontend are gitignored.
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+
+# Expo / React Native generated native trees. `apps/mobile/android/` and
+# `apps/mobile/ios/` are the output of `expo prebuild` (incl. gradle build
+# output), regenerable from app.json + the plugins config. `.expo/` is Expo's
+# local state. None of these are source — never commit them.
+apps/mobile/android/
+apps/mobile/ios/
+apps/mobile/.expo/
+
+# Local review / planning working artifacts (subagent-review sessions, scratch
+# briefs, baselines). Not part of the shipped product.
+.review/
+.phase-b-brief.md
+.phase-c-brief.md
+PLAN-native-apps.md
+BASELINE.md
+FAILURE-react-419.md

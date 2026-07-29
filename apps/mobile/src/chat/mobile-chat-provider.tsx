@@ -42,7 +42,7 @@ import type { IceServer } from "@fuck-eu-chat-control/chat-runtime/transport/typ
 
 import * as React from "react";
 
-import { chatStorage } from "./mmkv-storage";
+import { chatStorage, ensureStorageReady } from "./mmkv-storage";
 import { rnPeerConnectionFactory } from "./rn-peer-connection-factory";
 import { rnSocketFactory } from "./rn-socket-factory";
 import { fetchIceServers, resolveRuntimeConfig } from "./config";
@@ -77,58 +77,84 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
 
     try {
       const { brokerUrl, baseUrl } = resolveRuntimeConfig();
-      // Register the MMKV-backed store as the runtime's DurableStorage BEFORE
-      // constructing any manager that may touch it. One sync instance backs
-      // identity, the at-rest key, and the durable flag store.
-      setDurableStorage(chatStorage);
-      const identityManager = createIdentityManager(chatStorage);
-      const atRestKeyManager = createAtRestKeyManager(chatStorage);
-      disposedIdentityManager = identityManager;
-      disposedAtRestKeyManager = atRestKeyManager;
-
-      // Load persisted identity + at-rest key BEFORE constructing the
-      // controller: createChatController reads both synchronously at
-      // construction (the at-rest key seeds the repository). Fetch ICE config
-      // in parallel — a fetch failure falls back to an empty list so
-      // loopback/LAN keep working.
-      void Promise.all([
-        identityManager.ensureLoaded(),
-        atRestKeyManager.ensureLoaded(),
-        fetchIceServers(),
-      ])
-        .then(([, , iceServers]) => {
+      // Load the OS-keychain-bound MMKV encryption key (generating + persisting
+      // it on first launch) and construct the encrypted MMKV instance BEFORE
+      // any manager reads from chatStorage. The runtime storage contract is
+      // synchronous, so chatStorage throws until ensureStorageReady() resolves;
+      // chaining it as the first async step keeps the manager construction
+      // (which reads chatStorage synchronously) inside the .then continuation.
+      // NOTE: AtRestKeyManager also exposes a passphrase/PIN mode
+      // (setPassphrase / unlock) that wraps the auto key under an
+      // Argon2id-derived KEK. That passphrase UX is intentionally UNWIRED in
+      // the mobile UI by product decision; wiring a user-facing passphrase/PIN
+      // boot flow is out of scope for v1. The OS-keychain-bound MMKV
+      // encryption key (loaded here) is the v1 at-rest mitigation: the raw
+      // AES at-rest key + identity private key are now sealed inside an MMKV
+      // file that is itself encrypted with a key held only in the OS
+      // keychain/keystore. Passphrase mode remains available for a future boot
+      // flow if the threat model shifts.
+      void ensureStorageReady()
+        .then(() => {
           if (cancelled) return;
-          const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
-            new InMemoryConversationRepository(atRestKey);
+          // Register the MMKV-backed store as the runtime's DurableStorage
+          // BEFORE constructing any manager that may touch it. One sync
+          // instance backs identity, the at-rest key, and the durable flag
+          // store.
+          setDurableStorage(chatStorage);
+          const identityManager = createIdentityManager(chatStorage);
+          const atRestKeyManager = createAtRestKeyManager(chatStorage);
+          disposedIdentityManager = identityManager;
+          disposedAtRestKeyManager = atRestKeyManager;
 
-          const instance = createChatController({
-            brokerUrl,
-            baseUrl,
-            identityManager,
-            atRestKeyManager,
-            repositoryFactory,
-            socketFactory: rnSocketFactory,
-            peerConnectionFactory: rnPeerConnectionFactory,
-            iceServers: iceServers as readonly IceServer[],
+          // Load persisted identity + at-rest key BEFORE constructing the
+          // controller: createChatController reads both synchronously at
+          // construction (the at-rest key seeds the repository). Fetch ICE
+          // config in parallel — a fetch failure falls back to an empty list
+          // so loopback/LAN keep working.
+          return Promise.all([
+            identityManager.ensureLoaded(),
+            atRestKeyManager.ensureLoaded(),
+            fetchIceServers(),
+          ]).then(([, , iceServers]) => {
+            if (cancelled) return;
+            const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
+              new InMemoryConversationRepository(atRestKey);
+
+            const instance = createChatController({
+              brokerUrl,
+              baseUrl,
+              identityManager,
+              atRestKeyManager,
+              repositoryFactory,
+              socketFactory: rnSocketFactory,
+              peerConnectionFactory: rnPeerConnectionFactory,
+              iceServers: iceServers as readonly IceServer[],
+            });
+            disposedController = instance;
+            setController(instance);
+            setState(instance.getState());
+            unsubscribe = instance.subscribe((next) => {
+              setState(next);
+            });
+            setReady(true);
           });
-          disposedController = instance;
-          setController(instance);
-          setState(instance.getState());
-          unsubscribe = instance.subscribe((next) => {
-            setState(next);
-          });
-          setReady(true);
         })
         .catch((err: unknown) => {
+          // Redact internal detail (broker/base URL, manager / controller
+          // construction identifiers) from state.error. The original is kept
+          // for diagnostics only.
+          console.warn("ChatProvider construction failed", err);
           setState({
             ...initialControllerState,
-            error: err instanceof Error ? err.message : String(err),
+            error: "Could not start the chat session.",
           });
         });
     } catch (err: unknown) {
+      // See .catch above: redact internal detail from state.error.
+      console.warn("ChatProvider construction failed", err);
       setState({
         ...initialControllerState,
-        error: err instanceof Error ? err.message : String(err),
+        error: "Could not start the chat session.",
       });
     }
 

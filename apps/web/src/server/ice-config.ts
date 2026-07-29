@@ -111,12 +111,21 @@ export function mintTurnCredentials(
  * server or fighting env-core's eager snapshot (see packages/env/src/server.ts:
  * `createEnv` parses `process.env` once at import time, so `vi.stubEnv` after
  * import has no effect on the already-built env object).
+ *
+ * `PUBLIC_BASE_URL` is included even though {@link buildIceServers} does not
+ * consume it: the route returns it alongside `iceServers` (see
+ * {@link IceConfigResponse}) so the SPA can format invitation links from a
+ * RUNTIME server value rather than a build-time bake. Keeping it in
+ * {@link IceEnv} lets the pure-helper test surface (which calls
+ * `buildIceServers` with an `IceEnv` literal) assert that the field is
+ * propagated correctly without standing up the dev server.
  */
 export interface IceEnv {
   readonly STUN_URL?: string;
   readonly TURN_URL?: string;
   readonly TURN_TLS_URL?: string;
   readonly TURN_SHARED_SECRET?: string;
+  readonly PUBLIC_BASE_URL?: string;
 }
 
 /**
@@ -159,25 +168,51 @@ export function buildIceServers(iceEnv: IceEnv, now: number): readonly RTCIceSer
 }
 
 /**
- * GET /ice-config → `{ iceServers: RTCIceServer[] }`.
+ * Shape of the GET /ice-config response. The `iceServers` field is the primary
+ * payload (Phase 0); `publicBaseUrl` (MEDIUM-E) carries the RUNTIME
+ * server-side public web origin the SPA should use as the prefix of every
+ * generated invitation link. Optional: when the server env does not configure
+ * `PUBLIC_BASE_URL`, the field is `undefined` and the SPA falls back to
+ * `window.location.origin`.
+ *
+ * `publicBaseUrl` is intentionally NOT a Cache-Control-differing field: like
+ * `iceServers`, it is identical for every client (a single operator-set
+ * origin), so the response stays cacheable across sessions.
+ */
+export interface IceConfigResponse {
+  readonly iceServers: readonly RTCIceServer[];
+  /**
+   * Public web origin (e.g. `https://chat.example.com`) the SPA should use as
+   * the invitation-link prefix. `undefined` when the operator has not
+   * configured `PUBLIC_BASE_URL`; the SPA translates that to
+   * `window.location.origin`.
+   */
+  readonly publicBaseUrl?: string;
+}
+
+/**
+ * GET /ice-config → {@link IceConfigResponse}.
  *
  * See module docstring. The `Cache-Control` max-age is shorter than the minted
  * credential TTL so a cached response is always still valid when the client
  * uses it (and the browser pulls a fresh credential pair on the next session).
  */
-export default defineEventHandler(
-  (
-    event,
-  ): {
-    readonly iceServers: readonly RTCIceServer[];
-  } => {
-    const now = Math.floor(Date.now() / 1000);
-    const iceServers = buildIceServers(env, now);
-    // public: the response is identical for every client (no per-user state —
-    // the username carries a constant id, not an identity). This lets the
-    // browser AND any shared CDN edge cache it for the TTL below. With no CDN
-    // this degrades to a normal fetch cache.
-    setHeader(event, "Cache-Control", `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
-    return { iceServers };
-  },
-);
+export default defineEventHandler((event): IceConfigResponse => {
+  const now = Math.floor(Date.now() / 1000);
+  const iceServers = buildIceServers(env, now);
+  // public: the response is identical for every client (no per-user state —
+  // the username carries a constant id, not an identity). This lets the
+  // browser AND any shared CDN edge cache it for the TTL below. With no CDN
+  // this degrades to a normal fetch cache.
+  setHeader(event, "Cache-Control", `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+  // MEDIUM-E (Dokploy fix): surface the runtime PUBLIC_BASE_URL so the SPA
+  // formats invitation links from a server-injected value instead of a
+  // build-time bake. Conditionally spread so the field is ABSENT (not
+  // `undefined` in JSON) when unset — both consumers (web + mobile) treat
+  // absence and empty identically, but omitting keeps the response body clean
+  // for the cache-key-normalizing proxies that distinguish key sets.
+  return {
+    iceServers,
+    ...(env.PUBLIC_BASE_URL !== undefined ? { publicBaseUrl: env.PUBLIC_BASE_URL } : {}),
+  };
+});

@@ -25,11 +25,17 @@ export class CryptoError extends Error {
  * code). `InvalidShare` covers a malformed peer share (wrong length or a point
  * not on the curve). `Abort` covers protocol-level aborts (wrong side byte,
  * replay, or a peer offering `SafetyNumberOnly` against a `Pake` invitation).
+ * `Timeout` is raised when the peer never delivers its share/confirmation
+ * within {@link HANDSHAKE_TIMEOUT_MS} (silent-peer remote DoS). `Cancelled` is
+ * raised when the handshake is torn down (e.g. via `teardownSession`) while a
+ * PAKE await is still parked — so the coroutine settles instead of leaking.
  */
 export const PakeErrorCode = {
   Mismatch: "pake_mismatch",
   InvalidShare: "pake_invalid_share",
   Abort: "pake_abort",
+  Timeout: "pake_timeout",
+  Cancelled: "pake_cancelled",
 } as const;
 
 export type PakeErrorCode = (typeof PakeErrorCode)[keyof typeof PakeErrorCode];

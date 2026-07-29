@@ -23,11 +23,27 @@
 //! deployment. When unset the array is `[]` — preserving the loopback-only
 //! posture so dev/LAN builds keep working with host-candidate WebRTC.
 //!
+//! MEDIUM-E (Dokploy fix): the invitation-link public base URL is NO LONGER a
+//! compile-time `option_env!("FCK_PUBLIC_BASE_URL")` value. That mechanism
+//! baked the URL into the binary at build time, which is incompatible with
+//! Dokploy's runtime-env-injection model (the secret/URL is injected into the
+//! web CONTAINER after the image is built, not into the Rust build). The web
+//! SPA now reads `PUBLIC_BASE_URL` from the server's `/ice-config` response at
+//! runtime (see apps/web/src/server/ice-config.ts). The desktop shell injects
+//! the literal `"self"` for `publicBaseUrl` so `resolveBrowserDeps()` in
+//! chat-provider.tsx translates it to `window.location.origin` — the web
+//! runtime then overrides it from `/ice-config` when the server is configured.
+//! If the desktop webview ever needs a baked-in public origin (e.g. for an
+//! air-gapped operator deployment with no reachable `/ice-config`), it can be
+//! threaded back through a compile-time const without touching the web path.
+//!
 //! The init script is registered on the `WebviewWindowBuilder` (NOT in JSON
 //! config — `initialization_script` is a builder method only; see
 //! https://docs.rs/tauri/latest/tauri/webview/struct.WebviewWindowBuilder.html#method.initialization_script).
 //! It runs after the global object is created and before the HTML document is
 //! parsed, so `__FCK_CONFIG__` is in place before any SPA module reads it.
+
+use serde::{Deserialize, Serialize};
 
 /// The broker URL the desktop app dials. See the module docs for the resolution
 /// rules. Inline so a `const` (not a `String`) — it is interpolated into the
@@ -45,6 +61,17 @@ const BROKER_URL: &str = match option_env!("FCK_BROKER_URL") {
 /// independently of the signaling broker.
 const BASE_URL: &str = "self";
 
+/// The invitation-link public base URL. MEDIUM-E (Dokploy fix): this is no
+/// longer a compile-time `option_env!("FCK_PUBLIC_BASE_URL")` read — the web
+/// SPA now gets the public origin from the RUNTIME `/ice-config` response
+/// (served by the web container from its `PUBLIC_BASE_URL` env, which Dokploy
+/// injects at container start). The desktop shell injects `"self"` here so
+/// `resolveBrowserDeps()` in chat-provider.tsx translates it to
+/// `window.location.origin` as a fallback; the SPA then overrides it from
+/// `/ice-config` when the server is configured. See the module-level docs for
+/// the rationale.
+const PUBLIC_BASE_URL: &str = BASE_URL;
+
 /// Operator-configured ICE servers as a JSON array string, read from
 /// `FCK_ICE_SERVERS` at compile time. Defaults to `"[]"` so loopback/LAN/CI
 /// builds keep working with host-candidate-only WebRTC. See the module docs
@@ -53,6 +80,42 @@ const ICE_SERVERS_JSON: &str = match option_env!("FCK_ICE_SERVERS") {
     Some(s) if !s.is_empty() => s,
     _ => "[]",
 };
+
+/// One or many ICE server URIs. `#[serde(untagged)]` picks the variant from
+/// the JSON shape: a JSON string deserializes to [`One`] and a JSON array to
+/// [`Many`]. On serialize each variant emits its native JSON form, so the
+/// re-emitted `__FCK_CONFIG__.iceServers` preserves the single-string-vs-array
+/// distinction the TypeScript `IceServer.urls: string | readonly string[]`
+/// union (`packages/chat-runtime/src/transport/types.ts`) requires — the web
+/// adapter reads it back as `server.urls as string | string[]`
+/// (`apps/web/src/features/chat/signaling/webrtc-adapter.ts`).
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum IceServerUrls {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// ICE server descriptor (STUN/TURN) matching the TypeScript `IceServer`
+/// contract in `packages/chat-runtime/src/transport/types.ts`. The desktop
+/// shell deserializes the compile-time `FCK_ICE_SERVERS` JSON into this typed
+/// shape — rejecting non-arrays and malformed elements at the Rust boundary
+/// (a `serde_json::Value` target would accept any JSON) — before
+/// re-serializing it into `window.__FCK_CONFIG__` for the SPA.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IceServer {
+    /// Required. Single URI or array of URIs; see [`IceServerUrls`].
+    urls: IceServerUrls,
+    /// Optional TURN username. `#[serde(default)]` so its absence in JSON
+    /// deserializes to `None`; `skip_serializing_if` omits it on re-emit so
+    /// the SPA never sees `"username": null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+    /// Optional TURN credential. Same optionality rules as [`username`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential: Option<String>,
+}
 
 /// Builds the JavaScript snippet that primes `window.__FCK_CONFIG__`. The
 /// object shape mirrors `FckRuntimeConfig` in
@@ -63,22 +126,45 @@ const ICE_SERVERS_JSON: &str = match option_env!("FCK_ICE_SERVERS") {
 /// ICE servers string is parsed first: `FCK_ICE_SERVERS` holds an already-JSON
 /// array, so `from_str` validates it and `to_string` re-emits canonical JSON —
 /// safe to interpolate as a bare JS array literal.
+///
+/// ICE servers parse into a TYPED `Vec<IceServer>` (not `serde_json::Value`)
+/// so serde rejects non-arrays and any element that does not match the
+/// TypeScript `IceServer` contract (`urls: string | readonly string[]`,
+/// optional `username`/`credential`). On any parse error the list falls back
+/// to `[]` AND emits a warning rather than panicking — `build_init_script` runs
+/// on every launch from `tauri::Builder::setup`, so a malformed env value must
+/// degrade to the same loopback-only posture as the unset case (see the
+/// module-level docs) instead of bricking the binary.
 fn build_init_script() -> String {
     let broker_url = serde_json::to_string(BROKER_URL).expect("broker URL is a finite string");
     let base_url = serde_json::to_string(BASE_URL).expect("base URL is a finite string");
-    let ice_servers = match serde_json::from_str::<serde_json::Value>(ICE_SERVERS_JSON) {
-        Ok(v) => serde_json::to_string(&v).expect("ICE servers re-serializes"),
-        Err(_) => panic!("FCK_ICE_SERVERS must be a JSON array, got: {ICE_SERVERS_JSON}"),
-    };
+    let public_base_url =
+        serde_json::to_string(PUBLIC_BASE_URL).expect("public base URL is a finite string");
+    let ice_servers: Vec<IceServer> = serde_json::from_str(ICE_SERVERS_JSON).unwrap_or_else(|e| {
+        eprintln!(
+            "FCK_ICE_SERVERS must be a JSON array of {{ urls, username?, credential? }} objects, \
+             falling back to [] (loopback-only). Parse error: {e}; raw value: {ICE_SERVERS_JSON}"
+        );
+        Vec::new()
+    });
+    // Re-serialize the typed list so the init script gets canonical JSON in
+    // the exact `{ urls, username?, credential? }` shape the SPA reads; this
+    // also escapes any string contents safe for embedding as a JS literal.
+    // Infallible: `IceServer` only contains `String`/`Option<String>`/`Vec<String>`,
+    // all of which always serialize, so `to_string` cannot fail.
+    let ice_servers = serde_json::to_string(&ice_servers).expect(
+        "IceServer only contains serializable primitives (String/Option<String>/Vec<String>)",
+    );
     format!(
         "Object.defineProperty(window, '__FCK_CONFIG__', {{\n  \
-           value: {{ brokerUrl: {broker}, baseUrl: {base}, iceServers: {ice} }},\n  \
+           value: {{ brokerUrl: {broker}, baseUrl: {base}, publicBaseUrl: {pbase}, iceServers: {ice} }},\n  \
            configurable: false,\n  \
            writable: false,\n  \
            enumerable: true\n  \
          }});\n",
         broker = broker_url,
         base = base_url,
+        pbase = public_base_url,
         ice = ice_servers,
     )
 }

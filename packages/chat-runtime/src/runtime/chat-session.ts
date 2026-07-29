@@ -40,6 +40,14 @@ function isAuthFailureError(err: unknown): boolean {
 export interface BuildSessionInput {
   readonly brokerUrl: string;
   readonly baseUrl: string;
+  /**
+   * Public base URL used as the PREFIX of every generated invitation link.
+   * MEDIUM-E: distinct from {@link baseUrl} (which is used for asset fetches)
+   * because the desktop shell's asset origin (`tauri://localhost`) is unusable
+   * as an invitation prefix. Defaults to {@link baseUrl} when unset, so
+   * non-desktop callers see no behavior change.
+   */
+  readonly publicBaseUrl: string;
   readonly repository: ConversationRepository;
   readonly socketFactory: SignalingSocketFactory;
   readonly identity: IdentityKeyPair;
@@ -181,6 +189,7 @@ export function buildOrchestrator(
   return new ConversationOrchestrator({
     brokerUrl: input.brokerUrl,
     baseUrl: input.baseUrl,
+    publicBaseUrl: input.publicBaseUrl,
     repository: input.repository,
     socketFactory: input.socketFactory,
     identity: input.identity,

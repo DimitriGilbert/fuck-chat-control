@@ -12,8 +12,7 @@
  * the handshake — a weaker guarantee if the comparison is skipped.
  */
 import * as React from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import * as Sharing from "expo-sharing";
+import { Pressable, Share, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { useChatController, useChatState } from "../chat/mobile-chat-provider";
 import { colors } from "../ui/colors";
@@ -63,11 +62,23 @@ export function StartConversationScreen({
 
   const handleShare = React.useCallback(async () => {
     if (invitation === null) return;
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(invitation, {
-        mimeType: "text/plain",
-        dialogTitle: "Share invitation",
-      });
+    // CRITICAL-B: strip the `~<PAKE-code>` tail before sharing. A coded
+    // invitation is `${baseUrl}#${hex32}~${code}`; the `~code` suffix is the
+    // SPAKE2 secret and MUST travel over a side channel, NOT inside the same
+    // payload as the link (see invitation.ts:formatCodedInvitation). The code
+    // is already rendered separately below with its own share guidance.
+    const linkOnly = invitation.split("~")[0];
+    try {
+      await Share.share(
+        { message: linkOnly, title: "Share invitation" },
+        { dialogTitle: "Share invitation" },
+      );
+    } catch (err: unknown) {
+      setError(
+        err instanceof Error
+          ? `Could not open the share sheet: ${err.message}`
+          : "Could not open the share sheet.",
+      );
     }
   }, [invitation]);
 

@@ -12,6 +12,16 @@
  *     value: { brokerUrl: "...", baseUrl: "...", iceServers: [...] }, ...
  *   });
  * Keep both sides in sync.
+ *
+ * MEDIUM-E (Dokploy fix): the desktop `publicBaseUrl` is now ALWAYS the
+ * literal `"self"` (translated by `resolveBrowserDeps` to
+ * `window.location.origin`). The compile-time `option_env!("FCK_PUBLIC_BASE_URL")`
+ * mechanism was REMOVED because Dokploy injects runtime env into the web
+ * CONTAINER after the image is built, not into the Rust build — a compile-time
+ * const is the wrong layer. The web SPA reads the runtime public origin from
+ * the server's `/ice-config` response; the desktop shell injects `"self"` as a
+ * pure fallback that the web runtime overrides when `/ice-config` carries a
+ * configured value.
  */
 import type { IceServer } from "@fuck-eu-chat-control/chat-runtime/transport/types";
 
@@ -26,6 +36,17 @@ export interface FckRuntimeConfig {
    * `window.location.origin`.
    */
   readonly baseUrl?: string;
+  /**
+   * Base URL used as the PREFIX of every generated invitation link. The
+   * desktop shell now ALWAYS injects `"self"` (translated by
+   * `resolveBrowserDeps` to `window.location.origin`). The WEB app overrides
+   * this at runtime from the server's `/ice-config` response (the
+   * `PUBLIC_BASE_URL` server env, which Dokploy injects into the container).
+   * The field is kept on the injected shape so the desktop-init-script and
+   * the web-fallback paths stay symmetric with `baseUrl`; the value `"self"`
+   * is treated identically to `undefined` by the translator.
+   */
+  readonly publicBaseUrl?: string;
   /**
    * Operator-configured ICE server list (STUN/TURN/TURNS) injected by the
    * desktop shell at build time via `FCK_ICE_SERVERS`. When present and

@@ -26,7 +26,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob: tauri: asset: http://asset.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://* wss://*; font-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'",
+      "csp": "default-src 'self'; img-src 'self' data: blob: tauri: asset: http://asset.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://localhost:* wss://*; font-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'",
       "devCsp": "default-src 'self'; img-src 'self' data: blob: tauri: asset: http://asset.localhost http://localhost:3001; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost ws://* wss://* http://localhost:3001; font-src 'self' data:; worker-src 'self' blob:; manifest-src 'self'; frame-ancestors 'none'"
     }
   },
