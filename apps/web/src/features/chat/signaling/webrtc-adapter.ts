@@ -167,9 +167,14 @@ export class WebRtcAdapter implements PeerConnectionInterface {
   public constructor(options: WebRtcAdapterOptions = {}) {
     this.handlers = options;
     // Map the neutral IceServer[] to the DOM RTCIceServer[] the
-    // RTCPeerConnection constructor expects. The shapes are structurally
-    // identical ({urls, username?, credential?}); the mapping is explicit so
-    // the adapter is the single boundary that touches the DOM WebRTC types.
+    // RTCPeerConnection constructor expects. The neutral type intentionally
+    // OMITS `credentialType` (YAGNI): the DOM default of `"password"` is
+    // correct for the HMAC-SHA1 long-term-password TURN credentials minted by
+    // `apps/web/src/server/ice-config.ts` today. Should an oauth TURN setup be
+    // added later, `credentialType` would have to be threaded through the
+    // neutral `IceServer` type (and the minter updated to emit it) — until
+    // then the omission is deliberate. The mapping is explicit so this adapter
+    // remains the single boundary that touches the DOM WebRTC types.
     const rtcIceServers: RTCIceServer[] = (options.iceServers ?? []).map((server) => {
       const mapped: RTCIceServer = { urls: server.urls as string | string[] };
       if (server.username !== undefined) mapped.username = server.username;

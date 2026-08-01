@@ -137,6 +137,30 @@ describe("auth-failed-store (SEC-1)", () => {
       setDurableStorage(storage);
     }
   });
+
+  it("swallows a throwing setItem (Safari private-mode QuotaExceededError): markAuthFailedDurable resolves without throwing", async () => {
+    // Phase 6.1 regression: a store whose setItem throws (Safari private mode,
+    // mid-session quota exhaustion) must NOT propagate the throw out of
+    // markAuthFailedDurable, which the orchestrator fires-and-forgets. The L1
+    // try/catch in writeRecord is the production guard; this test exercises it
+    // directly. A non-throwing setItem (the prior test) does not cover it.
+    const throwingStore: MemoryStorage = new MemoryStorage();
+    spyOnStorage(throwingStore, "setItem", () => {
+      throw new Error("quota exceeded");
+    });
+    setDurableStorage(throwingStore);
+    try {
+      // The write must settle (not reject) and leave no payload behind — the
+      // in-memory best-effort path means a lost write is invisible on read.
+      await expect(markAuthFailedDurable(ID_A)).resolves.toBeUndefined();
+      // readRecord's getItem is the default MemoryStorage read, which returns
+      // null for an absent key, so the flag reads as false after the swallowed
+      // write. (writeRecord's swallowed throw prevented any payload landing.)
+      await expect(getAuthFailedDurable(ID_A)).resolves.toBe(false);
+    } finally {
+      setDurableStorage(storage);
+    }
+  });
 });
 
 /** Replace a method on a MemoryStorage with a stub for the duration of a test. */

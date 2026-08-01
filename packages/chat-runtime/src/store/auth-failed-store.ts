@@ -37,7 +37,15 @@ function readRecord(): Record<string, true> {
 function writeRecord(record: Record<string, true>): void {
   const store = getDurableStorage();
   if (store === null) return;
-  store.setItem(AUTH_FAILED_STORAGE_KEY, JSON.stringify(record));
+  try {
+    store.setItem(AUTH_FAILED_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // Swallow setItem failures (e.g. Safari private-mode QuotaExceededError)
+    // to honor the "Never throws" contract on `markAuthFailedDurable`. A lost
+    // write only means the flag will not survive a reload; the synchronous
+    // in-memory cache still defends the current session.
+    return;
+  }
 }
 
 function keyOf(id: ConversationId): string {

@@ -14,7 +14,8 @@ import {
   InMemoryConversationRepository,
   setDurableStorage,
 } from "@fuck-eu-chat-control/chat-runtime/store";
-import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRepository, DurableStorage } from "@fuck-eu-chat-control/chat-runtime/store";
+import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
 import { setSpake2ModuleUrl } from "@fuck-eu-chat-control/chat-runtime/crypto/pake";
 import type {
   SignalingSocket,
@@ -24,7 +25,6 @@ import type {
   IceServer,
   PeerConnectionFactory,
 } from "@fuck-eu-chat-control/chat-runtime/transport/types";
-import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 import { getFckConfig } from "@/features/chat/runtime/fck-config";
 
@@ -128,9 +128,29 @@ function resolveBrowserDeps(): {
     // Filter out an empty injected array so the provider treats "no servers
     // configured" the same as "field absent" — both fall back to the network
     // fetch on the web build, and to host-candidate-only WebRTC on desktop.
+    //
+    // M2: per-entry validation at the boundary. The injected list is threaded
+    // through from `window.__FCK_CONFIG__` (Rust-built JSON) with a length
+    // check only; a malformed entry (e.g. `url:` instead of `urls:`, or a
+    // `{ username, credential }`-only entry with no `urls`) would otherwise
+    // flow into `new RTCPeerConnection({ iceServers: [{ urls: undefined }] })`
+    // and silently break candidate gathering. Mirror the /ice-config fetch
+    // path's reshape: project each entry to `{ urls, username?, credential? }`
+    // and DROP any whose `urls` is not a string or non-empty array — stricter
+    // to drop just the bad entry and keep the rest than to fail the whole list.
     const iceServers =
       injected.iceServers !== undefined && injected.iceServers.length > 0
         ? injected.iceServers
+            .map((s): IceServer | null => {
+              if (typeof s.urls !== "string" && !isNonEmptyStringArray(s.urls)) return null;
+              const base: IceServer = { urls: s.urls };
+              return {
+                ...base,
+                ...(s.username !== undefined ? { username: s.username } : {}),
+                ...(s.credential !== undefined ? { credential: s.credential } : {}),
+              };
+            })
+            .filter((s): s is IceServer => s !== null)
         : undefined;
     return { brokerUrl: injected.brokerUrl, baseUrl, publicBaseUrl, iceServers };
   }
@@ -223,6 +243,78 @@ async function fetchIceConfig(): Promise<{
 
 const initialControllerState: ChatControllerState = initialChatControllerState;
 
+/**
+ * Probes `window.localStorage` and returns either a throw-swallowing wrapper
+ * (when the probe writes cleanly) or `null` (Safari private mode, disabled
+ * storage, quota-exceeded even on the probe). Returning `null` engages the
+ * runtime's existing null-degradation path: the durable store reads as "no
+ * value" and writes no-op, so first-run identity / at-rest key generation
+ * proceeds against an in-memory-only backing rather than throwing a
+ * `QuotaExceededError` that aborts controller construction permanently.
+ *
+ * The wrapper re-wraps EVERY `getItem`/`setItem` in try/catch because Safari
+ * private mode throws on write even when the read probe succeeds, and a quota
+ * exhaustion hit later in the session must not take down the controller. The
+ * surface matches {@link DurableStorage} exactly: synchronous
+ * `getItem → string | null`, `setItem → void`.
+ *
+ * `createIdentityManager` and `createAtRestKeyManager` both consume the same
+ * `{ getItem, setItem }` shape and share the SAME wrapped instance here so a
+ * single probe governs both. When the probe fails the managers receive a
+ * no-op store (reads "absent", writes drop) — mirroring the runtime's
+ * null-degradation semantics for managers that take a non-nullable storage.
+ */
+function safeStorage(): DurableStorage | null {
+  const probeKey = "__fck_storage_probe__";
+  try {
+    window.localStorage.setItem(probeKey, "1");
+    window.localStorage.removeItem(probeKey);
+  } catch {
+    return null;
+  }
+  return {
+    getItem(key: string): string | null {
+      try {
+        return window.localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
+    setItem(key: string, value: string): void {
+      try {
+        window.localStorage.setItem(key, value);
+      } catch {
+        // Swallow: a throw on write (Safari private mode, quota exhausted
+        // mid-session) must not reach the controller. Persistence is
+        // best-effort; the runtime already tolerates a null store.
+      }
+    },
+  };
+}
+
+/**
+ * No-op store handed to the identity / at-rest-key managers when
+ * `safeStorage()` returns `null`. Their factory signatures take a non-nullable
+ * `{ getItem, setItem }`, but we want the SAME degradation as
+ * `setDurableStorage(null)`: reads "absent" (so first-run generation proceeds)
+ * and writes drop (ephemeral session). This keeps the managers' contracts
+ * intact without forcing a `null`-tolerant signature change in chat-runtime.
+ */
+const ephemeralStorage: DurableStorage = {
+  getItem: (): string | null => null,
+  setItem: (): void => {},
+};
+
+/**
+ * Narrows an unknown value to a non-empty `readonly string[]`. Used by the
+ * injected-ICE-server validator to accept the `IceServer.urls` array form
+ * without an `any` cast. A non-string element or empty array rejects the
+ * entry so it is dropped at the boundary.
+ */
+function isNonEmptyStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string");
+}
+
 export interface ChatContextValue {
   readonly controller: ChatController | null;
   readonly state: ChatControllerState;
@@ -255,16 +347,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
     let cancelled = false;
 
     try {
-      const { brokerUrl, baseUrl, publicBaseUrl, iceServers: injectedIceServers } =
-        resolveBrowserDeps();
+      const {
+        brokerUrl,
+        baseUrl,
+        publicBaseUrl,
+        iceServers: injectedIceServers,
+      } = resolveBrowserDeps();
       // Phase A.6: register the platform's durable KV store (window.localStorage)
       // and the SPAKE2 WASM module URL the runtime imports lazily. These MUST be
       // registered before createChatController so the runtime core (which no
       // longer touches DOM globals directly) reads through the injected handles.
-      setDurableStorage(window.localStorage);
+      //
+      // H3: wrap localStorage so a throwing store degrades to `null` rather than
+      // aborting controller construction. Safari private-mode throws
+      // QuotaExceededError on the FIRST write (identity/key gen during
+      // first-run), which without this wrapper propagates out of the effect and
+      // leaves `controller` null + `ready` false forever. The runtime's
+      // null-degradation path reads "no value" / no-ops writes, so first-run
+      // generation proceeds against in-memory-only backing. The managers take a
+      // non-nullable store so they receive a no-op fallback when the probe
+      // failed; both share the SAME storage instance (single probe governs all).
+      const storage = safeStorage();
+      // Only register when the probe succeeded. `setDurableStorage`'s signature
+      // is non-nullable, and leaving the module-level store at its initial
+      // `null` IS the runtime's null-degradation path (getDurableStorage()
+      // returns null → auth-failed store reads "absent", writes no-op).
+      if (storage !== null) {
+        setDurableStorage(storage);
+      }
+      const managerStorage = storage ?? ephemeralStorage;
       setSpake2ModuleUrl("/wasm/spake2/pkg/fck_spake2.js");
-      const identityManager: IdentityManager = createIdentityManager(window.localStorage);
-      const atRestKeyManager: AtRestKeyManager = createAtRestKeyManager(window.localStorage);
+      const identityManager: IdentityManager = createIdentityManager(managerStorage);
+      const atRestKeyManager: AtRestKeyManager = createAtRestKeyManager(managerStorage);
       disposedIdentityManager = identityManager;
       disposedAtRestKeyManager = atRestKeyManager;
 
@@ -312,11 +426,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
         atRestKeyManager.ensureLoaded(),
         iceConfigPromise,
       ])
-        .then(([, , iceConfig]) => {
+        .then(async ([, , iceConfig]) => {
           if (cancelled) return;
-          const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
-            new InMemoryConversationRepository(atRestKey);
-
           // Phase A.4: inject the web WebRTC adapter. The runtime core calls
           // this factory instead of `new WebRtcAdapter(...)` so the no-DOM
           // chat-runtime package never references RTCPeerConnection directly.
@@ -330,17 +441,55 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           const resolvedPublicBaseUrl =
             iceConfig.publicBaseUrl !== undefined ? iceConfig.publicBaseUrl : publicBaseUrl;
 
+          // Persistence: prefer the OPFS-backed SQLite store so conversations
+          // and messages survive reloads. Fall back to the in-memory repo when
+          // OPFS is unavailable (private browsing, sandboxed iframes, or any
+          // browser that lacks navigator.storage.getDirectory + Worker). The
+          // fallback keeps the chat working — just without cross-reload history.
+          // The repo is built BEFORE the controller (the OPFS DB open + the
+          // collections' first hydration are async); a ready repo is then passed
+          // in via `repository` so the controller stays synchronous.
+          const atRestKey = atRestKeyManager.get();
+          let repository: ConversationRepository;
+          try {
+            repository = await BrowserDbConversationRepository.create({
+              databaseName: "fck-chat-control",
+              atRestKey,
+            });
+          } catch {
+            repository = new InMemoryConversationRepository(atRestKey);
+          }
+
           const instance = createChatController({
             brokerUrl,
             baseUrl,
             publicBaseUrl: resolvedPublicBaseUrl,
             identityManager,
             atRestKeyManager,
-            repositoryFactory,
+            repository,
+            // Factory is required by the type but unused when `repository` is set.
+            repositoryFactory: () => repository,
             socketFactory: createBrowserSocket,
             peerConnectionFactory,
             iceServers: iceConfig.iceServers,
           });
+          // M3: re-check `cancelled` AFTER the async repository-create yield
+          // and BEFORE publishing the controller. The check at the top of this
+          // .then runs synchronously, but the `await BrowserDbConversationRepository.create`
+          // above is a real yield — if unmount fired during it, the cleanup
+          // already ran with `disposedController === null` (socket/peer/OPFS
+          // nothing yet to release) and this resumed continuation would
+          // otherwise assign `disposedController = instance`, then call
+          // setController/subscribe/setReady on an unmounted component (leaked
+          // controller + setState-on-unmounted). Construct-then-dispose here
+          // releases the broker socket, peer connections, and OPFS handles the
+          // constructor just opened, then bail without touching React state.
+          // This race is reachable via ordinary route transitions, not just
+          // StrictMode double-mount (StrictMode is not enabled in this app).
+          if (cancelled) {
+            instance.dispose();
+            return;
+          }
           disposedController = instance;
           setController(instance);
           setState(instance.getState());
