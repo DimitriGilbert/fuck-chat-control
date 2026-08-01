@@ -327,7 +327,18 @@ export class ConversationOrchestrator {
     this.identity = deps.identity;
     this.handlers = deps.handlers ?? {};
     this.useInternalSignaling = deps.useInternalSignaling ?? true;
-    this.handshakeTimeoutMs = deps.handshakeTimeoutMsOverride ?? HANDSHAKE_TIMEOUT_MS;
+    // M6: validate the test-only override — a non-finite or non-positive value
+    // (0, negative, NaN) would make the handshake timer fire immediately and
+    // falsely fail every handshake. Silently fall back to the production bound
+    // rather than throwing (the field is documented test-only). A valid finite
+    // positive number is honoured (preserving the test seam).
+    const timeoutOverride = deps.handshakeTimeoutMsOverride;
+    this.handshakeTimeoutMs =
+      typeof timeoutOverride === "number" &&
+      Number.isFinite(timeoutOverride) &&
+      timeoutOverride > 0
+        ? timeoutOverride
+        : HANDSHAKE_TIMEOUT_MS;
   }
 
   get state(): ConnectionState {
@@ -1694,18 +1705,27 @@ export class ConversationOrchestrator {
 
 /**
  * R7/F3: classify a handshake error as a durable auth failure. An
- * {@link OrchestratorErrorCode.IdentityChanged} or any {@link PakeError}
- * indicates the peer's identity did not verify (either the TOFU key changed
- * or the PAKE confirmation tag mismatched). Per the PRD TOFU clause, recovery
- * requires a fresh invitation; the orchestrator durably records the flag so
- * retry() can block the caller from re-attempting on the same conversation.
+ * {@link OrchestratorErrorCode.IdentityChanged} or a genuine cryptographic
+ * {@link PakeError} indicates the peer's identity did not verify (either the
+ * TOFU key changed or the PAKE confirmation tag mismatched). Per the PRD TOFU
+ * clause, recovery requires a fresh invitation; the orchestrator durably
+ * records the flag so retry() can block the caller from re-attempting on the
+ * same conversation.
+ *
+ * H1: `PakeErrorCode.Cancelled` and `PakeErrorCode.Timeout` are NOT auth
+ * failures — `Cancelled` is raised when a user-driven `leave()`/teardown
+ * rejects a parked PAKE await, and `Timeout` is an operational silent-peer
+ * condition. Treating either as durable would brick the conversation: a
+ * teardown during a parked await would set the durable flag and subsequent
+ * retry() calls would throw `AuthFailedRetryBlocked` across reloads. Only
+ * `Mismatch`, `InvalidShare`, and `Abort` are cryptographic auth failures.
  */
 function isAuthFailureError(err: unknown): boolean {
   if (err instanceof OrchestratorError && err.code === OrchestratorErrorCode.IdentityChanged) {
     return true;
   }
   if (err instanceof PakeError) {
-    return true;
+    return err.code !== PakeErrorCode.Cancelled && err.code !== PakeErrorCode.Timeout;
   }
   return false;
 }

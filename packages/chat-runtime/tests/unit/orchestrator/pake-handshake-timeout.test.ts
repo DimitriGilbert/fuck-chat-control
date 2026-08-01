@@ -16,7 +16,7 @@ import {
   PAKE_MESSAGE_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { getAuthFailedDurable, InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
@@ -275,6 +275,29 @@ describe("ConversationOrchestrator PAKE handshake timeout (HIGH-A)", () => {
       .filter((e): e is PakeError => e instanceof PakeError)
       .filter((e) => e.code === PakeErrorCode.Cancelled);
     expect(cancelledErrors.length).toBe(1);
+
+    // H1 regression: a teardown-driven PakeError(Cancelled) must NOT be
+    // classified as a durable auth failure. Before the fix, isAuthFailureError
+    // returned true for ANY PakeError, so failHandshake set authFailedCached +
+    // persisted markAuthFailed/markAuthFailedDurable — bricking the conversation
+    // so a subsequent retry() threw AuthFailedRetryBlocked across reloads.
+    // Assert the durable flag was never written (repo + durable store) and that
+    // retry() does NOT throw AuthFailedRetryBlocked. retry() needs a settled
+    // Disconnected state and the conversation id; both hold after leave().
+    const convoId = initiator.orchestrator.conversationId;
+    expect(convoId).not.toBeNull();
+    const cid = convoId as NonNullable<typeof convoId>;
+    // Allow the fire-and-forget markAuthFailed write (if it had fired) to land
+    // before reading the flags back.
+    await tick(20);
+    expect(await initiator.repository.getAuthFailed(cid)).toBe(false);
+    expect(await getAuthFailedDurable(cid)).toBe(false);
+    expect(() => {
+      initiator.orchestrator.retry();
+    }).not.toThrow();
+    // retry() transitions to Signaling; cancel that to avoid a dangling
+    // reconnect attempt polluting later assertions in this test process.
+    initiator.orchestrator.leave();
 
     // The contract under test: the coroutine SETTLED (no leak) and no timer
     // fires afterward. Wait well past the timeout; a leaked/dangling timer
