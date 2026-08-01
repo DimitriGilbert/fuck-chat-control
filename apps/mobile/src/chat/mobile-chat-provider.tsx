@@ -47,6 +47,22 @@ import { rnPeerConnectionFactory } from "./rn-peer-connection-factory";
 import { rnSocketFactory } from "./rn-socket-factory";
 import { fetchIceServers, resolveRuntimeConfig } from "./config";
 
+/**
+ * Sentinel thrown when `ensureStorageReady()` rejects — i.e. the OS
+ * keychain/keystore is unavailable so the MMKV encryption key cannot be
+ * loaded/generated. Module-private: the only consumer is the construction
+ * `.catch` below, which uses `instanceof` to surface the specific user-facing
+ * message ("secure storage unavailable") instead of the generic "could not
+ * start" error. Wrapping the original cause keeps the underlying SecureStore
+ * error available for diagnostics without leaking it into state.error.
+ */
+class SecureStorageUnavailableError extends Error {
+  constructor(public readonly cause: unknown) {
+    super("Secure storage is unavailable on this device.");
+    this.name = "SecureStorageUnavailableError";
+  }
+}
+
 export interface ChatContextValue {
   readonly controller: ChatController | null;
   readonly state: ChatControllerState;
@@ -94,6 +110,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // keychain/keystore. Passphrase mode remains available for a future boot
       // flow if the threat model shifts.
       void ensureStorageReady()
+        .catch((storageErr: unknown) => {
+          // H2 fail-closed: ensureStorageReady() rejects when the OS
+          // keychain/keystore is unavailable (SecureStore rejected while
+          // loading/generating the MMKV encryption key). storageInstance
+          // stays null, so the runtime managers can NOT be constructed —
+          // constructing them would throw "used before ready" anyway, and
+          // more importantly would have no encrypted store to read/write.
+          // Wrap in the sentinel so the terminal .catch surfaces the specific
+          // user-facing message instead of the generic construction error.
+          // Rethrow to keep the chain rejected so the construction .then is
+          // skipped (controller is never built on a plaintext store).
+          throw new SecureStorageUnavailableError(storageErr);
+        })
         .then(() => {
           if (cancelled) return;
           // Register the MMKV-backed store as the runtime's DurableStorage
@@ -117,6 +146,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
             fetchIceServers(),
           ]).then(([, , iceServers]) => {
             if (cancelled) return;
+            // React Native has no OPFS/Web Worker, so the browser SQLite
+            // persistence package is not usable here. History is in-memory for
+            // now; identity/at-rest/durable flags persist via MMKV. A native
+            // SQLite store is a follow-up.
             const repositoryFactory = (atRestKey: AtRestKey): ConversationRepository =>
               new InMemoryConversationRepository(atRestKey);
 
@@ -142,7 +175,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
         .catch((err: unknown) => {
           // Redact internal detail (broker/base URL, manager / controller
           // construction identifiers) from state.error. The original is kept
-          // for diagnostics only.
+          // for diagnostics only. A SecureStorageUnavailableError carries the
+          // specific H2 fail-closed message; anything else is a construction
+          // failure (manager/controller/ICE) and gets the generic message.
+          if (err instanceof SecureStorageUnavailableError) {
+            console.warn(
+              "ChatProvider: secure storage unavailable, cannot start chat",
+              err.cause,
+            );
+            setState({
+              ...initialControllerState,
+              error:
+                "Secure storage is unavailable on this device. Chat cannot start safely.",
+            });
+            return;
+          }
           console.warn("ChatProvider construction failed", err);
           setState({
             ...initialControllerState,

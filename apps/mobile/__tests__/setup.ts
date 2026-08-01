@@ -72,28 +72,58 @@ jest.mock("react-native-mmkv", () => {
 // Expose the recorded createMMKV calls to test files via the global object so
 // the mmkv-storage regression test can assert on `encryptionType` without a
 // dedicated module export from the mock factory.
-(globalThis as unknown as {
-  __MMKV_CREATE_CALLS__: CreateMMKVConfiguration[];
-}).__MMKV_CREATE_CALLS__ = mockCreateMMKVCalls;
+(
+  globalThis as unknown as {
+    __MMKV_CREATE_CALLS__: CreateMMKVConfiguration[];
+  }
+).__MMKV_CREATE_CALLS__ = mockCreateMMKVCalls;
 
 // Mock expo-secure-store so mmkv-storage's loadOrCreateMmkvEncryptionKey runs
 // under jest without a native keychain. The mock backs getItemAsync with an
 // in-memory Map so the "generate once, reuse thereafter" contract is visible
 // to tests: the first getItemAsync returns null (forcing generation), the
 // setItemAsync captures the generated key, and any subsequent read returns it.
+// setItemAsync also records its options arg on __SECURE_STORE_SET_CALLS__ so
+// the mmkv-storage test can assert the keychainAccessible option (M4).
+// NOTE: jest.mock() factories cannot reference out-of-scope variables unless
+// they are prefixed with `mock`, so the recorder array is `mock...` and then
+// aliased onto the global for the test file to read.
+interface SecureStoreSetCall {
+  key: string;
+  value: string;
+  options?: { keychainAccessible?: string };
+}
+const mockSecureStoreSetCalls: SecureStoreSetCall[] = (
+  globalThis as unknown as { __SECURE_STORE_SET_CALLS__: SecureStoreSetCall[] }
+).__SECURE_STORE_SET_CALLS__ ?? [];
+(
+  globalThis as unknown as { __SECURE_STORE_SET_CALLS__: SecureStoreSetCall[] }
+).__SECURE_STORE_SET_CALLS__ = mockSecureStoreSetCalls;
 jest.mock("expo-secure-store", () => {
   const store = new Map<string, string>();
   return {
-    getItemAsync: (key: string): Promise<string | null> =>
-      Promise.resolve(store.get(key) ?? null),
-    setItemAsync: (key: string, value: string): Promise<void> => {
+    getItemAsync: (key: string): Promise<string | null> => Promise.resolve(store.get(key) ?? null),
+    setItemAsync: (
+      key: string,
+      value: string,
+      options?: { keychainAccessible?: string },
+    ): Promise<void> => {
       store.set(key, value);
+      mockSecureStoreSetCalls.push({ key, value, options });
       return Promise.resolve();
     },
     getItem: (key: string): string | null => store.get(key) ?? null,
     setItem: (key: string, value: string): void => {
       store.set(key, value);
     },
+    // JS API constants — the call-site passes SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY.
+    WHEN_UNLOCKED: "WHEN_UNLOCKED",
+    AFTER_FIRST_UNLOCK: "AFTER_FIRST_UNLOCK",
+    ALWAYS: "ALWAYS",
+    WHEN_PASSCODE_SET_THIS_DEVICE_ONLY: "WHEN_PASSCODE_SET_THIS_DEVICE_ONLY",
+    WHEN_UNLOCKED_THIS_DEVICE_ONLY: "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
+    AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY: "AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY",
+    ALWAYS_THIS_DEVICE_ONLY: "ALWAYS_THIS_DEVICE_ONLY",
   };
 });
 

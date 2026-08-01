@@ -32,12 +32,24 @@
  * Documents directory (`$(Documents)/mmkv/`). To keep it out of iCloud/iTunes
  * backups, the build should set `NSURLIsExcludedFromBackupKey` on that
  * directory. There is no clean Expo config-plugin route for per-file iOS
- * backup exclusion (the `expo-secure-store` plugin covers keychain auth, not
- * arbitrary file attributes), so this must be applied in the native build:
- * add `NSURLIsExcludedFromBackupKey = YES` for the MMKV directory in
- * `ios/Podfile` post-install or a custom Expo config plugin. See the
- * `app.json` `plugins` array. The Android side is covered by
- * `android:allowBackup="false"` in AndroidManifest.xml.
+ * backup exclusion (the `expo-secure-store` plugin only exposes
+ * `configureAndroidBackup` and `faceIDPermission` — it has no
+ * `keychainAccessible` or file-attribute field), so this must be applied in
+ * the native build: add `NSURLIsExcludedFromBackupKey = YES` for the MMKV
+ * directory in `ios/Podfile` post-install or a custom Expo config plugin.
+ *
+ * KNOWN LIMITATION (native-build step, not applied here): the
+ * `NSURLIsExcludedFromBackupKey` flag for the MMKV directory is NOT set by
+ * this module or by any Expo config plugin in this repo. There is no `ios/`
+ * prebuild directory checked in, so applying it requires a native-build step
+ * (Podfile post-install or a config plugin) that is out of scope for this
+ * change. Until that step lands, the MMKV file may be included in iCloud/
+ * iTunes backups. The MMKV *encryption key* itself is separately sealed in
+ * the iOS Keychain with `keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY`
+ * (see {@link loadOrCreateMmkvEncryptionKey}), which marks it
+ * non-migratable and excludes it from backups. The Android side is covered
+ * by `android:allowBackup="false"` in AndroidManifest.xml plus the
+ * `expo-secure-store` plugin's `configureAndroidBackup: false`.
  */
 import * as SecureStore from "expo-secure-store";
 import { createMMKV } from "react-native-mmkv";
@@ -92,11 +104,19 @@ function generateMmkvEncryptionKey(): string {
  * SecureStore entry is the only path that calls `generateMmkvEncryptionKey` +
  * `SecureStore.setItemAsync`; every subsequent launch reads the persisted
  * value back. Returns the base64 string to pass as MMKV's `encryptionKey`.
+ *
+ * ACCESSIBILITY CHOICE: the key is persisted with
+ * `keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY`. The
+ * `WHEN_UNLOCKED` half matches the "available when the device is unlocked"
+ * semantics the MMKV boot path needs (no biometric/prompt gate that could
+ * block background reads). The `THIS_DEVICE_ONLY` flag is the security-critical
+ * half: it marks the keychain item non-migratable, so it is NOT included in
+ * iCloud/iTunes backups and does NOT restore to a new device. This is the M4
+ * remediation — without it, the default `WHEN_UNLOCKED` (migratable) class
+ * would let the MMKV encryption key ride a backup onto a different device.
  */
 async function loadOrCreateMmkvEncryptionKey(): Promise<string> {
-  const existing = await SecureStore.getItemAsync(
-    MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY,
-  );
+  const existing = await SecureStore.getItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY);
   if (existing !== null) {
     return existing;
   }
@@ -104,6 +124,7 @@ async function loadOrCreateMmkvEncryptionKey(): Promise<string> {
   await SecureStore.setItemAsync(
     MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY,
     generated,
+    { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY },
   );
   return generated;
 }
@@ -179,45 +200,32 @@ export function ensureStorageReady(): Promise<void> {
     // storageInstance set and readyPromise cached, but the outer null check
     // on readyPromise is the primary gate.
     if (storageInstance !== null) return;
-    // FAIL-OPEN: if the OS keychain/keystore is unavailable on a fresh or
-    // broken device (SecureStore rejects — e.g. Android Keystore not yet
-    // unlocked, iOS Keychain auth dialog dismissed, or a transient RN bridge
-    // failure), we MUST NOT leave chat unusable. The v1 threat model treats
-    // the keychain-bound MMKV encryption key as a defense-in-depth mitigation,
-    // not a gate the user must clear to chat — so on failure we fall back to
-    // an UNENCRYPTED MMKV instance for this session (with a console.warn) and
-    // keep the app functional. This is intentionally NOT a prompt: prompting
-    // at boot would block new users behind a SecureStore/Keychain dialog they
-    // may not be able to clear, which is a worse UX than transient plaintext
-    // storage. The next launch re-attempts the encrypted path (storageInstance
-    // is per-process and the keychain may be available again).
-    let encryptionKey: string | undefined;
-    try {
-      encryptionKey = await loadOrCreateMmkvEncryptionKey();
-    } catch (err: unknown) {
-      console.warn(
-        "[mmkv-storage] SecureStore unavailable — falling back to unencrypted MMKV for this session. " +
-          "At-rest data will not be keychain-sealed until the next successful launch.",
-        err,
-      );
-      encryptionKey = undefined;
-    }
-    storageInstance =
-      encryptionKey !== undefined
-        ? createMMKV({
-            id: MMKV_ID,
-            encryptionKey,
-            // Mandatory: MMKV defaults to AES-128, which throws at boot for
-            // any encryptionKey string longer than 16 bytes. The 32-char
-            // base64 key produced above is only valid under AES-256 (max 32
-            // bytes). See MMKV_ENCRYPTION_KEY_RANDOM_BYTES for the
-            // string-vs-entropy distinction.
-            encryptionType: "AES-256",
-          })
-        : // Fail-open path: omit encryptionKey + encryptionType entirely so
-          // MMKV constructs an unencrypted instance (passing encryptionType
-          // without a key would throw at boot).
-          createMMKV({ id: MMKV_ID });
+    // FAIL-CLOSED: the v1 threat model treats the keychain-bound MMKV
+    // encryption key as a GATE, not a best-effort mitigation. The MMKV file
+    // holds the identity private key and the raw at-rest AES key; an
+    // UNENCRYPTED MMKV would persist both in plaintext on disk, which is
+    // strictly worse than not running chat at all. So if the OS
+    // keychain/keystore is unavailable (SecureStore rejects — e.g. Android
+    // Keystore not yet unlocked, iOS Keychain auth dismissed, or a transient
+    // RN bridge failure), we let loadOrCreateMmkvEncryptionKey()'s rejection
+    // PROPAGATE: ensureStorageReady() rejects, storageInstance stays null,
+    // and any later requireStorage() call throws the existing
+    // "used before ready" error rather than touching plaintext. The chat
+    // provider surfaces this to the user as a "secure storage unavailable —
+    // cannot start chat" error state (see mobile-chat-provider.tsx). The
+    // user can retry: the keychain may become available again on the next
+    // launch, and a fresh ensureStorageReady() attempt will re-run because
+    // readyPromise is per-process and a new process gets a fresh module.
+    const encryptionKey = await loadOrCreateMmkvEncryptionKey();
+    storageInstance = createMMKV({
+      id: MMKV_ID,
+      encryptionKey,
+      // Mandatory: MMKV defaults to AES-128, which throws at boot for any
+      // encryptionKey string longer than 16 bytes. The 32-char base64 key
+      // produced above is only valid under AES-256 (max 32 bytes). See
+      // MMKV_ENCRYPTION_KEY_RANDOM_BYTES for the string-vs-entropy distinction.
+      encryptionType: "AES-256",
+    });
   })();
   return readyPromise;
 }
