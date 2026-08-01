@@ -96,8 +96,9 @@ The single object React talks to. Non-React (plain TS class) so it's testable.
 
 ## Routes (TanStack file routes)
 
-- `/` — landing (purpose, security model, no-account, STUN-only limitation,
-  link to docs) + conversation list (resume prior conversations).
+- `/` — landing (purpose, security model, no-account, STUN+TURN relay
+  coverage incl. symmetric-NAT via TURN, link to docs) + conversation list
+  (resume prior conversations).
 - `/start` — initiator flow: "Start conversation" button → invitation link +
   copy + QR + waiting state.
 - `/c/$conversationId` (or hash-driven `/` view) — chat view. The invitation

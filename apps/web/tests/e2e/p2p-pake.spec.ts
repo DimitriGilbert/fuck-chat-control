@@ -1,11 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import {
-  CONNECTION_STATE_TEXT,
-  establishPeerPair,
-  withPakeCode,
-  type PeerPair,
-} from "./_helpers";
+import { CONNECTION_STATE_TEXT, establishPeerPair, withPakeCode, type PeerPair } from "./_helpers";
 
 /**
  * Phase 10 PAKE e2e: a coded invitation triggers SPAKE2 over the data
@@ -20,8 +15,10 @@ import {
  *   - the real WebRTC + SPAKE2 exchange runs in two isolated browser
  *     contexts.
  *
- * Loopback WebRTC needs no STUN; the playwright config's empty iceServers is
- * correct. Timeouts are generous because ICE on loopback can take a few
+ * Loopback WebRTC needs no STUN. The /ice-config endpoint returns an empty
+ * iceServers list when no STUN/TURN env is configured (the CI/dev baseline),
+ * and the chat-provider falls back to [] on any fetch failure — so loopback
+ * P2P here always gathers host candidates only. Timeouts are generous because ICE on loopback can take a few
  * seconds and the dev server SSR-compiles on first boot — same baseline as
  * p2p.spec.ts.
  */

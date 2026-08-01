@@ -28,3 +28,74 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+
+  # Phase 0: STUN + TURN relay for cross-network WebRTC P2P. Unlike `web`
+  # (which is HTTP behind traefik), TURN/STUN speak UDP and cannot be proxied
+  # by an HTTP reverse proxy — so coturn uses `ports:` (published on the host)
+  # rather than `expose:`. Operators MUST publish 3478/udp, 3478/tcp, 5349/tcp
+  # (TLS), and the full relay range 49152-49172/udp on the host firewall.
+  #
+  # The shared secret is read from the RUNTIME environment (TURN_SHARED_SECRET)
+  # — NEVER baked into the image and NOT validated at compose-interpolation
+  # time. Dokploy (and similar runtime-env injectors) set env vars INSIDE the
+  # container after `docker compose` has already resolved interpolation, so a
+  # compose-level `${VAR:?...}` guard would make `docker compose up` fail
+  # before the container even starts. Instead the secret flows through the
+  # compose `environment:` passthrough here and coturn's entrypoint enforces
+  # non-emptiness AT RUNTIME (deploy/coturn/entrypoint.sh exits 1 with a clear
+  # log when TURN_SHARED_SECRET is unset/empty). coturn's config parser does
+  # NOT expand `$VAR`, so the entrypoint reads TURN_SHARED_SECRET/TURN_REALM
+  # from the runtime env and passes them to `turnserver` as
+  # `--static-auth-secret`/`--realm` CLI flags after `-c …turnserver.conf`
+  # (CLI args override config-file values); the web app mints per-request
+  # HMAC-SHA1 credentials from the same secret via /ice-config.
+  # See deploy/coturn/turnserver.conf + deploy/coturn/entrypoint.sh.
+  coturn:
+    image: coturn/coturn:4.15.0
+    restart: unless-stopped
+    volumes:
+      - ./deploy/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./deploy/coturn/entrypoint.sh:/usr/local/bin/coturn-entrypoint.sh:ro
+    env_file:
+      - path: apps/web/.env
+        required: false
+    environment:
+      # Explicit passthrough so the secret + realm reach coturn's runtime env
+      # even when the operator exports them via Dokploy (or any other runtime
+      # injector) rather than .env. Using `:-` (NOT `:?`) keeps this a pure
+      # passthrough: compose NEVER fails on an unset secret — the runtime guard
+      # in entrypoint.sh is the authority that refuses to start coturn without
+      # one. This is what makes the service Dokploy-deployable.
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:-}
+      TURN_REALM: ${TURN_REALM:-turn.fuck-chat-control.eu}
+    entrypoint: ["/usr/local/bin/coturn-entrypoint.sh"]
+    ports:
+      # STUN + TURN (RFC 5766) on UDP and TCP. 3478/udp is the primary path
+      # for WebRTC relay; 3478/tcp is the TCP fallback for networks that block
+      # UDP (symmetric NATs, hostile corporate Wi-Fi).
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      # TURN over TLS (turns:) on 5349. Requires cert/pkey to be mounted into
+      # the container (see turnserver.conf). If you don't terminate TURN-TLS,
+      # leave the cert commented and this port is simply unused by coturn —
+      # keep it published so operators who enable TLS later don't forget.
+      - "5349:5349/tcp"
+      # Relay allocation range. MUST match min-port/max-port in turnserver.conf
+      # and MUST be published in full on the host (coturn allocates one of
+      # these per relayed endpoint). Widen the range + host publish if you
+      # expect more than ~10 concurrent relays.
+      - "49152-49172:49152-49172/udp"
+    # coturn ships no healthcheck binary. The cheapest readiness signal that
+    # works without extra tooling is a TCP connect to 3478 — if coturn is
+    # accepting TCP on its primary listener it has finished startup and bound
+    # its UDP ports too. (A UDP STUN binding test would be more end-to-end but
+    # needs a STUN client binary; coturn's own turnutils_stunclient exists in
+    # the image but its non-zero exit on transient packet loss makes it a
+    # flaky healthcheck. The TCP probe is the pragmatic choice.) Implemented
+    # via bash's /dev/tcp since the upstream image has neither nc nor curl.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3478'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s

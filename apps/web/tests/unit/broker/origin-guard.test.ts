@@ -30,9 +30,7 @@ describe("isOriginAllowed — CR-16 WebSocket origin guard", () => {
     });
 
     it("rejects a spoofed look-alike origin (exact match only)", () => {
-      expect(isOriginAllowed(allowed, "https://app.example.com.evil.example")).toBe(
-        false,
-      );
+      expect(isOriginAllowed(allowed, "https://app.example.com.evil.example")).toBe(false);
       expect(isOriginAllowed(allowed, "https://app.example.com:443")).toBe(false);
     });
   });

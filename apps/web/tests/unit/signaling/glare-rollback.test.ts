@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import { Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
+import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 
 import { MockSignalingSocket, parse } from "./_helpers";
 
@@ -156,6 +157,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -198,6 +200,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -239,6 +242,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Responder,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -286,6 +290,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Responder,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -338,6 +343,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -369,9 +375,7 @@ describe("perfect-negotiation glare + rollback", () => {
 
     // The renegotiation offer was applied and a fresh answer was sent.
     expect(fakePc.remoteDescription?.type).toBe("offer");
-    const answers = socket.sent
-      .map((raw) => parse(raw))
-      .filter((m) => m.t === "answer");
+    const answers = socket.sent.map((raw) => parse(raw)).filter((m) => m.t === "answer");
     expect(answers.length).toBeGreaterThanOrEqual(1);
 
     bridge.close();

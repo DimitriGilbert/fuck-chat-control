@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "fck-chat-control",
+    "slug": "fck-chat-control-mobile",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "fckchatcontrol",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "systems.fck.chatcontrol"
+    },
+    "android": {
+      "package": "systems.fck.chatcontrol",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0a0a0a"
+      }
+    },
+    "plugins": [
+      "expo-document-picker",
+      "expo-sharing",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": false
+        }
+      ]
+    ],
+    "extra": {
+      "brokerUrl:dev": "ws://10.0.2.2:8080/ws",
+      "brokerUrl:prod": "wss://broker.fck-chat-control.systems/ws",
+      "baseUrl:dev": "http://10.0.2.2:8080",
+      "baseUrl:prod": "https://fck-chat-control.systems"
+    }
+  }
+}

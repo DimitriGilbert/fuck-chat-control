@@ -1,4 +1,12 @@
-import type { FrameTransport } from "../framing/types";
+import type { FrameTransport } from "@fuck-eu-chat-control/chat-runtime/framing/types";
+import type {
+  DataChannelTransport as DataChannelTransportInterface,
+  IceCandidate,
+  IceServer,
+  PeerConnection as PeerConnectionInterface,
+  PeerConnectionState,
+  SessionDescription,
+} from "@fuck-eu-chat-control/chat-runtime/transport/types";
 
 export const DATA_CHANNEL_LABEL = "fck-chat-v1";
 export const DATA_CHANNEL_ORDERED = true;
@@ -9,9 +17,9 @@ export interface DataChannelTransportOptions {
 }
 
 export interface WebRtcAdapterHandlers {
-  readonly onIceCandidate?: (candidate: RTCIceCandidateInit) => void;
-  readonly onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
-  readonly onDataChannel?: (transport: DataChannelTransport) => void;
+  readonly onIceCandidate?: (candidate: IceCandidate) => void;
+  readonly onConnectionStateChange?: (state: PeerConnectionState) => void;
+  readonly onDataChannel?: (transport: DataChannelTransportInterface) => void;
 }
 
 export interface WebRtcAdapterOptions extends WebRtcAdapterHandlers {
@@ -21,11 +29,14 @@ export interface WebRtcAdapterOptions extends WebRtcAdapterHandlers {
    * configures their own standards-compliant STUN listener, e.g.
    * `{ urls: "stun:app.example:3478" }`. No third-party STUN is ever
    * hardcoded here.
+   *
+   * Accepts the neutral {@link IceServer} shape; the adapter maps it to the
+   * DOM `RTCIceServer` at the RTCPeerConnection boundary.
    */
-  readonly iceServers?: RTCIceServer[];
+  readonly iceServers?: readonly IceServer[];
 }
 
-export class DataChannelTransport implements FrameTransport {
+export class DataChannelTransport implements FrameTransport, DataChannelTransportInterface {
   private readonly channel: RTCDataChannel;
   private drainListener: (() => void) | null = null;
   private messageHandler: ((bytes: Uint8Array) => void) | null = null;
@@ -132,7 +143,7 @@ export class DataChannelTransport implements FrameTransport {
   }
 }
 
-export class WebRtcAdapter {
+export class WebRtcAdapter implements PeerConnectionInterface {
   private readonly peerConnection: RTCPeerConnection;
   private handlers: WebRtcAdapterHandlers;
   private dataChannel: RTCDataChannel | null = null;
@@ -142,7 +153,7 @@ export class WebRtcAdapter {
    * candidate trickled during that window is buffered here and drained once the
    * remote description is in place.
    */
-  private pendingIceCandidates: RTCIceCandidateInit[] = [];
+  private pendingIceCandidates: IceCandidate[] = [];
   /**
    * Bound listeners added in the constructor and removed in {@link close} so
    * the RTCPeerConnection can release its closures (R6/F5). Same rationale as
@@ -155,13 +166,42 @@ export class WebRtcAdapter {
 
   public constructor(options: WebRtcAdapterOptions = {}) {
     this.handlers = options;
+    // Map the neutral IceServer[] to the DOM RTCIceServer[] the
+    // RTCPeerConnection constructor expects. The neutral type intentionally
+    // OMITS `credentialType` (YAGNI): the DOM default of `"password"` is
+    // correct for the HMAC-SHA1 long-term-password TURN credentials minted by
+    // `apps/web/src/server/ice-config.ts` today. Should an oauth TURN setup be
+    // added later, `credentialType` would have to be threaded through the
+    // neutral `IceServer` type (and the minter updated to emit it) — until
+    // then the omission is deliberate. The mapping is explicit so this adapter
+    // remains the single boundary that touches the DOM WebRTC types.
+    const rtcIceServers: RTCIceServer[] = (options.iceServers ?? []).map((server) => {
+      const mapped: RTCIceServer = { urls: server.urls as string | string[] };
+      if (server.username !== undefined) mapped.username = server.username;
+      if (server.credential !== undefined) mapped.credential = server.credential;
+      return mapped;
+    });
     this.peerConnection = new RTCPeerConnection({
-      iceServers: options.iceServers ?? [],
+      iceServers: rtcIceServers,
       bundlePolicy: "max-bundle",
     });
     this.handleIceCandidate = (event: RTCPeerConnectionIceEvent): void => {
       if (event.candidate !== null) {
-        this.handlers.onIceCandidate?.(event.candidate.toJSON());
+        const init = event.candidate.toJSON();
+        // RTCIceCandidateInit.candidate is `string | undefined` (an end-of-
+        // gathering candidate has an empty string); the neutral IceCandidate
+        // shape requires a string. Drop the candidate if it is missing rather
+        // than forwarding a malformed one.
+        if (typeof init.candidate === "string") {
+          const candidate: IceCandidate = {
+            candidate: init.candidate,
+            sdpMid: init.sdpMid,
+            sdpMLineIndex: init.sdpMLineIndex,
+            // DOM allows `null`; the neutral type treats absent as undefined.
+            usernameFragment: init.usernameFragment ?? undefined,
+          };
+          this.handlers.onIceCandidate?.(candidate);
+        }
       }
     };
     this.handleConnectionStateChange = (): void => {
@@ -175,21 +215,19 @@ export class WebRtcAdapter {
     this.peerConnection.addEventListener("datachannel", this.handleDataChannel);
   }
 
-  public async createOffer(): Promise<RTCSessionDescriptionInit> {
-    return await this.peerConnection.createOffer();
+  public async createOffer(): Promise<SessionDescription> {
+    return (await this.peerConnection.createOffer()) as SessionDescription;
   }
 
-  public async createAnswer(): Promise<RTCSessionDescriptionInit> {
-    return await this.peerConnection.createAnswer();
+  public async createAnswer(): Promise<SessionDescription> {
+    return (await this.peerConnection.createAnswer()) as SessionDescription;
   }
 
-  public async setLocalDescription(description: RTCSessionDescriptionInit): Promise<void> {
+  public async setLocalDescription(description: SessionDescription): Promise<void> {
     await this.peerConnection.setLocalDescription(description);
   }
 
-  public async setRemoteDescription(
-    description: RTCSessionDescription | RTCSessionDescriptionInit,
-  ): Promise<void> {
+  public async setRemoteDescription(description: SessionDescription): Promise<void> {
     await this.peerConnection.setRemoteDescription(description);
     // Now that the remote description is set, any ICE candidates that arrived
     // early can be applied. Late or invalid candidates (e.g. from a stale
@@ -206,7 +244,7 @@ export class WebRtcAdapter {
     }
   }
 
-  public async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
+  public async addIceCandidate(candidate: IceCandidate): Promise<void> {
     // If the remote description has not been applied yet, the browser will
     // reject the candidate; buffer it and apply it from setRemoteDescription.
     if (this.peerConnection.remoteDescription === null) {
@@ -228,7 +266,7 @@ export class WebRtcAdapter {
     return new DataChannelTransport({ channel });
   }
 
-  public get connectionState(): RTCPeerConnectionState {
+  public get connectionState(): PeerConnectionState {
     return this.peerConnection.connectionState;
   }
 

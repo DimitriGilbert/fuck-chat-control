@@ -1,0 +1,20 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["jest", "react", "react-native"],
+    "paths": {
+      "@fuck-eu-chat-control/chat-runtime": ["../../packages/chat-runtime/src/index.ts"],
+      "@fuck-eu-chat-control/chat-runtime/*": ["../../packages/chat-runtime/src/*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}

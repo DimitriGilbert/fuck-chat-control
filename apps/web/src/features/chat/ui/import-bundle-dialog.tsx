@@ -13,9 +13,9 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { ImportMode } from "@/features/chat/store";
-import type { ImportMode as ImportModeType } from "@/features/chat/store";
-import type { ImportResult } from "@/features/chat/store";
+import { ImportMode } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ImportMode as ImportModeType } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ImportResult } from "@fuck-eu-chat-control/chat-runtime/store";
 
 interface ImportBundleDialogProps {
   readonly open: boolean;

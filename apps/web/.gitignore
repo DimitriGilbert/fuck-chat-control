@@ -68,5 +68,6 @@ dev-dist
 
 # Rust / wasm-pack build cache for the SPAKE2 crate. The compiled output
 # (pkg/) IS committed so CI never needs Rust; this is only the incremental
-# build cache, which is machine-specific and large.
-/src/wasm/spake2/target/
+# build cache, which is machine-specific and large. The wasm source moved to
+# packages/chat-runtime/wasm/spake2/ in Phase A.3.
+/packages/chat-runtime/wasm/spake2/target/

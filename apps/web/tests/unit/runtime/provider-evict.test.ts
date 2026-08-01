@@ -3,11 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   createAtRestKeyManager,
   AtRestKeyLockedError,
-} from "@/features/chat/runtime/at-rest-key-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import {
   createIdentityManager,
   IDENTITY_STORAGE_KEY,
-} from "@/features/chat/runtime/identity-manager";
+} from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 
 import { fakeStorage } from "./_helpers";
 

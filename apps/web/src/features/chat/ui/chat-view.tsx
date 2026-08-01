@@ -35,10 +35,10 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { AuthMode } from "@/features/chat/protocol/types";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
-import { MessageDirection } from "@/features/chat/store";
-import type { ConversationMessage } from "@/features/chat/store";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
+import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationMessage } from "@fuck-eu-chat-control/chat-runtime/store";
 import {
   CONNECTION_STATE_LABELS,
   CONNECTION_STATE_VARIANTS,
@@ -125,11 +125,23 @@ export function ChatView(): React.ReactElement {
 
   function sendFiles(files: FileList | readonly File[]): void {
     if (controller === null || activeId === null) return;
+    // A.5: the controller's sendFile takes a neutral {data,name,mimeType}
+    // payload (no DOM File). Read each File into bytes at the call site — the
+    // runtime core never touches the DOM File type.
     for (const file of Array.from(files)) {
-      void controller.sendFile(activeId, file).catch((err: unknown) => {
-        toast.error("File send failed", {
-          description: err instanceof Error ? err.message : String(err),
-        });
+      void file.arrayBuffer().then((buffer): void => {
+        if (controller === null || activeId === null) return;
+        void controller
+          .sendFile(activeId, {
+            data: new Uint8Array(buffer),
+            name: file.name,
+            mimeType: file.type,
+          })
+          .catch((err: unknown) => {
+            toast.error("File send failed", {
+              description: err instanceof Error ? err.message : String(err),
+            });
+          });
       });
     }
   }
@@ -317,9 +329,13 @@ export function ChatView(): React.ReactElement {
  * warning.
  */
 function TransfersSection(props: {
-  readonly transfers: readonly import("@/features/chat/runtime/transfer-state").TransferState[];
-  readonly controller: import("@/features/chat/runtime/chat-controller").ChatController | null;
-  readonly activeId: import("@/features/chat/protocol/types").ConversationId | null;
+  readonly transfers: readonly import("@fuck-eu-chat-control/chat-runtime/runtime/transfer-state").TransferState[];
+  readonly controller:
+    | import("@fuck-eu-chat-control/chat-runtime/runtime/chat-controller").ChatController
+    | null;
+  readonly activeId:
+    | import("@fuck-eu-chat-control/chat-runtime/protocol/types").ConversationId
+    | null;
 }): React.ReactElement {
   const { transfers, controller, activeId } = props;
   return (
@@ -396,8 +412,7 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
   // surface the stronger guarantee; safety-number sessions read as such so the
   // user can tell which conversations are only verified post-hoc.
   const connected = connectionState === ConnectionState.Connected;
-  const authLabel =
-    connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
+  const authLabel = connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <StatusPill variant={variant} label={label} />
@@ -564,7 +579,8 @@ function InvitationBanner(): React.ReactElement | null {
         controller.leaveConversation(currentId);
       }
       if (next) {
-        const code = codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
+        const code =
+          codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
         setCodeDraft(code);
         await controller.startConversation({ code });
         toast.success("PAKE-protected invitation ready", {

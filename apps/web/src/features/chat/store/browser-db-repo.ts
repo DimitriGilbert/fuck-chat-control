@@ -1,13 +1,17 @@
-import type { AtRestKey } from "../crypto/types";
-import type { ConversationId, PublicKey } from "../protocol/types";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto/types";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-import { MessageDirection, StoreError, StoreErrorCode } from "./types";
+import {
+  MessageDirection,
+  StoreError,
+  StoreErrorCode,
+} from "@fuck-eu-chat-control/chat-runtime/store/types";
 import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
   PeerIdentityRecord,
-} from "./types";
+} from "@fuck-eu-chat-control/chat-runtime/store/types";
 
 export interface BrowserDbRepositoryConfig {
   readonly databaseName: string;

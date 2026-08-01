@@ -49,9 +49,7 @@ describe("renderMarkdown sanitization (R12/F1)", () => {
   });
 
   it("rejects a data: URL with an HTML payload in a markdown link", () => {
-    const out = renderMarkdown(
-      "[x](data:text/html,<script>alert(1)</script>)",
-    );
+    const out = renderMarkdown("[x](data:text/html,<script>alert(1)</script>)");
     expect(out.toLowerCase()).not.toContain("data:");
     expect(out.toLowerCase()).not.toContain("<script");
     expect(out.toLowerCase()).not.toContain("alert(1)");
@@ -64,9 +62,7 @@ describe("renderMarkdown sanitization (R12/F1)", () => {
   });
 
   it("does not execute or preserve a script that builds an iframe", () => {
-    const out = renderMarkdown(
-      "text <iframe src=\"javascript:alert(1)\"></iframe> more",
-    );
+    const out = renderMarkdown('text <iframe src="javascript:alert(1)"></iframe> more');
     expect(out.toLowerCase()).not.toContain("javascript:");
     expect(out.toLowerCase()).not.toContain("alert(1)");
     // text content survives.

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
+import type { IceCandidate } from "@fuck-eu-chat-control/chat-runtime/transport/types";
 
 /**
  * Test double for `RTCPeerConnection` that records every interaction and
@@ -13,7 +14,7 @@ import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 class FakeRtcPeerConnection {
   public remoteDescription: RTCSessionDescription | null = null;
   public localDescription: RTCSessionDescription | null = null;
-  public readonly addCandidateLog: RTCIceCandidateInit[] = [];
+  public readonly addCandidateLog: IceCandidate[] = [];
   public readonly addCandidateOrder: string[] = [];
   public readonly setRemoteLog: RTCSessionDescriptionInit[] = [];
   // When true, the next addIceCandidate rejects — used to verify the adapter
@@ -46,10 +47,8 @@ class FakeRtcPeerConnection {
     this.remoteDescription = desc as unknown as RTCSessionDescription;
   }
 
-  public async addIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
-    this.addCandidateOrder.push(
-      this.remoteDescription === null ? "pre-remote" : "post-remote",
-    );
+  public async addIceCandidate(candidate: IceCandidate): Promise<void> {
+    this.addCandidateOrder.push(this.remoteDescription === null ? "pre-remote" : "post-remote");
     this.addCandidateLog.push(candidate);
     if (this.rejectAllAddIceCandidates || this.rejectNextAddIceCandidate) {
       this.rejectNextAddIceCandidate = false;
@@ -94,9 +93,9 @@ describe("WebRtcAdapter — ICE candidate buffering pre-remote-description", () 
       // Three candidates arrive BEFORE the remote description. Each must be
       // buffered (not passed to the underlying RTCPeerConnection, which
       // would reject them with InvalidStateError).
-      const earlyA: RTCIceCandidateInit = { candidate: "early-a", sdpMid: "0" };
-      const earlyB: RTCIceCandidateInit = { candidate: "early-b", sdpMid: "0" };
-      const earlyC: RTCIceCandidateInit = { candidate: "early-c", sdpMid: "0" };
+      const earlyA: IceCandidate = { candidate: "early-a", sdpMid: "0" };
+      const earlyB: IceCandidate = { candidate: "early-b", sdpMid: "0" };
+      const earlyC: IceCandidate = { candidate: "early-c", sdpMid: "0" };
 
       await adapter.addIceCandidate(earlyA);
       await adapter.addIceCandidate(earlyB);
@@ -128,7 +127,7 @@ describe("WebRtcAdapter — ICE candidate buffering pre-remote-description", () 
       await adapter.setRemoteDescription({ type: "offer", sdp: "remote-sdp" });
       expect(fakePc.remoteDescription).not.toBe(null);
 
-      const later: RTCIceCandidateInit = { candidate: "later", sdpMid: "0" };
+      const later: IceCandidate = { candidate: "later", sdpMid: "0" };
       await adapter.addIceCandidate(later);
 
       expect(fakePc.addCandidateLog).toEqual([later]);
@@ -144,9 +143,9 @@ describe("WebRtcAdapter — ICE candidate buffering pre-remote-description", () 
 
       // Buffer three candidates; the middle one will be rejected by the
       // underlying addIceCandidate during the drain.
-      const earlyA: RTCIceCandidateInit = { candidate: "early-a", sdpMid: "0" };
-      const earlyB: RTCIceCandidateInit = { candidate: "early-b", sdpMid: "0" };
-      const earlyC: RTCIceCandidateInit = { candidate: "early-c", sdpMid: "0" };
+      const earlyA: IceCandidate = { candidate: "early-a", sdpMid: "0" };
+      const earlyB: IceCandidate = { candidate: "early-b", sdpMid: "0" };
+      const earlyC: IceCandidate = { candidate: "early-c", sdpMid: "0" };
       await adapter.addIceCandidate(earlyA);
       // The next addIceCandidate call (the first drain attempt) will reject.
       fakePc.rejectNextAddIceCandidate = true;
@@ -172,7 +171,7 @@ describe("WebRtcAdapter — ICE candidate buffering pre-remote-description", () 
     try {
       const adapter = new WebRtcAdapter();
 
-      const early: RTCIceCandidateInit = { candidate: "early", sdpMid: "0" };
+      const early: IceCandidate = { candidate: "early", sdpMid: "0" };
       await adapter.addIceCandidate(early);
 
       await adapter.setRemoteDescription({ type: "offer", sdp: "remote-sdp" });

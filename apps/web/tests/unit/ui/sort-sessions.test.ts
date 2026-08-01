@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import type { SessionSummary } from "@/features/chat/runtime/types";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { SessionSummary } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import { sortSessions } from "@/features/chat/ui/sort-sessions";
 
 /**

@@ -10,7 +10,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import type { ConversationRecord } from "@/features/chat/store";
+import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
 
 /**
  * Shown when no conversation is active. A quiet, on-brand prompt: one short

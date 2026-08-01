@@ -13,8 +13,8 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ImportResult } from "@/features/chat/store";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ImportResult } from "@fuck-eu-chat-control/chat-runtime/store";
 import { ExportBundleDialog } from "@/features/chat/ui/export-bundle-dialog";
 import { ImportBundleDialog } from "@/features/chat/ui/import-bundle-dialog";
 import { WipeDataAlertDialog } from "@/features/chat/ui/wipe-data-dialog";

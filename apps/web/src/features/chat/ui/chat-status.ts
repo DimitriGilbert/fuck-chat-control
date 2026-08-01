@@ -1,6 +1,6 @@
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 
-import type { ConversationMessage } from "@/features/chat/store";
+import type { ConversationMessage } from "@fuck-eu-chat-control/chat-runtime/store";
 
 /**
  * Human label for each connection state. Used by the status bar and the

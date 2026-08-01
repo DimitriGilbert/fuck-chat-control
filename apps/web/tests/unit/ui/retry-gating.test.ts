@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 
 /**
  * CR-3 (Phase 3b): once a session has durably failed auth, the retry
@@ -26,10 +26,7 @@ function showRetry(connectionState: ConnectionState, authFailed: boolean): boole
   return connectionState === ConnectionState.Disconnected && !authFailed;
 }
 
-function showFreshInvitationCta(
-  connectionState: ConnectionState,
-  authFailed: boolean,
-): boolean {
+function showFreshInvitationCta(connectionState: ConnectionState, authFailed: boolean): boolean {
   return connectionState === ConnectionState.Disconnected && authFailed;
 }
 

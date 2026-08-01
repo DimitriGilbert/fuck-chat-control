@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  DataChannelTransport,
-  WebRtcAdapter,
-} from "@/features/chat/signaling/webrtc-adapter";
+import { DataChannelTransport, WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 
 /**
  * R6/F5: WebRtcAdapter.close() and DataChannelTransport.close() must call
@@ -75,9 +72,10 @@ function installSpyDataChannel(channel: SpyDataChannel): void {
 
 function installSpyPeerConnection(pc: SpyPeerConnection): void {
   originalPeerConnection = (globalThis as { RTCPeerConnection?: unknown }).RTCPeerConnection;
-  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection = function (): SpyPeerConnection {
-    return pc;
-  };
+  (globalThis as { RTCPeerConnection: unknown }).RTCPeerConnection =
+    function (): SpyPeerConnection {
+      return pc;
+    };
 }
 
 function restoreGlobals(): void {
@@ -127,9 +125,7 @@ describe("DataChannelTransport.close() removes constructor-added listeners (R6/F
 
     // Same fn references (not just same type strings).
     for (const entry of spy.added) {
-      const matchingRemoval = spy.removed.find(
-        (r) => r.type === entry.type && r.fn === entry.fn,
-      );
+      const matchingRemoval = spy.removed.find((r) => r.type === entry.type && r.fn === entry.fn);
       expect(matchingRemoval, `expected removal for ${entry.type}`).toBeDefined();
     }
   });
@@ -183,9 +179,7 @@ describe("WebRtcAdapter.close() removes constructor-added listeners (R6/F5)", ()
 
     // Same fn references.
     for (const entry of spy.added) {
-      const matchingRemoval = spy.removed.find(
-        (r) => r.type === entry.type && r.fn === entry.fn,
-      );
+      const matchingRemoval = spy.removed.find((r) => r.type === entry.type && r.fn === entry.fn);
       expect(matchingRemoval, `expected removal for ${entry.type}`).toBeDefined();
     }
   });

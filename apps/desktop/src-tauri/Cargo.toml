@@ -1,0 +1,25 @@
+[package]
+name = "fck-chat-control-desktop"
+version = "0.1.0"
+description = "fuck-chat-control desktop app (Tauri v2 wrapping the web build)"
+authors = ["Dimitri Gilbert"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "fck_chat_control_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# This feature is automatically enabled by `tauri build`/`tauri dev`; it gates
+# the custom-protocol asset loader so production builds serve frontendDist from
+# the embedded assets, not a dev URL.
+custom-protocol = ["tauri/custom-protocol"]
