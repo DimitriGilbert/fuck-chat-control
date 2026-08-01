@@ -20,6 +20,17 @@
 # through unchanged, so the upstream image's default configuration flow is
 # preserved (it reads /etc/coturn/turnserver.conf from the mounted config).
 #
+# SECRET/REALM INJECTION (CLI OVERRIDE, NOT ENV EXPANSION):
+# coturn's config parser does NOT do shell-style $VARIABLE expansion — any
+# `$TURN_…` token written into /etc/coturn/turnserver.conf would be taken
+# VERBATIM. We therefore pass `static-auth-secret` and `realm` as CLI flags
+# here, AFTER `-c /etc/coturn/turnserver.conf`. CLI args override config-file
+# values in coturn, and the script already holds the secret in `$secret` (read
+# from the runtime env below), so we use `$secret`/`$realm` directly — NEVER a
+# literal `$TURN_SHARED_SECRET` (which the parser would store as the literal
+# string, opening the relay). The config file's `use-auth-secret` directive is
+# the sole auth-posture lock and MUST stay (see warning in turnserver.conf).
+#
 # POSIX sh (no bashisms): the upstream coturn image is Alpine-based; `set -eu`
 # gives us fail-on-error + fail-on-unset-substitution. `:` is the null command
 # used to satisfy `set -u` while producing no output.
@@ -29,6 +40,9 @@ set -eu
 # into a normal substitution that tolerates unset/empty (`:-`) so the guard
 # produces a clear message rather than a shell-level "unbound variable" trace.
 secret=${TURN_SHARED_SECRET:-}
+# Realm is optional (coturn accepts an empty realm); read with `:-` for the
+# same `set -u` reason. Passed verbatim to `--realm` below.
+realm=${TURN_REALM:-}
 
 if [ -z "$secret" ]; then
   # stderr so `docker logs` surfaces it prominently (coturn itself logs to
@@ -48,8 +62,13 @@ fi
 # --log-file=stdout` (see coturn/coturn Dockerfile); we replicate that here
 # because overriding `entrypoint:` resets CMD — the docker-compose service
 # does not pass a separate `command:`, so the default invocation must live in
-# this script.
+# this script. The `--static-auth-secret`/`--realm` flags are appended AFTER
+# `-c …` so they OVERRIDE the config file: coturn takes `$secret`/`$realm`
+# (the resolved shell values) here, NOT the verbatim `$TURN_…` tokens that the
+# config-file parser would otherwise treat as literals.
 exec turnserver \
   -c /etc/coturn/turnserver.conf \
+  --static-auth-secret="$secret" \
+  --realm="$realm" \
   --log-file=stdout \
   "$@"
