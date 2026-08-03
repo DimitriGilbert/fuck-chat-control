@@ -191,6 +191,15 @@ export interface ConversationRepository {
   getAuthFailed(id: ConversationId): Promise<boolean>;
   clearConversation(id: ConversationId): Promise<void>;
   clearAll(): Promise<void>;
+  /**
+   * Release any backing resources the repository holds open (e.g. an OPFS
+   * SQLite database / Web Worker). Optional so in-memory and test fakes need
+   * not implement it; callers feature-check before invoking. Idempotent when
+   * implemented: a second call is a no-op. The {@link ChatController}'s
+   * dispose() invokes this so the web provider's unmount releases OPFS
+   * handles without each provider knowing the store's internals.
+   */
+  close?(): Promise<void> | void;
 }
 
 export interface PersistableConversationRepository extends ConversationRepository {

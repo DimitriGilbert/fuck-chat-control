@@ -34,6 +34,28 @@ export function toAESKey(bytes: Uint8Array): AESKey {
   return copy as unknown as AESKey;
 }
 
+/**
+ * Best-effort key zeroization: overwrite the byte range backing `buf` with
+ * zeros. Operates on the underlying buffer slice the view exposes (honors
+ * `byteOffset`/`byteLength`) so it wipes exactly the secret bytes the caller
+ * handed in, even for a subarray view of a larger buffer. Best-effort in JS —
+ * a copy retained by the GC or by the runtime's buffer management is not
+ * reached — but bounds the lifetime of the live secret bytes to the explicit
+ * wipe site rather than leaving them in the heap until GC. Reuse this for all
+ * local key-bearing `Uint8Array`s that go out of scope after use.
+ */
+export function zeroize(buf: Uint8Array | ArrayBufferView): void {
+  const byteOffset = buf.byteOffset;
+  const byteLength = buf.byteLength;
+  // Always go through a Uint8Array view over the exact byte range so the call
+  // works for any ArrayBufferView (Uint8Array, DataView, typed arrays) and for
+  // a subarray view of a larger buffer.
+  const view = new Uint8Array(buf.buffer, byteOffset, byteLength);
+  for (let i = 0; i < byteLength; i++) {
+    view[i] = 0;
+  }
+}
+
 export async function sha256(data: Uint8Array): Promise<Uint8Array> {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", toBuffer(data));
   return new Uint8Array(digest);

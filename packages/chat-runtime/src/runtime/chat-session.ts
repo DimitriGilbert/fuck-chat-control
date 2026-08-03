@@ -54,6 +54,15 @@ export interface BuildSessionInput {
   /** Platform peer-connection factory (web adapter or native adapter). */
   readonly peerConnectionFactory: PeerConnectionFactory;
   readonly iceServers?: readonly IceServer[];
+  /**
+   * R8/F1 (Phase 6): PAKE feature gate, threaded unchanged to
+   * {@link OrchestratorDeps.enablePake}. When `false`, the orchestrator rejects
+   * `~code` invitations at the join parse boundary (PakeDisabled) so v1 mobile —
+   * whose SPAKE2 wasm is Metro-blocked — does not crash at loadWasm. Defaults to
+   * `true` (undefined is treated as true in the orchestrator) so web/desktop are
+   * unchanged.
+   */
+  readonly enablePake?: boolean;
 }
 
 /**
@@ -195,6 +204,8 @@ export function buildOrchestrator(
     identity: input.identity,
     handlers,
     useInternalSignaling: false,
+    // R8/F1 (Phase 6): thread the PAKE feature gate to the orchestrator.
+    enablePake: input.enablePake,
   });
 }
 

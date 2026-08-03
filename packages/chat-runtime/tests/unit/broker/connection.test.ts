@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
 import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
@@ -201,6 +201,46 @@ describe("BrokerConnection — leave and cleanup", () => {
     // No new notifications: a still has only the one from b's join.
     expect(a.sent.length).toBe(aNotifications);
     expect(b.sent).toHaveLength(0);
+  });
+});
+
+describe("BrokerConnection — onClose O(1) leave (R3/F4)", () => {
+  it("calls registry.leave(roomId, socket) on close when seated, NOT removeSocket", () => {
+    const registry = new RoomRegistry();
+    const leaveSpy = vi.spyOn(registry, "leave");
+    const removeSpy = vi.spyOn(registry, "removeSocket");
+    const a = new MockBrokerSocket();
+    const b = new MockBrokerSocket();
+    const id = roomId(50);
+    const connA = join(registry, a, id);
+    join(registry, b, id);
+    leaveSpy.mockClear();
+    removeSpy.mockClear();
+
+    connA.onClose();
+
+    // The O(1) path is used with the known roomId + the exact socket instance.
+    expect(leaveSpy).toHaveBeenCalledTimes(1);
+    expect(leaveSpy).toHaveBeenCalledWith(id, a);
+    // The O(rooms) scan must NOT run for a seated connection.
+    expect(removeSpy).not.toHaveBeenCalled();
+    // Peer-left notification still fires (functional behavior preserved).
+    expect(JSON.parse(b.sent[b.sent.length - 1])).toEqual({ t: "leave", roomId: id });
+    // And the seat is actually released.
+    expect(registry.peerCount(id)).toBe(1);
+  });
+
+  it("falls back to removeSocket when the connection never joined (roomId null)", () => {
+    const registry = new RoomRegistry();
+    const leaveSpy = vi.spyOn(registry, "leave");
+    const removeSpy = vi.spyOn(registry, "removeSocket");
+    const socket = new MockBrokerSocket();
+    const conn = new BrokerConnection(socket, registry);
+    // No join → roomId stays null → onClose must use the defensive scan.
+    conn.onClose();
+    expect(removeSpy).toHaveBeenCalledTimes(1);
+    expect(removeSpy).toHaveBeenCalledWith(socket);
+    expect(leaveSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -162,6 +162,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
               socketFactory: rnSocketFactory,
               peerConnectionFactory: rnPeerConnectionFactory,
               iceServers: iceServers as readonly IceServer[],
+              // R8/F1 (Phase 6): gate PAKE-coded invitations OFF in logic. v1
+              // mobile is safety-number-only; the SPAKE2 wasm pkg is Metro-
+              // blockListed, so a `~code` deep link would otherwise reach
+              // createPakeSession -> loadWasm and crash mid-handshake. With this
+              // flag the orchestrator rejects `~code` invitations at the join
+              // parse boundary (OrchestratorError PakeDisabled) BEFORE any wasm
+              // call, and the UI can surface a clear message. UNCoded
+              // invitations work normally. The gate is a SECOND layer on top of
+              // the Metro blockList (which still keeps the wasm out of the bundle).
+              enablePake: false,
             });
             disposedController = instance;
             setController(instance);

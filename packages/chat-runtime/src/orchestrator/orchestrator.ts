@@ -14,6 +14,7 @@ import {
   verifyTranscript,
 } from "../crypto";
 import { ctEqual } from "../crypto/ct-equal";
+import { zeroize } from "../crypto/primitives";
 import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "../crypto";
 import { deriveRole, encodeSessionId, encodeTranscript } from "../protocol/codec";
 import {
@@ -143,6 +144,22 @@ export interface OrchestratorDeps {
    * async WASM crypto.
    */
   readonly handshakeTimeoutMsOverride?: number;
+  /**
+   * R8/F1 (Phase 6): master feature gate for PAKE-coded invitations. When
+   * `false`, the orchestrator rejects any invitation whose fragment carries a
+   * `~<code>` tail at the {@link join} parse boundary — BEFORE any
+   * {@link createPakeSession}/{@link loadWasm} call — by throwing
+   * {@link OrchestratorErrorCode.PakeDisabled}. UNCoded invitations (no `~code`)
+   * are accepted regardless: they negotiate {@link AuthMode.SafetyNumberOnly}
+   * and never touch the wasm-gated PAKE path.
+   *
+   * Defaults to `true` so web/desktop (which ship the SPAKE2 wasm) are
+   * unchanged. v1 mobile passes `false` because Metro blockLists the wasm pkg,
+   * so a `~code` deep link would otherwise crash at {@link loadWasm} (R8:F1,
+   * BLOCKER). The gate is enforced here, in logic, IN ADDITION to the Metro
+   * blockList (which stays as a defense — it keeps the wasm out of the bundle).
+   */
+  readonly enablePake?: boolean;
 }
 
 const HELLO_BYTES = 163;
@@ -184,6 +201,12 @@ export class ConversationOrchestrator {
    * {@link OrchestratorDeps.handshakeTimeoutMsOverride} seam.
    */
   private readonly handshakeTimeoutMs: number;
+  /**
+   * R8/F1 (Phase 6): cached from {@link OrchestratorDeps.enablePake} (default
+   * `true`). Read at the {@link join} parse boundary to reject `~code`
+   * invitations before they reach {@link createPakeSession}/{@link loadWasm}.
+   */
+  private readonly enablePake: boolean;
 
   /**
    * Authoritative transition validator (R6/F6 + R7/F2). All state changes
@@ -327,6 +350,9 @@ export class ConversationOrchestrator {
     this.identity = deps.identity;
     this.handlers = deps.handlers ?? {};
     this.useInternalSignaling = deps.useInternalSignaling ?? true;
+    // R8/F1 (Phase 6): default true so web/desktop (which ship the SPAKE2 wasm)
+    // are unchanged. Mobile passes false to gate coded invitations off in logic.
+    this.enablePake = deps.enablePake ?? true;
     // M6: validate the test-only override — a non-finite or non-positive value
     // (0, negative, NaN) would make the handshake timer fire immediately and
     // falsely fail every handshake. Silently fall back to the production bound
@@ -513,6 +539,24 @@ export class ConversationOrchestrator {
     this.authFailedCached =
       (await this.repository.getAuthFailed(parsed.conversationId)) ||
       (await getAuthFailedDurable(parsed.conversationId));
+    // R8/F1 (Phase 6): PAKE feature gate. When this orchestrator was constructed
+    // with enablePake === false (v1 mobile — the SPAKE2 wasm is Metro-blocked),
+    // reject any invitation whose fragment carried a `~<code>` tail HERE, at the
+    // parse boundary, BEFORE we write pakeCode/authMode=Pake and well before any
+    // createPakeSession/loadWasm call. Without this gate a `~code` deep link
+    // reaches createPakeSession → loadWasm and crashes mid-handshake on mobile
+    // (R8:F1, BLOCKER). UNCoded invitations (parsed.code === null) are accepted
+    // regardless of the flag: they negotiate SafetyNumberOnly and never touch the
+    // wasm-gated path. The error is a distinguishable OrchestratorError(PakeDisabled)
+    // so the mobile UI can surface "coded invitations are not supported in this
+    // build" rather than a generic handshake failure. Web/desktop default the
+    // flag to true and never hit this branch.
+    if (parsed.code !== null && !this.enablePake) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.PakeDisabled,
+        "coded invitations (PAKE) are not supported in this build",
+      );
+    }
     // R7/F6 (Phase 8.3): if the invitation carried a PAKE code, switch the
     // negotiated auth mode to Pake before the handshake begins. setPakeCode
     // throws AlreadyStarted here only if join() ran twice (we set this.started
@@ -1056,26 +1100,50 @@ export class ConversationOrchestrator {
       // Await the peer's share; handlePakeShare stashes it and completes the
       // exchange when both shares are present.
       pakeSecret = await this.awaitPakeFinish();
-      // Confirmation: SPAKE2 does not itself detect a wrong password (both
-      // sides complete `pakeFinish` with divergent secrets). Each side derives
-      // a role-bound MAC tag over the transcript hash keyed by the SPAKE2
-      // secret, exchanges it, and verifies. A mismatch proves a wrong-code
-      // attack and aborts — there is NO path to Connected under divergent
-      // traffic keys.
-      await this.runPakeConfirmation(pakeSecret, role);
     }
 
     // Derive session keys. For a Pake session the SPAKE2 shared secret is
     // bound into HKDF; for SafetyNumberOnly it is null (and the transcript
     // authMode is SafetyNumberOnly, so the defensive check in
     // deriveSessionKeys does not trip).
-    const sessionKeys = await deriveSessionKeys({
-      localEcdhPrivateKey: this.ephemeral.privateKey,
-      peerEcdhPublicKey: remoteEphemeralKey,
-      transcript: this.transcript,
-      localIdentityPublicKey: this.identity.publicKey,
-      pakeSecret: pakeSecret ?? undefined,
-    });
+    //
+    // R1/F3: wrap the secret's last two consumers (PAKE confirmation + HKDF) in
+    // a try/finally so the SPAKE2 shared secret is wiped on BOTH the success
+    // path and any mid-consumption throw (PAKE confirmation mismatch, key-
+    // derivation failure). The secret is a local (not an orchestrator field),
+    // so teardownSession cannot reach it; this finally is its only wipe site.
+    let sessionKeys;
+    try {
+      if (pakeSecret !== null) {
+        // Confirmation: SPAKE2 does not itself detect a wrong password (both
+        // sides complete `pakeFinish` with divergent secrets). Each side derives
+        // a role-bound MAC tag over the transcript hash keyed by the SPAKE2
+        // secret, exchanges it, and verifies. A mismatch proves a wrong-code
+        // attack and aborts — there is NO path to Connected under divergent
+        // traffic keys. pakeRole is guaranteed non-null here: the earlier guard
+        // in the Pake block above threw if it was null, and pakeSecret is null
+        // entirely for SafetyNumberOnly sessions (this branch is skipped).
+        await this.runPakeConfirmation(pakeSecret, pakeRole as Role);
+      }
+      sessionKeys = await deriveSessionKeys({
+        localEcdhPrivateKey: this.ephemeral.privateKey,
+        peerEcdhPublicKey: remoteEphemeralKey,
+        transcript: this.transcript,
+        localIdentityPublicKey: this.identity.publicKey,
+        pakeSecret: pakeSecret ?? undefined,
+      });
+    } finally {
+      // R1:F3: the SPAKE2 shared secret has now been consumed by both the
+      // confirmation tag exchange (runPakeConfirmation) and the HKDF key
+      // schedule (deriveSessionKeys). Wipe it so it does not linger on the heap
+      // for the lifetime of the orchestrator. A local copy captured by the
+      // GC/runtime is not reached (best-effort), but this bounds the live
+      // secret to the handshake path.
+      if (pakeSecret !== null) {
+        zeroize(pakeSecret);
+        pakeSecret = null;
+      }
+    }
     // CR-15: mirror the derived send key for the test-only seam. See the field
     // docstring on `derivedSendKeyForTest` — this is NOT read by any production
     // codepath; it exists so integration tests can assert the PAKE secret was

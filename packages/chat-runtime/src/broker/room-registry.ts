@@ -14,7 +14,7 @@ export interface BrokerSocket {
   close(code?: number, reason?: string): void;
 }
 
-export type JoinRejectionReason = "malformed" | "full";
+export type JoinRejectionReason = "malformed" | "full" | "too_many_rooms";
 
 export interface JoinResult {
   readonly joined: boolean;
@@ -38,10 +38,43 @@ const REJECTED_FULL: JoinResult = {
   reason: "full",
 };
 
+// R3/F2: a NEW room would push the registry past the room cap.
+const REJECTED_TOO_MANY_ROOMS: JoinResult = {
+  joined: false,
+  isSecondPeer: false,
+  reason: "too_many_rooms",
+};
+
 const MAX_PEERS_PER_ROOM = 2;
+
+/**
+ * Hard cap on the number of concurrently-live rooms the registry will track.
+ * A room exists only while at least one peer is seated, so this bounds the
+ * worst-case `rooms` map size (and thus the per-disconnect work and sweep
+ * cost) against an attacker who opens thousands of idle one-peer rooms to
+ * exhaust memory (R3/F2). Tunable per-deployment via the {@link RoomRegistry}
+ * constructor's `maxRooms` option.
+ */
+export const MAX_ROOMS = 1024;
+
+/**
+ * Options for {@link RoomRegistry}. All fields default to the module-level
+ * constants and exist so tests can exercise the caps without filling 1024
+ * rooms / 2048 connections — the defaults are not injectable at runtime in
+ * production by design (the broker runs with a single process-wide registry).
+ */
+export interface RoomRegistryOptions {
+  /** Maximum number of concurrently-live rooms. Defaults to {@link MAX_ROOMS}. */
+  readonly maxRooms?: number;
+}
 
 export class RoomRegistry {
   private readonly rooms = new Map<string, Set<BrokerSocket>>();
+  private readonly maxRooms: number;
+
+  public constructor(options: RoomRegistryOptions = {}) {
+    this.maxRooms = options.maxRooms ?? MAX_ROOMS;
+  }
 
   join(roomId: string, socket: BrokerSocket): JoinResult {
     if (!isValidRoomId(roomId)) {
@@ -49,6 +82,14 @@ export class RoomRegistry {
     }
     let room = this.rooms.get(roomId);
     if (room === undefined) {
+      // R3/F2: gate ONLY the create path. Joining an existing room is always
+      // allowed (it neither grows `rooms` nor can be used to bloat memory
+      // beyond MAX_PEERS_PER_ROOM per room), so the cap rejects a room that
+      // would be CREATED here, not one that already exists.
+      if (this.rooms.size >= this.maxRooms) {
+        socket.close(1013, "too many rooms");
+        return REJECTED_TOO_MANY_ROOMS;
+      }
       room = new Set<BrokerSocket>();
       this.rooms.set(roomId, room);
     }

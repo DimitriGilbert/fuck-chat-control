@@ -107,7 +107,19 @@ export interface ChatControllerDeps {
   /** Owns the at-rest key used to seal history. */
   readonly atRestKeyManager: AtRestKeyManager;
   /** Factory for the conversation repository, invoked once with the at-rest key. */
+  /**
+   * Factory for the conversation repository, invoked once with the at-rest key.
+   * Ignored when {@link repository} is supplied. Kept for the Node-runnable
+   * tests that pass a ready {@link InMemoryConversationRepository}.
+   */
   readonly repositoryFactory: (atRestKey: AtRestKey) => ConversationRepository;
+  /**
+   * A pre-built repository. When set, it is used directly and
+   * {@link repositoryFactory} is skipped. The browser provider builds its
+   * OPFS-backed repo asynchronously BEFORE constructing the controller and
+   * passes it here so the controller itself stays synchronous.
+   */
+  readonly repository?: ConversationRepository;
   /** Factory for the underlying signaling WebSocket (testability). */
   readonly socketFactory: SignalingSocketFactory;
   /**
@@ -118,6 +130,17 @@ export interface ChatControllerDeps {
   readonly peerConnectionFactory: PeerConnectionFactory;
   /** ICE servers for WebRTC. Empty array = loopback-only. */
   readonly iceServers?: readonly IceServer[];
+  /**
+   * R8/F1 (Phase 6): PAKE feature gate. Threaded unchanged to
+   * {@link OrchestratorDeps.enablePake} via {@link BuildSessionInput}. When
+   * `false`, the orchestrator rejects `~code` invitations at the join parse
+   * boundary with {@link OrchestratorErrorCode.PakeDisabled} — so v1 mobile
+   * (whose SPAKE2 wasm is Metro-blocked) does not crash at `loadWasm` on a
+   * `~code` deep link. Defaults to `true` (undefined → true in the orchestrator)
+   * so web/desktop behavior is unchanged; only the mobile provider passes
+   * `false`.
+   */
+  readonly enablePake?: boolean;
 }
 
 export interface ChatController {
@@ -285,7 +308,10 @@ export const initialChatControllerState: ChatControllerState = EMPTY_STATE;
  */
 export function createChatController(deps: ChatControllerDeps): ChatController {
   const atRestKey = deps.atRestKeyManager.get();
-  const rawRepository = deps.repositoryFactory(atRestKey);
+  // A pre-built repository wins over the factory. Both providers that need an
+  // async store open (the browser opens its OPFS SQLite DB before building the
+  // controller) pass `repository`; the legacy factory path stays for tests.
+  const rawRepository = deps.repository ?? deps.repositoryFactory(atRestKey);
   // Wrap the repository so every ciphertext-touching call gates on
   // `manager.isLocked()`. This is the authoritative lock: lock() flips the
   // manager flag, and any subsequent seal/unseal throws AtRestLockedError.
@@ -357,7 +383,12 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   }
 
   async function refreshConversations(): Promise<void> {
-    conversationsCache = (await repository.listConversations()).slice();
+    const rows = await repository.listConversations();
+    // The await can straddle disposal (e.g. a boot-time hydrate resolving after
+    // the provider unmounted and called dispose()). Bail before mutating state
+    // or emitting into a torn-down controller.
+    if (disposed) return;
+    conversationsCache = rows.slice();
     // Sync each session's cached record so summary derivation stays cheap.
     for (const session of sessions.values()) {
       const updated = conversationsCache.find((r) => r.id === session.id) ?? null;
@@ -504,6 +535,8 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         identity: deps.identityManager.get(),
         peerConnectionFactory: deps.peerConnectionFactory,
         iceServers: deps.iceServers,
+        // R8/F1 (Phase 6): thread the PAKE feature gate to the orchestrator.
+        enablePake: deps.enablePake,
       },
       holder,
       onSessionChange,
@@ -722,6 +755,23 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       queued.reject(err);
     }
   }
+
+  // Boot hydration: the controller is constructed synchronously, but the
+  // repository (browser OPFS/SQLite, or in-memory) may hold persisted
+  // conversations from a previous session. The first getState() returns before
+  // this resolves, so conversationsCache starts empty; we seed it async here
+  // and emit once the persisted rows are in. Every subscriber — including the
+  // provider attached immediately after construction — receives the populated
+  // snapshot when the read resolves. Without this, a fresh boot shows no
+  // resumable conversations until the user performs some action, even though
+  // the store has them.
+  void refreshConversations().catch((err: unknown) => {
+    // Persistence is best-effort at boot: a read failure (e.g. a locked
+    // at-rest key, OPFS hiccup) must not block the controller. Surface it as
+    // a state error so the UI can render an alert, mirroring the load-failure
+    // posture in the provider.
+    emit(err instanceof Error ? err.message : String(err));
+  });
 
   return {
     async startConversation(options?: { readonly code?: string }): Promise<{ invitation: string }> {
@@ -1223,6 +1273,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       readMarkers.clear();
       activeConversationId = null;
       listeners.clear();
+      // R5:F3 / R6:F1: release any backing DB handles (the web provider's
+      // OPFS-backed repo holds a wa-sqlite DB + dedicated Worker open for the
+      // app's lifetime; without this the handles leaked on every dispose,
+      // including the cancelled-init race in the provider). dispose() stays
+      // synchronous to honor the ChatController contract, so this is
+      // fire-and-forget: close() is itself idempotent and swallow-errors.
+      // In-memory and test repos have no close() (optional on the interface).
+      void Promise.resolve(rawRepository.close?.()).catch(() => {});
     },
 
     async __receiveMessageForTest(id: ConversationId, text: string): Promise<void> {

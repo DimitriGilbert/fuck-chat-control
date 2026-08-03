@@ -36,7 +36,19 @@ export class BrokerConnection {
 
   public onClose(): void {
     this.notifyPeerLeft();
-    this.registry.removeSocket(this.socket);
+    // R3/F4: prefer the O(1) `leave(roomId, socket)` over the O(rooms) scan
+    // `removeSocket` does. `roomId` is known for any connection that ever
+    // joined, so the scan is wasted work on the close path of every seated
+    // connection — an attacker can amplify it by opening many short-lived
+    // connections. Fall back to the scan only for a connection that never
+    // joined (no roomId), which is the path the registry was designed for
+    // (defense-in-depth cleanup of a socket the runtime never delivered a
+    // leave for).
+    if (this.roomId !== null) {
+      this.registry.leave(this.roomId, this.socket);
+    } else {
+      this.registry.removeSocket(this.socket);
+    }
     this.roomId = null;
   }
 

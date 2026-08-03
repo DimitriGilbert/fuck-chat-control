@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_ROOMS,
   RoomRegistry,
   isValidRoomId,
 } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
@@ -211,5 +212,81 @@ describe("RoomRegistry resumption", () => {
     expect(second.joined).toBe(true);
     expect(second.isSecondPeer).toBe(true);
     expect(reg.getPeer(id, a2)).toBe(b2);
+  });
+});
+
+describe("RoomRegistry room cap — R3/F2 (MAX_ROOMS)", () => {
+  it("exports a MAX_ROOMS constant with the documented v1 default", () => {
+    expect(MAX_ROOMS).toBe(1024);
+  });
+
+  it("rejects creating a NEW room once the cap is reached (too_many_rooms)", () => {
+    // Small cap via the constructor seam so the test doesn't fill 1024 rooms.
+    const reg = new RoomRegistry({ maxRooms: 2 });
+    const a = new MockBrokerSocket();
+    const b = new MockBrokerSocket();
+    const c = new MockBrokerSocket();
+    const id1 = roomId(101);
+    const id2 = roomId(102);
+    const id3 = roomId(103);
+    expect(reg.join(id1, a).joined).toBe(true);
+    expect(reg.join(id2, b).joined).toBe(true);
+
+    const res = reg.join(id3, c);
+    expect(res.joined).toBe(false);
+    expect(res.reason).toBe("too_many_rooms");
+    // The rejected socket is hard-closed (matches the "room full" rejection
+    // style: close the offending socket so it doesn't linger).
+    expect(c.closed).toBe(true);
+    expect(c.closeCode).toBe(1013);
+    // The cap must NOT admit the room: the room set stays at the cap and the
+    // new room id is not present.
+    expect(reg.size()).toBe(2);
+    expect(reg.has(id3)).toBe(false);
+  });
+
+  it("does NOT gate joining an EXISTING room (the cap is on the create path only)", () => {
+    // Fill to the cap with one-peer rooms, then add a SECOND peer to an
+    // existing room — that must succeed because it creates no new room.
+    const reg = new RoomRegistry({ maxRooms: 1 });
+    const a = new MockBrokerSocket();
+    const b = new MockBrokerSocket();
+    const c = new MockBrokerSocket();
+    const id = roomId(104);
+    reg.join(id, a);
+    expect(reg.size()).toBe(1); // at the cap
+
+    const secondPeer = reg.join(id, b);
+    expect(secondPeer.joined).toBe(true);
+    expect(secondPeer.isSecondPeer).toBe(true);
+    // Adding the second peer did not grow the room count.
+    expect(reg.size()).toBe(1);
+
+    // A genuinely new room is still rejected.
+    const res = reg.join(roomId(105), c);
+    expect(res.joined).toBe(false);
+    expect(res.reason).toBe("too_many_rooms");
+  });
+
+  it("admits a new room after one frees up (the cap re-opens)", () => {
+    const reg = new RoomRegistry({ maxRooms: 1 });
+    const a = new MockBrokerSocket();
+    const id1 = roomId(106);
+    reg.join(id1, a);
+    expect(reg.join(roomId(107), new MockBrokerSocket()).joined).toBe(false);
+
+    // Last peer leaves → room dropped → a fresh room can be created again.
+    reg.leave(id1, a);
+    const res = reg.join(roomId(108), new MockBrokerSocket());
+    expect(res.joined).toBe(true);
+  });
+
+  it("defaults to MAX_ROOMS when the constructor option is omitted", () => {
+    // The default-constructed registry must use MAX_ROOMS, not an undefined/
+    // zero cap. We assert by reflecting on a single join (can't feasibly fill
+    // 1024 rooms in a unit test); the cap value is exercised via the
+    // constructor seam above.
+    const reg = new RoomRegistry();
+    expect(reg.join(roomId(109), new MockBrokerSocket()).joined).toBe(true);
   });
 });

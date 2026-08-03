@@ -35,6 +35,13 @@ interface ActiveTransfer {
    * buffer + transfer slots for the channel lifetime (CR-5).
    */
   lastActivity: number;
+  /**
+   * Latch set the first time {@link FrameReceiver.dropTransfer} subtracts this
+   * transfer's bytes from `totalBufferedBytes`. Subsequent drop calls (e.g. a
+   * resumed `completeTransfer` reaching `dropTransfer` after `teardown` already
+   * swept the map) become no-ops so the byte counter is never double-decremented.
+   */
+  dropped: boolean;
 }
 
 export class FrameReceiver {
@@ -52,6 +59,24 @@ export class FrameReceiver {
    * drive the sweep through this same handle.
    */
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Latch set the moment {@link teardown} runs. Read FIRST by every public
+   * entry point (`ingest`, `cancelTransfer`) and by the periodic sweep so a
+   * teardown that races an in-flight `await sha256` cannot surface a stale
+   * `onFileComplete`, double-decrement the byte counter, or re-arm a sweep
+   * tick that `clearInterval` had already dispatched (R2:F2, R2:F4).
+   */
+  private tornDown = false;
+  /**
+   * Per-receiver promise chain that serializes {@link ingest}. The
+   * orchestrator fires `ingest` re-entrantly from a per-message transport
+   * callback with no serialization, and the body `await`s WebCrypto (decrypt,
+   * sha256). Without chaining, two `ingest` calls interleave at every await
+   * and corrupt the transfer map / byte counter (R2:F1, R2:F3, R2:F5). Each
+   * call appends to the tail and returns its own promise so callers still
+   * observe per-frame errors.
+   */
+  private ingestChain: Promise<void> = Promise.resolve();
 
   constructor(config: FrameReceiverConfig) {
     this.config = config;
@@ -69,6 +94,46 @@ export class FrameReceiver {
   }
 
   async ingest(bytes: Uint8Array): Promise<void> {
+    if (this.tornDown) return;
+    const run = this.ingestChain.then(() => this._ingestSerialized(bytes));
+    this.ingestChain = run.then(
+      () => {},
+      () => {},
+    );
+    return run;
+  }
+
+  cancelTransfer(transferId: number): void {
+    if (this.tornDown) return;
+    const transfer = this.transfers.get(transferId);
+    if (transfer === undefined) return;
+    this.dropTransfer(transferId, transfer);
+  }
+
+  teardown(): void {
+    // R2:F4: set the latch FIRST so any concurrently dispatched sweep tick,
+    // in-flight `await sha256` resumption, or post-teardown `ingest` /
+    // `cancelTransfer` short-circuits before touching shared state.
+    this.tornDown = true;
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    for (const [transferId, transfer] of this.transfers) {
+      this.dropTransfer(transferId, transfer);
+    }
+    this.transfers.clear();
+    // Drop the chain reference so a post-teardown `ingest` does not pin the
+    // last frame's bytes through a queued microtask; `ingest` already
+    // short-circuits on `tornDown`, so the tail never runs again.
+    this.ingestChain = Promise.resolve();
+    // LW-12 (Phase 7b): best-effort zeroize the session keys. See
+    // {@link zeroizeSessionKeys} in sender.ts for the limitation rationale.
+    zeroizeSessionKeys(this.config.sessionKeys);
+  }
+
+  private async _ingestSerialized(bytes: Uint8Array): Promise<void> {
+    if (this.tornDown) return;
     const frame = decodeWireFrame(bytes);
     if (!ctEqual(frame.aad.senderSessionId, this.config.peerSessionId)) {
       throw new FramingError(
@@ -77,6 +142,9 @@ export class FrameReceiver {
       );
     }
     const plaintext = await this.decrypt(frame.aad, frame.nonce, frame.ciphertext);
+    // Re-check after the decrypt await: a teardown (or a prior queued frame
+    // that tore down) during the await must not surface plaintext to the host.
+    if (this.tornDown) return;
     switch (frame.aad.frameType) {
       case FrameType.Text:
         this.config.onText(plaintext);
@@ -96,27 +164,6 @@ export class FrameReceiver {
           `unsupported frame type 0x${frame.aad.frameType.toString(16)}`,
         );
     }
-  }
-
-  cancelTransfer(transferId: number): void {
-    const transfer = this.transfers.get(transferId);
-    if (transfer === undefined) return;
-    this.totalBufferedBytes -= transfer.receivedBytes;
-    this.transfers.delete(transferId);
-  }
-
-  teardown(): void {
-    if (this.intervalId !== null) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    for (const transfer of this.transfers.values()) {
-      this.totalBufferedBytes -= transfer.receivedBytes;
-    }
-    this.transfers.clear();
-    // LW-12 (Phase 7b): best-effort zeroize the session keys. See
-    // {@link zeroizeSessionKeys} in sender.ts for the limitation rationale.
-    zeroizeSessionKeys(this.config.sessionKeys);
   }
 
   private async decrypt(
@@ -175,11 +222,14 @@ export class FrameReceiver {
    * configurable to tune the trade-off.
    */
   private sweepInactiveTransfers(): void {
+    // R2:F4: an already-dispatched tick can fire after teardown ran
+    // `clearInterval`. The `intervalId !== null` guard in teardown only blocks
+    // re-arming; the latch closes this window.
+    if (this.tornDown) return;
     const now = Date.now();
     for (const [transferId, transfer] of this.transfers) {
       if (now - transfer.lastActivity > this.inactivityTimeoutMs) {
-        this.totalBufferedBytes -= transfer.receivedBytes;
-        this.transfers.delete(transferId);
+        this.dropTransfer(transferId, transfer);
         this.config.onTransferTimeout?.(transferId);
       }
     }
@@ -213,7 +263,19 @@ export class FrameReceiver {
       receivedCount: 0,
       receivedBytes: 0,
       lastActivity: Date.now(),
+      dropped: false,
     };
+    // R2:F5: re-check immediately before committing the map entry. Under the
+    // serialized ingest the original race (a duplicate empty-file manifest
+    // landing while the first awaits `completeTransfer`) cannot reopen, but
+    // the check is a cheap defense against any future caller that bypasses the
+    // chain.
+    if (this.transfers.has(transferId)) {
+      throw new FramingError(
+        FramingErrorCode.TransferInactive,
+        `transfer ${transferId} is already active`,
+      );
+    }
     this.transfers.set(transferId, transfer);
     if (manifest.chunkCount === 0) {
       await this.completeTransfer(transferId, transfer);
@@ -315,12 +377,29 @@ export class FrameReceiver {
         `reassembled content hash does not match manifest for transfer ${transferId}`,
       );
     }
+    // R2:F2: re-check after the sha256 await. A teardown that raced the await
+    // has already swept the map and set `tornDown`; a parallel drop path
+    // (e.g. a cancel that landed during the await) would have removed the
+    // entry too. In any of those cases the transfer is no longer live and we
+    // must not surface `onFileComplete` to a host that considers the receiver
+    // gone. The success-path `dropTransfer` runs AFTER this check, so the
+    // normal flow still sees the entry present.
+    if (this.tornDown || !this.transfers.has(transferId)) {
+      this.dropTransfer(transferId, transfer);
+      return;
+    }
     const file: ReceivedFile = { manifest: transfer.manifest, data: reassembled };
     this.dropTransfer(transferId, transfer);
     this.config.onFileComplete(file);
   }
 
   private dropTransfer(transferId: number, transfer: ActiveTransfer): void {
+    // R2:F1: idempotent per transfer. A resumed `completeTransfer` reaching
+    // `dropTransfer` after `teardown` (or a cancel) already subtracted must
+    // not decrement `totalBufferedBytes` again — the resulting negative
+    // counter would defeat every budget gate that reads it.
+    if (transfer.dropped) return;
+    transfer.dropped = true;
     this.totalBufferedBytes -= transfer.receivedBytes;
     this.transfers.delete(transferId);
   }

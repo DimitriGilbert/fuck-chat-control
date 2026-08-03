@@ -8,6 +8,15 @@ const config = getDefaultConfig(__dirname);
 // the `.wasm`/dynamic `import()` inside packages/chat-runtime/src/crypto/pake.ts
 // (the dynamic specifier resolves to a path under pkg/).
 //
+// NOTE (R8/F1 / Phase 6): this blockList is now a DEFENSE-IN-DEPTH layer, not
+// the only gate. PAKE-coded invitations are ALSO rejected in LOGIC, at the
+// orchestrator's join parse boundary: the mobile chat provider constructs the
+// controller with `enablePake: false`, so the orchestrator throws
+// OrchestratorError(PakeDisabled) on any `~code` fragment BEFORE it reaches
+// createPakeSession/loadWasm. The logic gate is what prevents the mid-handshake
+// crash on a `~code` deep link; this blockList merely keeps the wasm out of the
+// bundle (smaller binary + a second layer if the logic gate is ever bypassed).
+//
 // IMPORTANT: pake.ts itself MUST stay resolvable. crypto/index.ts statically
 // re-exports VALUE symbols (createPakeSession, derivePakeConfirmationTag,
 // pakeOutgoingShare, pakeFinish, roleToSideByte, __setWasmModuleForTests) from

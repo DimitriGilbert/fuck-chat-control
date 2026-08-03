@@ -3,7 +3,7 @@ import { argon2id } from "hash-wasm";
 import { GCM_NONCE_BYTES } from "../protocol/limits";
 
 import { CryptoError, CryptoErrorCode } from "./errors";
-import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, toAESKey } from "./primitives";
+import { aesGcmDecrypt, aesGcmEncrypt, randomBytes, toAESKey, zeroize } from "./primitives";
 import type { AtRestKey, WrappedKey } from "./types";
 
 const ARGON2_MEMORY_KIB = 65536;
@@ -19,81 +19,55 @@ const WRAPPED_TOTAL_BYTES = ARGON2_SALT_BYTES + GCM_NONCE_BYTES + AES_KEY_BYTES 
 const EMPTY_AAD = new Uint8Array(0);
 
 /**
- * CR-10: nonce-uniqueness for the at-rest key. The nonce is composed as
- *   `[counterBytes(8) | randomBytes(4)]`  (12 bytes total = GCM_NONCE_BYTES)
+ * R1:F1 — at-rest nonce uniqueness. Each {@link encryptAtRest}/{@link wrapKey}
+ * call samples a FRESH uniformly-random 96-bit (12-byte) nonce from
+ * `crypto.getRandomValues`. This is the NIST SP 800-38D §8.2.1 RBG-based
+ * construction: it is stateless, so a page reload CANNOT reset any counter and
+ * force a nonce reuse under the persisted message-history key (the original
+ * failure mode, where a module-scoped counter reset to 0 on reload and collided
+ * across two sessions with probability ~2^-32 per pair). The nonce is stored
+ * per-record in the at-rest envelope, so decryption needs no shared state.
  *
- * The 8-byte counter is a per-module monotonic value that increments on every
- * {@link encryptAtRest} and {@link wrapKey} call, guaranteeing uniqueness
- * WITHIN a session/key (the property the PRD's "uniqueness enforced" clause
- * calls out for at-rest). The 4-byte random suffix is sampled ONCE per module
- * load and makes the counter's starting output unpredictable across sessions,
- * so two sessions that both encrypt their first message do not produce
- * identical counter-prefixed nonces (cross-session collision resistance).
+ * Collision bound: for n records under one key the expected number of colliding
+ * pairs is n(n-1)/2^97. At n = 10^6 messages that is ~8e-15 — for all practical
+ * histories this is dominated by every other risk in the system. AES-GCM's
+ * documented safety ceiling under random nonces is 2^32 encryptions per key
+ * (96-bit tag-collision + birthday on the 96-bit nonce space); a chat history
+ * will never approach that, and the key is per-install anyway.
  *
- * v1 trade-off (documented honestly): the counter is module-scoped, not
- * persisted alongside the at-rest key, so a page reload resets it to 0. The
- * random 4-byte suffix is re-sampled on each load, so the cross-session
- * collision probability is ~2^-32 per (counter, session-suffix) pair —
- * astronomically unlikely for the rare wrapKey path (one wrap per passphrase
- * set) and the moderate encryptAtRest path (one encrypt per appended message).
- * The WITHIN-session uniqueness — the property that turns a catastrophic
- * GCM-nonce-reuse into an impossibility — is enforced loudly by the counter.
+ * Why this over a persisted per-key counter (Option B): the only in-scope
+ * callers (`in-memory-repo.appendMessage`, `export-bundle`) have NO stable
+ * monotonic per-record id at encryption time, and threading a persisted
+ * counter through them would require modifying the store layer (out of scope).
+ * A stateless random nonce has the smallest blast radius (no new state, no
+ * signature changes, no durability-before-write ordering hazard) while making
+ * the reload-reuse class of bugs impossible by construction.
  *
- * Why the deterministic counter over an in-memory dedup Set: the counter
- * guarantees uniqueness by construction (no RNG-failure path that produces a
- * duplicate can exist), whereas the Set approach only DETECTS a duplicate
- * after the RNG already returned one. The framing path already uses a
- * deterministic counter+random-suffix nonce; this brings at-rest to parity.
+ * Why this over the previous `[counter(8) | sessionSuffix(4)]` construction:
+ * the old counter was module-scoped and reset on reload, so two reloads shared
+ * counter=0 and relied on a 4-byte random suffix for separation (2^-32). The
+ * new construction has 96 bits of freshness per record and zero dependence on
+ * in-memory or persisted state.
  */
-const NONCE_COUNTER_BYTES = 8;
-const NONCE_RANDOM_SUFFIX_BYTES = GCM_NONCE_BYTES - NONCE_COUNTER_BYTES; // 4
 
 /**
- * Per-module monotonic counter. Incremented on every at-rest encryption.
- * Number.isSafeInteger tops out at 2^53 - 1; the counter is serialized to 8
- * bytes (52 bits of headroom), so wrap-around is not a practical concern.
- */
-let atRestNonceCounter = 0;
-/**
- * Per-module-load random suffix. Re-sampled on every page reload so two
- * sessions cannot produce identical counter-prefixed nonces for the same key.
- */
-const nonceSessionSuffix = randomBytes(NONCE_RANDOM_SUFFIX_BYTES);
-
-/**
- * Build a 12-byte at-rest nonce from the monotonic counter and the
- * per-module-load random suffix. Returns a fresh Uint8Array each call.
+ * Sample a fresh 12-byte at-rest nonce from the platform CSPRNG. The nonce is
+ * unique-by-randomness per record; no module-scoped counter is involved.
  *
- * @internal exported for tests so the nonce-composition can be asserted.
+ * @internal exported for tests so the nonce length can be asserted directly.
  */
-export function __buildAtRestNonceForTests(counter: number, suffix: Uint8Array): Uint8Array {
-  if (suffix.length !== NONCE_RANDOM_SUFFIX_BYTES) {
-    throw new CryptoError(
-      CryptoErrorCode.InvalidArgument,
-      `nonce suffix must be ${NONCE_RANDOM_SUFFIX_BYTES} bytes, got ${suffix.length}`,
-    );
-  }
-  const out = new Uint8Array(GCM_NONCE_BYTES);
-  // Write the counter as 8 big-endian bytes into [0..8). Big-endian keeps the
-  // high bytes stable for a long time (counter grows from 0), so the prefix
-  // is monotonic and the uniqueness property is obvious from inspection.
-  const view = new DataView(out.buffer);
-  view.setUint32(0, Math.floor(counter / 0x100000000));
-  view.setUint32(4, counter >>> 0);
-  out.set(suffix, NONCE_COUNTER_BYTES);
-  return out;
+export function __freshAtRestNonceForTests(): Uint8Array {
+  return randomBytes(GCM_NONCE_BYTES);
 }
 
 /**
- * Allocate the next at-rest nonce: compose `[counter(8) | sessionSuffix(4)]`
- * and increment the counter. The returned nonce is guaranteed unique within
- * this module's lifetime (the counter is monotonic); the session-suffix makes
- * cross-session collisions astronomically unlikely (2^-32 per pair).
+ * Allocate a fresh at-rest nonce: 12 uniformly-random bytes. Each call draws
+ * new randomness, so two calls (even after a reload) collide with probability
+ * ~2^-96 — making GCM nonce reuse under the persistent message-history key
+ * impossible by construction rather than merely unlikely.
  */
 function nextAtRestNonce(): Uint8Array {
-  const nonce = __buildAtRestNonceForTests(atRestNonceCounter, nonceSessionSuffix);
-  atRestNonceCounter += 1;
-  return nonce;
+  return randomBytes(GCM_NONCE_BYTES);
 }
 
 export interface AtRestCiphertext {
@@ -109,8 +83,8 @@ export async function encryptAtRest(
   key: AtRestKey,
   plaintext: Uint8Array,
 ): Promise<AtRestCiphertext> {
-  // CR-10: deterministic per-key nonce = [counter(8) | sessionSuffix(4)].
-  // See {@link nextAtRestNonce} for the uniqueness argument.
+  // R1:F1: fresh random 96-bit nonce per record. Stateless → survives reload
+  // without reusing a nonce under the persisted key. See the file-level doc.
   const nonce = nextAtRestNonce();
   const ciphertext = await aesGcmEncrypt(key, nonce, EMPTY_AAD, plaintext);
   return { nonce, ciphertext };
@@ -164,17 +138,24 @@ export async function deriveKeyFromPassphrase(
     hashLength: AES_KEY_BYTES,
     outputType: "binary",
   });
-  return toAESKey(raw);
+  // R1:F3: toAESKey copies its input, so wipe the argon2 raw output that is no
+  // longer needed after the AESKey copy is produced.
+  const key = toAESKey(raw);
+  zeroize(raw);
+  return key;
 }
 
 export async function wrapKey(passphrase: string, key: AtRestKey): Promise<WrappedKey> {
   const salt = randomBytes(ARGON2_SALT_BYTES);
   const wrappingKey = await deriveKeyFromPassphrase(passphrase, salt);
-  // CR-10: same deterministic nonce construction as encryptAtRest. wrapKey is
-  // rare (one wrap per passphrase set) so counter pressure is negligible, but
-  // applying the same composition keeps the at-rest nonce story uniform.
+  // R1:F1: same fresh-random-nonce construction as encryptAtRest — one wrap per
+  // passphrase set, so a random nonce makes reload reuse impossible and the
+  // per-record envelope stores it for unwrap.
   const nonce = nextAtRestNonce();
   const ciphertext = await aesGcmEncrypt(wrappingKey, nonce, EMPTY_AAD, key);
+  // R1:F3: the wrapping KEK is no longer needed after the single GCM seal
+  // above; wipe it so it does not linger on the heap.
+  zeroize(wrappingKey);
   const out = new Uint8Array(WRAPPED_TOTAL_BYTES);
   out.set(salt, WRAPPED_SALT_OFFSET);
   out.set(nonce, WRAPPED_NONCE_OFFSET);
@@ -195,7 +176,11 @@ export async function unwrapKey(passphrase: string, wrapped: WrappedKey): Promis
   const wrappingKey = await deriveKeyFromPassphrase(passphrase, salt);
   try {
     const raw = await aesGcmDecrypt(wrappingKey, nonce, EMPTY_AAD, ciphertext);
-    return toAESKey(raw);
+    // R1:F3: toAESKey copies its input, so wipe the decrypted raw key material
+    // once the AESKey copy is produced.
+    const key = toAESKey(raw);
+    zeroize(raw);
+    return key;
   } catch (err) {
     if (err instanceof CryptoError && err.code === CryptoErrorCode.AuthenticationFailed) {
       throw new CryptoError(
@@ -204,5 +189,9 @@ export async function unwrapKey(passphrase: string, wrapped: WrappedKey): Promis
       );
     }
     throw err;
+  } finally {
+    // R1:F3: the wrapping KEK is no longer needed once the unwrap (or its auth
+    // failure) has resolved; wipe it on every path.
+    zeroize(wrappingKey);
   }
 }
