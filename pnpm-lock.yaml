@@ -43,6 +43,11 @@ catalogs:
       specifier: ^4.4.3
       version: 4.4.3
 
+patchedDependencies:
+  nitro@3.0.260610-beta:
+    hash: 978ba15c94d6c6940f8c5ac4693ec69a83fdfffab93c3b040a64b30b2479266b
+    path: patches/nitro@3.0.260610-beta.patch
+
 importers:
 
   .:
@@ -189,7 +194,7 @@ importers:
         version: 0.4.6(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       nitro:
         specifier: ^3.0.260610-beta
-        version: 3.0.260610-beta(chokidar@5.0.0)(dotenv@17.4.2)(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0))
+        version: 3.0.260610-beta(patch_hash=978ba15c94d6c6940f8c5ac4693ec69a83fdfffab93c3b040a64b30b2479266b)(chokidar@5.0.0)(dotenv@17.4.2)(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0))
       react:
         specifier: 'catalog:'
         version: 19.2.7
@@ -10837,7 +10842,7 @@ snapshots:
 
   nf3@0.3.22: {}
 
-  nitro@3.0.260610-beta(chokidar@5.0.0)(dotenv@17.4.2)(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0)):
+  nitro@3.0.260610-beta(patch_hash=978ba15c94d6c6940f8c5ac4693ec69a83fdfffab93c3b040a64b30b2479266b)(chokidar@5.0.0)(dotenv@17.4.2)(jiti@2.7.0)(lru-cache@11.5.2)(vite@8.1.4(@types/node@22.20.1)(jiti@2.7.0)(terser@5.49.0)(yaml@2.9.0)):
     dependencies:
       consola: 3.4.2
       crossws: 0.4.10(srvx@0.11.22)

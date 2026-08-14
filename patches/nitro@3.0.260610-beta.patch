@@ -1,0 +1,54 @@
+diff --git a/dist/presets/node/runtime/node-server.mjs b/dist/presets/node/runtime/node-server.mjs
+index cd13e631c0eec61671c662a7dfe3f6f0fe919e13..16848c885247f5bb4f31e2a44aed3f69364bbe0e 100644
+--- a/dist/presets/node/runtime/node-server.mjs
++++ b/dist/presets/node/runtime/node-server.mjs
+@@ -24,7 +24,20 @@ const server = serve({
+ 	plugins: [...tracingSrvxPlugins]
+ });
+ if (import.meta._websocket) {
+-	const { handleUpgrade } = wsAdapter({ resolve: resolveWebsocketHooks });
++	// [fck-chat-control patch, R3/F1] Forward a wire-level ws maxPayload to
++	// the crossws node adapter (it spreads options.serverOptions into the
++	// underlying `ws` WebSocketServer). Upstream nitro 3.0.260610-beta exposes
++	// no config key for this, so `ws` keeps its 100 MiB/frame default and a
++	// few sockets can OOM the process before any app-layer cap fires. Default
++	// 32 KiB (just above this app's 16 KiB broker cap); override with
++	// NITRO_WS_MAX_PAYLOAD, disable with 0.
++	const _wsMaxPayloadRaw = Number.parseInt(process.env.NITRO_WS_MAX_PAYLOAD ?? "32768", 10);
++	const _wsMaxPayload =
++		Number.isFinite(_wsMaxPayloadRaw) && _wsMaxPayloadRaw > 0 ? _wsMaxPayloadRaw : undefined;
++	const { handleUpgrade } = wsAdapter({
++		resolve: resolveWebsocketHooks,
++		...(_wsMaxPayload !== undefined ? { serverOptions: { maxPayload: _wsMaxPayload } } : {}),
++	});
+ 	server.node.server.on("upgrade", (req, socket, head) => {
+ 		handleUpgrade(
+ 			req,
+diff --git a/dist/runtime/internal/vite/dev-entry.mjs b/dist/runtime/internal/vite/dev-entry.mjs
+index cb1176ee093ecfc362080044279eae86abd82f9a..b83d402ea0074b9d2b206592c0869b4585ff689b 100644
+--- a/dist/runtime/internal/vite/dev-entry.mjs
++++ b/dist/runtime/internal/vite/dev-entry.mjs
+@@ -9,7 +9,22 @@ const nitroApp = useNitroApp();
+ 
+ export const fetch = nitroApp.fetch;
+ 
+-const ws = import.meta._websocket ? wsAdapter({ resolve: resolveWebsocketHooks }) : undefined;
++// [fck-chat-control patch, R3/F1] Forward a wire-level ws maxPayload to the
++// crossws node adapter (it spreads options.serverOptions into the underlying
++// `ws` WebSocketServer). Upstream nitro 3.0.260610-beta exposes no config key
++// for this, so `ws` keeps its 100 MiB/frame default and a few sockets can OOM
++// the process before any app-layer cap fires. Default 32 KiB (just above this
++// app's 16 KiB broker cap); override with NITRO_WS_MAX_PAYLOAD, disable with 0.
++const _wsMaxPayloadRaw = Number.parseInt(process.env.NITRO_WS_MAX_PAYLOAD ?? "32768", 10);
++const _wsMaxPayload =
++	Number.isFinite(_wsMaxPayloadRaw) && _wsMaxPayloadRaw > 0 ? _wsMaxPayloadRaw : undefined;
++
++const ws = import.meta._websocket
++	? wsAdapter({
++			resolve: resolveWebsocketHooks,
++			...(_wsMaxPayload !== undefined ? { serverOptions: { maxPayload: _wsMaxPayload } } : {}),
++		})
++	: undefined;
+ 
+ if (import.meta._tasks) {
+   startScheduleRunner({});

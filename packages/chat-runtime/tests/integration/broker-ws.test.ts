@@ -317,4 +317,33 @@ describe("broker WebSocket route (real dev server)", () => {
       closeQuietly(c);
     }
   });
+
+  // R3/F1 regression: the wire-level `ws` maxPayload (32 KiB, injected via
+  // the pnpm patch of nitro's ws-adapter call sites — see
+  // patches/nitro@3.0.260610-beta.patch) must disconnect a peer that sends an
+  // oversized frame BEFORE the frame is fully buffered. Without the patch,
+  // `ws` defaults to a 100 MiB/frame cap, so a single socket could OOM the
+  // process before the app-layer 16 KiB cap (which runs post-buffer on the
+  // decoded string) ever fires.
+  it("disconnects a peer at the FRAMING layer for a frame larger than maxPayload (R3/F1)", async () => {
+    const a = await connectClient(WS_URL);
+    try {
+      // 64 KiB of JSON — well past the 32 KiB wire cap, and past the 16 KiB
+      // app cap that would also reject it post-buffer. The client must be
+      // disconnected by `ws` itself with close code 1009 ("message too big"),
+      // never delivering the frame to the broker's message handler.
+      const oversized = JSON.stringify({ t: "offer", sdp: "x".repeat(64 * 1024) });
+      const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+        a.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+      });
+      a.send(oversized, { compress: false });
+      const { code } = await closed;
+      // `ws` closes with 1009 when a frame exceeds maxPayload; anything else
+      // (e.g. a clean 1000 close) means the frame was delivered and the app
+      // layer handled it — i.e. the wire-level cap is NOT in force.
+      expect(code).toBe(1009);
+    } finally {
+      closeQuietly(a);
+    }
+  });
 });

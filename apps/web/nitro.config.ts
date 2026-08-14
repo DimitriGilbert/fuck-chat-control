@@ -9,33 +9,27 @@ import { defineConfig } from "nitro";
 // places means this file is a self-documenting inventory of the WS surface
 // rather than a silent dependency on vite.config.ts.
 //
-// --- Why there is no `maxPayload` key here (verified) ---------------------
-// The DoS finding R3:F1 calls for a WebSocket-level `maxPayload` so an
+// --- Wire-level WebSocket maxPayload (R3/F1) -------------------------------
+// The DoS finding R3/F1 calls for a WebSocket-level `maxPayload` so an
 // oversized frame is rejected by `ws` *before* it is buffered. `ws`'s default
 // `maxPayload` is 100 MiB, and the app-level cap
 // (`BROKER_MESSAGE_MAX_BYTES = 16384` in
 // packages/chat-runtime/src/broker/protocol.ts) runs POST-buffer on the
 // decoded string, so it cannot be the load-bearing limit.
 //
-// In the INSTALLED nitro version (3.0.260610-beta) there is NO config key
-// that forwards `serverOptions.maxPayload` to the `ws` `WebSocketServer`.
-// Verified by reading nitro's shipped sources:
-//   - dist/types/index.d.mts: `features.websocket` and `experimental.websocket`
-//     are both `websocket?: boolean` — pure feature flags, no nested options.
-//   - dist/presets/node/runtime/node-server.mjs, dist/presets/_nitro/runtime/
-//     nitro-dev.mjs, dist/runtime/internal/vite/dev-entry.mjs ALL hardcode
-//     `wsAdapter({ resolve: resolveWebsocketHooks })` with no options object.
-// crossws 0.4.10's node adapter (node_modules/.../crossws/dist/_chunks/
-// node.mjs) WOULD honor `options.serverOptions.maxPayload` (spread into
-// `new WebSocketServer({ noServer: true, ...options.serverOptions })`), but
-// nitro never passes one. So a real wire-level cap requires either a nitro
-// upgrade (once it threads `serverOptions` through) or a patch to the preset.
-// This file deliberately does NOT set a fake key that looks like it works.
-//
-// Defense-in-depth until then: the app-layer 16 KiB cap in protocol.ts, plus
-// crossws's built-in idle ping/pong sweep (idleTimeout default 30s), bound the
-// oversized-frame + slowloris amplification. A nitro upgrade / upstream PR is
-// tracked as the follow-up to close the wire-level buffer gap.
+// nitro 3.0.260610-beta (the latest release) exposes NO config key that
+// forwards `serverOptions.maxPayload` to the `ws` `WebSocketServer` (its
+// node-server preset and vite dev-entry both hardcode
+// `wsAdapter({ resolve })` with no options), while crossws 0.4.10 WOULD honor
+// `options.serverOptions.maxPayload`. The wire-level cap is therefore
+// enforced via a local pnpm patch of those two nitro files
+// (patches/nitro@3.0.260610-beta.patch, registered in pnpm-workspace.yaml):
+// both call sites now pass `serverOptions: { maxPayload }`, defaulting to
+// 32 KiB (just above the 16 KiB app cap) and overridable/disablable via the
+// NITRO_WS_MAX_PAYLOAD env var. Proven by the regression test in
+// packages/chat-runtime/tests/integration/broker-ws.test.ts (an oversized
+// frame gets the socket disconnected at the framing layer with close code
+// 1009). Drop the patch when a nitro release threads serverOptions through.
 export default defineConfig({
   features: {
     websocket: true,
