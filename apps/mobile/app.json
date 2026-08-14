@@ -27,7 +27,8 @@
         {
           "configureAndroidBackup": false
         }
-      ]
+      ],
+      "./plugins/mmkv-backup-exclusion.js"
     ],
     "extra": {
       "brokerUrl:dev": "ws://10.0.2.2:8080/ws",

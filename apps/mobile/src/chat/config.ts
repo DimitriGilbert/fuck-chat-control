@@ -38,6 +38,36 @@ function readExtra(key: string, envOverride: string, fallback: string): string {
 }
 
 /**
+ * R8:F2: release builds must not silently downgrade signaling or the ICE/
+ * TURN-credential fetch to cleartext. A misconfigured operator build (e.g.
+ * `EXPO_PUBLIC_BROKER_URL=ws://…` baked into a Standalone binary) used to be
+ * accepted without a peep — the app just spoke plaintext forever. In the
+ * Standalone/release channel we now THROW on any non-`wss://` broker URL or
+ * non-`https://` base URL, at controller construction time (the first
+ * `resolveRuntimeConfig()` call), so the failure is loud instead of silent.
+ * Dev builds (Expo Go / dev client) keep `ws://` + `http://` allowed for the
+ * loopback/LAN workflow.
+ *
+ * The error is REDACTED: it names the field and the offending SCHEME only —
+ * never the full URL, credentials, or host — so a crash report cannot leak
+ * deployment details.
+ */
+function assertSecureReleaseScheme(value: string, field: "brokerUrl" | "baseUrl"): void {
+  const isRelease =
+    Constants.executionEnvironment === ExecutionEnvironment.Standalone ||
+    Constants.expoConfig?.extra?.["releaseChannel"] === "prod";
+  if (!isRelease) return;
+  const required = field === "brokerUrl" ? "wss://" : "https://";
+  if (!value.startsWith(required)) {
+    const scheme = value.split(":", 1)[0] ?? "";
+    throw new Error(
+      `Insecure runtime config in release build: ${field} must start with "${required}" ` +
+        `(got scheme "${scheme}:"). Rebuild with a secure EXPO_PUBLIC_${field === "brokerUrl" ? "BROKER" : "BASE"}_URL.`,
+    );
+  }
+}
+
+/**
  * The dev broker URL targets `10.0.2.2`, the Android emulator's alias for the
  * host loopback. iOS simulators reach `localhost` directly; a physical device
  * needs a LAN IP — override via `EXPO_PUBLIC_BROKER_URL`.
@@ -45,6 +75,8 @@ function readExtra(key: string, envOverride: string, fallback: string): string {
 export function resolveRuntimeConfig(): RuntimeConfig {
   const brokerUrl = readExtra("brokerUrl", "EXPO_PUBLIC_BROKER_URL", "ws://10.0.2.2:8080/ws");
   const baseUrl = readExtra("baseUrl", "EXPO_PUBLIC_BASE_URL", "http://10.0.2.2:8080");
+  assertSecureReleaseScheme(brokerUrl, "brokerUrl");
+  assertSecureReleaseScheme(baseUrl, "baseUrl");
   return { brokerUrl, baseUrl };
 }
 

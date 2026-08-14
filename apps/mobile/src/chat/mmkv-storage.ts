@@ -28,27 +28,16 @@
  * MMKV_ENCRYPTION_KEY_RANDOM_BYTES} for why the key is 24 random bytes even
  * though the AES-256 slot is 32 bytes wide.
  *
- * iOS backup-exclusion equivalent: the MMKV file lives under the app's
- * Documents directory (`$(Documents)/mmkv/`). To keep it out of iCloud/iTunes
- * backups, the build should set `NSURLIsExcludedFromBackupKey` on that
- * directory. There is no clean Expo config-plugin route for per-file iOS
- * backup exclusion (the `expo-secure-store` plugin only exposes
- * `configureAndroidBackup` and `faceIDPermission` — it has no
- * `keychainAccessible` or file-attribute field), so this must be applied in
- * the native build: add `NSURLIsExcludedFromBackupKey = YES` for the MMKV
- * directory in `ios/Podfile` post-install or a custom Expo config plugin.
- *
- * KNOWN LIMITATION (native-build step, not applied here): the
- * `NSURLIsExcludedFromBackupKey` flag for the MMKV directory is NOT set by
- * this module or by any Expo config plugin in this repo. There is no `ios/`
- * prebuild directory checked in, so applying it requires a native-build step
- * (Podfile post-install or a config plugin) that is out of scope for this
- * change. Until that step lands, the MMKV file may be included in iCloud/
- * iTunes backups. The MMKV *encryption key* itself is separately sealed in
- * the iOS Keychain with `keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY`
- * (see {@link loadOrCreateMmkvEncryptionKey}), which marks it
- * non-migratable and excludes it from backups. The Android side is covered
- * by `android:allowBackup="false"` in AndroidManifest.xml plus the
+ * iOS backup exclusion (R8:F6): the MMKV file lives under the app's Documents
+ * directory (`$(Documents)/mmkv/`). The `plugins/mmkv-backup-exclusion.js`
+ * Expo config plugin (wired in app.json) appends an AppDelegate snippet that
+ * sets `NSURLIsExcludedFromBackupKey = YES` on that directory at app boot, so
+ * the encrypted MMKV blob is NOT included in iCloud/iTunes backups. The MMKV
+ * *encryption key* itself is separately sealed in the iOS Keychain with
+ * `keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY` (see
+ * {@link loadOrCreateMmkvEncryptionKey}), which marks it non-migratable and
+ * excludes it from backups. The Android side is covered by
+ * `android:allowBackup="false"` in AndroidManifest.xml plus the
  * `expo-secure-store` plugin's `configureAndroidBackup: false`.
  */
 import * as SecureStore from "expo-secure-store";
@@ -121,11 +110,9 @@ async function loadOrCreateMmkvEncryptionKey(): Promise<string> {
     return existing;
   }
   const generated = generateMmkvEncryptionKey();
-  await SecureStore.setItemAsync(
-    MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY,
-    generated,
-    { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY },
-  );
+  await SecureStore.setItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY, generated, {
+    keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+  });
   return generated;
 }
 
@@ -229,6 +216,46 @@ export function ensureStorageReady(): Promise<void> {
   })();
   return readyPromise;
 }
+
+/**
+ * R8/F7: tear down the MMKV instance and drop every module-level reference.
+ *
+ * Nitro-based react-native-mmkv v4 exposes no `close()`/`recycle()` — the
+ * C++ MMKV core lives until process exit — so this is the strongest teardown
+ * available from JS:
+ *
+ *  1. `trim()` clears MMKV's in-memory page cache (the plaintext-decrypted
+ *     data mirrors) and punches the file down to its live size.
+ *  2. Nulled singletons (`storageInstance`, `readyPromise`) drop the JS
+ *     handles, so no further read/write can reach the store; a later
+ *     `ensureStorageReady()` re-initializes lazily (fresh instance, same
+ *     keychain-held key, same on-disk file).
+ *
+ * Idempotent: a second call with storage already torn down is a no-op. The
+ * chat provider calls this in its unmount cleanup alongside locking the
+ * at-rest key manager and evicting the identity manager.
+ */
+export function closeStorage(): void {
+  if (storageInstance === null) {
+    return;
+  }
+  try {
+    storageInstance.trim();
+  } catch {
+    // best-effort: trim failure (native bridge mid-teardown) still falls
+    // through to dropping the JS references below.
+  }
+  storageInstance = null;
+  readyPromise = null;
+}
+
+/**
+ * R8:F7: alias mirroring the at-rest key manager's `lock()` vocabulary —
+ * same teardown as {@link closeStorage}. Both names exist because provider
+ * cleanup reads naturally next to `atRestKeyManager.lock()` /
+ * `identityManager.evict()`.
+ */
+export const lockStorage = closeStorage;
 
 /**
  * Returns the initialized MMKV instance, throwing if

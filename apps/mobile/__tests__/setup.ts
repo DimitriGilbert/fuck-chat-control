@@ -44,6 +44,7 @@ interface CreateMMKVConfiguration {
   encryptionType?: "AES-128" | "AES-256";
 }
 const mockCreateMMKVCalls: CreateMMKVConfiguration[] = [];
+const mockTrimCalls: string[] = [];
 jest.mock("react-native-mmkv", () => {
   const store = new Map<string, string>();
   const createMMKV = (configuration: CreateMMKVConfiguration) => {
@@ -64,6 +65,11 @@ jest.mock("react-native-mmkv", () => {
       getAllKeys(): string[] {
         return Array.from(store.keys());
       },
+      // R8/F7: closeStorage() calls trim() to drop the in-memory page cache;
+      // record it so the teardown test can assert it ran.
+      trim: (): void => {
+        mockTrimCalls.push(configuration.id);
+      },
     };
   };
   return { createMMKV };
@@ -77,6 +83,11 @@ jest.mock("react-native-mmkv", () => {
     __MMKV_CREATE_CALLS__: CreateMMKVConfiguration[];
   }
 ).__MMKV_CREATE_CALLS__ = mockCreateMMKVCalls;
+(
+  globalThis as unknown as {
+    __MMKV_TRIM_CALLS__: string[];
+  }
+).__MMKV_TRIM_CALLS__ = mockTrimCalls;
 
 // Mock expo-secure-store so mmkv-storage's loadOrCreateMmkvEncryptionKey runs
 // under jest without a native keychain. The mock backs getItemAsync with an
@@ -93,9 +104,9 @@ interface SecureStoreSetCall {
   value: string;
   options?: { keychainAccessible?: string };
 }
-const mockSecureStoreSetCalls: SecureStoreSetCall[] = (
-  globalThis as unknown as { __SECURE_STORE_SET_CALLS__: SecureStoreSetCall[] }
-).__SECURE_STORE_SET_CALLS__ ?? [];
+const mockSecureStoreSetCalls: SecureStoreSetCall[] =
+  (globalThis as unknown as { __SECURE_STORE_SET_CALLS__: SecureStoreSetCall[] })
+    .__SECURE_STORE_SET_CALLS__ ?? [];
 (
   globalThis as unknown as { __SECURE_STORE_SET_CALLS__: SecureStoreSetCall[] }
 ).__SECURE_STORE_SET_CALLS__ = mockSecureStoreSetCalls;

@@ -68,3 +68,51 @@ describe("resolveRuntimeConfig channel selection", () => {
     expect(prodConfig.baseUrl).toBe("https://override-base.example");
   });
 });
+
+describe("resolveRuntimeConfig release-channel scheme validation (R8:F2)", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    constantsMock().executionEnvironment = ExecutionEnvironment.StoreClient;
+    delete process.env.EXPO_PUBLIC_BROKER_URL;
+    delete process.env.EXPO_PUBLIC_BASE_URL;
+  });
+
+  it("accepts the prod extra defaults under Standalone (wss/https)", () => {
+    constantsMock().executionEnvironment = ExecutionEnvironment.Standalone;
+    expect(() => resolveRuntimeConfig()).not.toThrow();
+  });
+
+  it("THROWS under Standalone when EXPO_PUBLIC_BROKER_URL is cleartext ws://", () => {
+    constantsMock().executionEnvironment = ExecutionEnvironment.Standalone;
+    process.env.EXPO_PUBLIC_BROKER_URL = "ws://cleartext.example/ws";
+    expect(() => resolveRuntimeConfig()).toThrow(/brokerUrl must start with "wss:\/\//);
+  });
+
+  it("THROWS under Standalone when EXPO_PUBLIC_BASE_URL is cleartext http://", () => {
+    constantsMock().executionEnvironment = ExecutionEnvironment.Standalone;
+    process.env.EXPO_PUBLIC_BASE_URL = "http://cleartext.example";
+    expect(() => resolveRuntimeConfig()).toThrow(/baseUrl must start with "https:\/\//);
+  });
+
+  it("the redacted error names the scheme but NOT the host or URL", () => {
+    constantsMock().executionEnvironment = ExecutionEnvironment.Standalone;
+    process.env.EXPO_PUBLIC_BROKER_URL = "ws://secret-host.example/ws";
+    let message = "";
+    try {
+      resolveRuntimeConfig();
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('scheme "ws:"');
+    expect(message).not.toContain("secret-host.example");
+  });
+
+  it("still ALLOWS cleartext in dev (StoreClient) for the loopback workflow", () => {
+    constantsMock().executionEnvironment = ExecutionEnvironment.StoreClient;
+    process.env.EXPO_PUBLIC_BROKER_URL = "ws://10.0.2.2:8080/ws";
+    process.env.EXPO_PUBLIC_BASE_URL = "http://10.0.2.2:8080";
+    expect(() => resolveRuntimeConfig()).not.toThrow();
+  });
+});

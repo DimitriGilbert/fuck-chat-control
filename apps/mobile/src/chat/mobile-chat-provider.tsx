@@ -42,7 +42,7 @@ import type { IceServer } from "@fuck-eu-chat-control/chat-runtime/transport/typ
 
 import * as React from "react";
 
-import { chatStorage, ensureStorageReady } from "./mmkv-storage";
+import { chatStorage, closeStorage, ensureStorageReady } from "./mmkv-storage";
 import { rnPeerConnectionFactory } from "./rn-peer-connection-factory";
 import { rnSocketFactory } from "./rn-socket-factory";
 import { fetchIceServers, resolveRuntimeConfig } from "./config";
@@ -189,14 +189,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           // specific H2 fail-closed message; anything else is a construction
           // failure (manager/controller/ICE) and gets the generic message.
           if (err instanceof SecureStorageUnavailableError) {
-            console.warn(
-              "ChatProvider: secure storage unavailable, cannot start chat",
-              err.cause,
-            );
+            console.warn("ChatProvider: secure storage unavailable, cannot start chat", err.cause);
             setState({
               ...initialControllerState,
-              error:
-                "Secure storage is unavailable on this device. Chat cannot start safely.",
+              error: "Secure storage is unavailable on this device. Chat cannot start safely.",
             });
             return;
           }
@@ -225,6 +221,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // material does not stay resident after the provider is gone.
       disposedAtRestKeyManager?.lock();
       disposedIdentityManager?.evict();
+      // R8:F7: tear down the MMKV instance too — trim() clears its plaintext
+      // in-memory page cache and the nulled singletons drop the JS handles,
+      // so nothing beyond the keychain-held key survives the provider.
+      closeStorage();
     };
   }, []);
 

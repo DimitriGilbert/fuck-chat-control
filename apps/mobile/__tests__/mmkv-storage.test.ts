@@ -10,7 +10,12 @@
  * keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY (non-migratable, excluded
  * from iCloud/iTunes backups).
  */
-import { chatStorage, ensureStorageReady } from "../src/chat/mmkv-storage";
+import {
+  chatStorage,
+  closeStorage,
+  ensureStorageReady,
+  lockStorage,
+} from "../src/chat/mmkv-storage";
 
 // Recorded by the react-native-mmkv mock in __tests__/setup.ts. Asserted below
 // to catch the AES-128/AES-256 regression (32-byte key silently paired with
@@ -66,13 +71,9 @@ describe("chatStorage (MMKV adapter)", () => {
     // non-migratable (ThisDeviceOnly) so it is excluded from iCloud/iTunes
     // backups. The JS API constant SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY
     // is the string the call-site passes; the SecureStore mock records it.
-    const mmkvKeySet = secureStoreSetCalls.find(
-      (call) => call.key === "fck-chat-v1-mmkv-key",
-    );
+    const mmkvKeySet = secureStoreSetCalls.find((call) => call.key === "fck-chat-v1-mmkv-key");
     expect(mmkvKeySet).toBeDefined();
-    expect(mmkvKeySet?.options?.keychainAccessible).toBe(
-      "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
-    );
+    expect(mmkvKeySet?.options?.keychainAccessible).toBe("WHEN_UNLOCKED_THIS_DEVICE_ONLY");
   });
 
   it("writes and reads a value synchronously", () => {
@@ -122,8 +123,7 @@ describe("ensureStorageReady fail-closed posture (H2)", () => {
     // Override the expo-secure-store mock for this isolated module load so
     // getItemAsync rejects (simulating an unavailable keychain/keystore).
     jest.doMock("expo-secure-store", () => ({
-      getItemAsync: (): Promise<string | null> =>
-        Promise.reject(new Error("keychain unavailable")),
+      getItemAsync: (): Promise<string | null> => Promise.reject(new Error("keychain unavailable")),
       setItemAsync: (): Promise<void> => Promise.resolve(),
       WHEN_UNLOCKED_THIS_DEVICE_ONLY: "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
     }));
@@ -134,9 +134,7 @@ describe("ensureStorageReady fail-closed posture (H2)", () => {
     });
     const storage = isolated!;
 
-    await expect(storage.ensureStorageReady()).rejects.toThrow(
-      "keychain unavailable",
-    );
+    await expect(storage.ensureStorageReady()).rejects.toThrow("keychain unavailable");
 
     // The storage adapter must throw the "used before ready" guard — proving
     // storageInstance stayed null and no plaintext MMKV was constructed.
@@ -149,9 +147,7 @@ describe("ensureStorageReady fail-closed posture (H2)", () => {
     // last call (if any) for this module must NOT be a plaintext fallback.
     // (Earlier calls belong to the happy-path beforeAll load, which IS
     // encrypted — those are filtered out by checking encryptionKey presence.)
-    const recentPlaintext = createCalls
-      .slice(-1)
-      .find((call) => call.encryptionKey === undefined);
+    const recentPlaintext = createCalls.slice(-1).find((call) => call.encryptionKey === undefined);
     expect(recentPlaintext).toBeUndefined();
   });
 
@@ -174,5 +170,39 @@ describe("ensureStorageReady fail-closed posture (H2)", () => {
     // The encrypted instance is usable.
     storage.chatStorage.setItem("iso-key", "iso-value");
     expect(storage.chatStorage.getItem("iso-key")).toBe("iso-value");
+  });
+});
+
+describe("closeStorage (R8:F7 teardown)", () => {
+  const trimCalls = (globalThis as unknown as { __MMKV_TRIM_CALLS__: string[] })
+    .__MMKV_TRIM_CALLS__;
+
+  it("trims the instance, drops the singletons, and is idempotent", async () => {
+    await ensureStorageReady();
+    // Write so the store is demonstrably live before teardown.
+    chatStorage.setItem("fck-teardown-probe", "value");
+    expect(chatStorage.getItem("fck-teardown-probe")).toBe("value");
+
+    const trimsBefore = trimCalls.length;
+    closeStorage();
+    // trim() ran exactly once for our instance id.
+    expect(trimCalls.length).toBe(trimsBefore + 1);
+    // Post-teardown reads throw (singletons nulled, storage not ready).
+    expect(() => chatStorage.getItem("fck-teardown-probe")).toThrow(/before ensureStorageReady/);
+    // Second call is a no-op (no extra trim, no throw).
+    closeStorage();
+    expect(trimCalls.length).toBe(trimsBefore + 1);
+  });
+
+  it("ensureStorageReady re-initializes lazily after a teardown", async () => {
+    closeStorage();
+    const createsBefore = createCalls.length;
+    await ensureStorageReady();
+    expect(createCalls.length).toBe(createsBefore + 1);
+    expect(chatStorage.getItem("fck-teardown-probe")).toBe("value");
+  });
+
+  it("lockStorage is an alias of closeStorage", () => {
+    expect(lockStorage).toBe(closeStorage);
   });
 });
