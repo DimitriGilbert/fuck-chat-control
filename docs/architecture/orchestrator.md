@@ -1,33 +1,53 @@
 # Conversation Orchestrator — Design
 
-This is the integration layer that ties together crypto, framing, signaling,
-WebRTC, and the conversation store. It owns the conversation lifecycle state
-machine and the application-layer handshake. It is the **only** module that
-coordinates the others; React never touches keys, frame codecs, data channels,
-or the DB directly.
+The integration layer that ties crypto, framing, signaling, WebRTC, and the
+conversation store together. It owns the conversation lifecycle state
+machine and the application-layer handshake. It is the only module that
+coordinates the others; React never touches keys, frame codecs, data
+channels, or the store directly.
 
-Auth in v1 is **safety-number-only** (no PAKE — see HANDOFF.md §2 and ADR 001).
+All of this lives in `packages/chat-runtime/src/orchestrator/`. The web app
+consumes it; it does not implement it.
+
+## Authentication modes
+
+A conversation uses one of two authentication modes, chosen at invitation
+time and recorded in the handshake transcript:
+
+- `SafetyNumberOnly` (`0x01`) — the default. The peer is authenticated by
+  comparing a safety number out of band.
+- `Pake` (`0x02`) — optional, set when the invitation carries a 6-digit
+  code. A SPAKE2 exchange is folded into the key derivation, so a wrong code
+  blocks the handshake.
+
+Both peers must agree on the mode. A mismatch on the wire is a terminal
+protocol error. See the [protocol spec](protocol-v1.md) and
+[ADR 001](../adr/001-crypto-dependencies.md).
 
 ## Module layout
 
-`apps/web/src/features/chat/orchestrator/`
+`packages/chat-runtime/src/orchestrator/`
 
-- `invitation.ts` — CSPRNG conversation-id generation + fragment-URL parsing.
-- `handshake-codec.ts` — plaintext handshake message encode/decode (pre-key).
-- `orchestrator.ts` — the `ConversationOrchestrator` class + state wiring.
+- `invitation.ts` — CSPRNG conversation-id generation, fragment-URL parsing
+  and formatting (including the coded form for PAKE).
+- `handshake-codec.ts` — plaintext handshake message encode/decode
+  (pre-key): hello, signature, and the PAKE share and confirm messages.
+- `orchestrator.ts` — the `ConversationOrchestrator` class and state wiring.
 - `errors.ts` — orchestrator error codes.
-- `index.ts` — barrel.
 
-Tests live under `apps/web/tests/unit/orchestrator/`.
+There is no barrel `index.ts`; callers import the files directly.
 
-## The receive-path gap and how we close it
+Tests live under `packages/chat-runtime/tests/`.
 
-`FrameTransport` (framing) is **send-only**: it has `send(bytes)` but delivers
-inbound bytes to the caller via `FrameReceiver.ingest`. The orchestrator must
-own message routing because, during the handshake phase, incoming bytes are
-**plaintext handshake messages**, not yet encrypted frames.
+## The receive path
 
-The orchestrator accepts a `PeerTransport` (a thin receive-capable contract):
+`FrameTransport` (framing) is send-only: it has `send(bytes)` and delivers
+inbound bytes to the caller through `FrameReceiver.ingest`. The orchestrator
+has to own message routing because, during the handshake, incoming bytes are
+plaintext handshake messages, not yet encrypted frames.
+
+The orchestrator takes a `PeerTransport` (a thin receive-capable contract)
+defined in `packages/chat-runtime/src/transport/peer-transport.ts`:
 
 ```ts
 interface PeerTransport {
@@ -40,13 +60,13 @@ interface PeerTransport {
 }
 ```
 
-`DataChannelTransport` (signaling/webrtc-adapter.ts) gains `setOnMessage`,
-wired to the underlying `RTCDataChannel` `onmessage` (`binaryType =
-"arraybuffer"`). It already has `send`, `ready`, `bufferedAmount`,
-`setDrainListener`, `close` — so it satisfies `PeerTransport` after that
-one-method addition.
+`DataChannelTransport` (`apps/web/src/features/chat/signaling/webrtc-adapter.ts`)
+gains `setOnMessage`, wired to the underlying `RTCDataChannel` `onmessage`
+(`binaryType = "arraybuffer"`). It already has `send`, `ready`,
+`bufferedAmount`, `setDrainListener` (mapped to `setOnDrain`), and `close`,
+so it satisfies `PeerTransport` through a `toPeerTransport()` adapter.
 
-The orchestrator's single receive handler then branches on phase:
+The orchestrator's single receive handler branches on phase:
 
 ```
 onMessage(bytes):
@@ -55,98 +75,129 @@ onMessage(bytes):
 ```
 
 After the handshake, the same `DataChannelTransport` instance is handed to
-`FrameSender` (it already satisfies `FrameTransport`) and its inbound stream is
-routed to `FrameReceiver.ingest`.
+`FrameSender` (it already satisfies `FrameTransport`) and its inbound stream
+is routed to `FrameReceiver.ingest`.
 
-For unit tests we mock `PeerTransport` + `SignalingSocket` + the repo (real
-crypto + framing), per the plan's "mock signaling/WebRTC, real crypto+framing"
-rule.
+For unit tests, `PeerTransport`, `SignalingSocket`, and the repository are
+mocked, while crypto and framing are real — matching the plan's
+"mock signaling/WebRTC, real crypto + framing" rule.
 
 ## Invitation (fragment URL)
 
-- Conversation ID: `randomBytes(16)` (128 bits), wrapped via
-  `encodeConversationId`. Formatted as 32 lowercase hex chars for the broker
-  room id and the URL fragment.
-- URL fragment forms (PRD §Link structure):
-  - `#<32-hex-conversationId>` — safety-number only (v1).
-- `parseInvitation(fragment)` validates the hex and returns
-  `{ conversationId }`. The fragment is **never** sent in an HTTP request path
-  or query — it lives only in `location.hash`.
+- Conversation ID: `randomBytes(16)` (128 bits), formatted as 32 lowercase
+  hex characters. Used as the broker room id and in the URL fragment.
 - `formatInvitation(conversationId, baseUrl)` → `"<baseUrl>#<hex>"`.
+- `formatCodedInvitation(conversationId, baseUrl, code)` →
+  `"<baseUrl>#<hex>~<6-digit-code>"`, used for PAKE conversations.
+- `parseInvitation(fragment)` validates the hex and returns
+  `{ conversationId, code }`, where `code` is `string | null`. The fragment
+  matches `^[0-9a-f]{32}(~\d{6})?$`.
+- The fragment is never sent in an HTTP request path or query — it lives
+  only in `location.hash`.
 
-(No `~<code>` form exists in v1 — PAKE was dropped.)
+## Application-layer handshake
 
-## Application-layer handshake (in-band over the data channel)
+Runs in-band over the WebRTC data channel (a DTLS-encrypted transport, not
+yet application-authenticated). The safety-number mode is two rounds; PAKE
+mode adds two more rounds after the signature.
 
-Runs over the WebRTC data channel (DTLS-encrypted transport, not yet
-application-authenticated). Two rounds:
-
-**Round 1 — Hello.** Each peer sends its unsigned handshake components:
+**Hello.** Each peer sends its unsigned handshake components:
 
 ```
 HelloMessage = protocolVersion(1) | identityPublicKey(65) | ephemeralPublicKey(65) | sessionId(32)
                                                                                        = 163 bytes
 ```
 
-**Round 2 — Signature.** Each peer, now knowing BOTH peers' identity keys,
-ephemeral keys, and session ids, builds the canonical `Transcript` (canonical
-initiator/responder order via `deriveRole`), signs it with its identity private
-key, and sends:
+**Signature.** Each peer, now knowing both peers' identity keys, ephemeral
+keys, and session ids, builds the canonical `Transcript` (canonical
+initiator/responder order via `deriveRole`), signs it with its identity
+private key, and sends:
 
 ```
 SignatureMessage = protocolVersion(1) | signature(64) = 65 bytes
 ```
 
-Receiver builds the identical transcript, verifies the peer's signature against
-the peer's identity public key (`verifyTranscript`), then both call
-`deriveSessionKeys`. A verification failure is terminal for that attempt.
+The receiver builds the identical transcript and verifies the peer's
+signature against the peer's identity public key (`verifyTranscript`). A
+verification failure is terminal for that attempt. The state moves to
+`Verifying` here.
 
-Field widths are fixed; decoding rejects the wrong length / version before any
-allocation (same "validate before allocate" rule as the main codec).
+**PAKE exchange (only when `AuthMode = Pake`).** After the signature is
+verified, each peer sends its SPAKE2 share, then a confirmation tag:
 
-### Keying facts (from the API reference — do not re-derive)
+```
+PakeShareMessage   = protocolVersion(1) | sideByte(1) | share(33)   = 35 bytes
+PakeConfirmMessage = protocolVersion(1) | sideByte(1) | confirmTag(32) = 34 bytes
+```
+
+`sideByte` is `0x41` ('A') for the initiator, `0x42` ('B') for the responder.
+The SPAKE2 shared secret and confirmation are described in the protocol spec
+(§7); the confirmation tag is keyed by the shared secret over the transcript
+hash, so a wrong code makes the tags mismatch and the handshake abort.
+
+Field widths are fixed; decoding rejects the wrong length or version before
+any allocation (the same "validate before allocate" rule as the main codec).
+
+### Keying facts
 
 - `deriveSessionKeys({ localEcdhPrivateKey, peerEcdhPublicKey, transcript,
-localIdentityPublicKey })` resolves role internally by matching
-  `localIdentityPublicKey` against the transcript's initiator/responder identity
-  keys and returns `{ sendKey, recvKey }`.
-- Both peers MUST build byte-identical `Transcript` objects (same
+localIdentityPublicKey, pakeSecret? })` resolves role internally by
+  matching `localIdentityPublicKey` against the transcript's
+  initiator/responder identity keys and returns `{ sendKey, recvKey }`.
+- For `AuthMode.Pake`, `pakeSecret` is required — `deriveSessionKeys` refuses
+  to fall back to safety-number-only derivation when the mode says PAKE.
+- Both peers must build byte-identical `Transcript` objects (same
   `conversationId`, same canonical key/session ordering).
 - `FrameReceiver` enforces `aad.senderSessionId === peerSessionId` — set
   `peerSessionId` to the remote's `sessionId`.
-- Sequences are uint32, monotonic across all frame types, cap at
+- Sequences are uint32, monotonic across all frame types, capped at
   `MAX_SEQUENCE`.
 
 ## Lifecycle / states
 
-Drives `ConnectionStateMachine` (`signaling/state-machine.ts`):
+The orchestrator drives `ConnectionStateMachine`
+(`packages/chat-runtime/src/signaling/state-machine.ts`):
 `Idle → Waiting → Signaling → Handshaking → Verifying → Connected → Disconnected`.
 
 - Initiator: `start()` → generate invitation → `Waiting`.
-- Responder: `join(fragment)` → parse → `Signaling` (connect broker, join room).
+- Responder: `join(fragment)` → parse → `Signaling` (connect broker, join
+  room).
 - Signaling events (offer/answer/ice) → drive `WebRtcAdapter`.
 - Data channel open → `Handshaking` → run handshake → `Verifying`.
-- Signature verified + keys derived → `Connected`; call
+- Signature verified and keys derived → `Connected`; call
   `signalingClient.signalP2pOpen()` to release the broker room.
 - Drop → `Disconnected`; `retry()` → `Disconnected → Signaling`.
-- `leave()` → send encrypted `Leave` control frame, teardown, clear ephemeral
-  session state (keys, nonces, replay windows, SDP/ICE, handshake material).
+- `leave()` → send an encrypted `Leave` control frame, tear down, and clear
+  ephemeral session state (keys, nonces, replay windows, SDP/ICE, handshake
+  material).
 
-## TOFU + safety number
+## TOFU and safety number
 
 - First contact: after a verified handshake, store the peer identity via
   `repo.storePeerIdentity(conversationId, fingerprint, peerPublicKey)`.
-- The `fingerprint` is the safety-number string from
-  `computeSafetyNumber(conversationId, localIdPub, peerIdPub)` (used as the
-  human-comparable + stored identity tag).
+- `fingerprint` is the safety-number string from
+  `computeSafetyNumber(conversationId, localIdPub, peerIdPub)`, used both as
+  the human-comparable value and as the stored identity tag.
 - Resume: compare the incoming peer identity key against
-  `repo.getPeerIdentity`. A mismatch is a **blocking** identity-change state —
-  never silently replace.
-- The displayed safety number is labeled "unverified" until the user marks it
-  compared (UI concern; orchestrator exposes the value + a `verified` flag).
+  `repo.getPeerIdentity`. A mismatch is a blocking identity-change state —
+  the orchestrator never silently replaces it.
+- The displayed safety number is labelled "unverified" until the user marks
+  it compared. (UI concern; the orchestrator exposes the value and a
+  `verified` flag.)
+- Under `AuthMode.Pake`, the SPAKE2 exchange authenticates the handshake
+  directly; the safety number is still computed and shown, but the
+  out-of-band comparison is not required.
 
 ## Persistence
 
 Plaintext text goes through `repo.appendMessage(id, text, direction,
-timestamp)`; the repo applies AES-GCM at rest. Files/media are ephemeral
-(framing only) and never persisted.
+timestamp)`; the repository applies AES-GCM at rest. Files and media are
+ephemeral (framing only) and never persisted.
+
+The repository is in-memory in the current build. `serialize()` and
+`reload()` exist on the repository interface for round-tripping through
+durable storage, but conversation history is not currently persisted to
+`localStorage` on changes — it lives in memory and is lost on reload unless
+captured in an export/import bundle. The OPFS-backed repository
+(`BrowserDbConversationRepository`) remains an unimplemented stub. Only the
+identity-change warning flag uses a durable storage layer today.
