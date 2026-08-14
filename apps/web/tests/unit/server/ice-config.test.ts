@@ -31,12 +31,12 @@ const TURN_TLS_URL = "turns:turn.example.com:5349";
 const SHARED_SECRET = "shared-secret-value";
 
 describe("mintTurnCredentials — TURN REST API format", () => {
-  it("produces username = '<expiry>:<id>' with the constant id", () => {
+  it("produces username = '<expiry>:<32-hex random id>' (R7:F1 per-request entropy)", () => {
     const now = 1_700_000_000;
     const ttl = 3600;
     const { username } = mintTurnCredentials("secret", now, ttl);
-    // The expiry is now + ttl; the id is the constant the route uses.
-    expect(username).toBe(`${now + ttl}:fck-web`);
+    // The expiry prefix is now + ttl; the id is 16 CSPRNG bytes as hex.
+    expect(username).toMatch(new RegExp(`^${now + ttl}:[0-9a-f]{32}$`));
   });
 
   it("produces base64(HMAC-SHA1(secret, username)) for the credential", () => {
@@ -54,13 +54,21 @@ describe("mintTurnCredentials — TURN REST API format", () => {
     expect(a.credential).not.toBe(b.credential);
   });
 
+  it("mints a FRESH random id per call — two mints in the same second differ (R7:F1)", () => {
+    const a = mintTurnCredentials("secret", 1_000);
+    const b = mintTurnCredentials("secret", 1_000);
+    expect(a.username).not.toBe(b.username);
+    expect(a.credential).not.toBe(b.credential);
+  });
+
   it("does NOT embed any identity material in the username", () => {
-    // The username's id component is a constant; it carries no device,
-    // session, or user identifier that would leak into coturn's allocation
-    // logs. This is what keeps the TURN REST API consistent with the
-    // deployment guide's "no identity material leaves the client" stance.
+    // The username's id component is pure CSPRNG entropy; it carries no
+    // device, session, or user identifier that would leak into coturn's
+    // allocation logs. This is what keeps the TURN REST API consistent with
+    // the deployment guide's "no identity material leaves the client" stance.
     const { username } = mintTurnCredentials("secret", 1_700_000_000);
-    expect(username.endsWith(":fck-web")).toBe(true);
+    const id = username.split(":")[1]!;
+    expect(id).toMatch(/^[0-9a-f]{32}$/);
   });
 });
 
@@ -105,13 +113,14 @@ describe("buildIceServers — env-driven composition", () => {
 
     const turn = servers[1]!;
     expect(turn.urls).toBe(TURN_URL);
-    expect(turn.username).toBe(`${now + 6 * 60 * 60}:fck-web`);
-    expect(turn.credential).toBe(expectedCredential(SHARED_SECRET, `${now + 6 * 60 * 60}:fck-web`));
+    expect(turn.username).toMatch(new RegExp(`^${now + 2 * 60 * 60}:[0-9a-f]{32}$`));
+    expect(turn.credential).toBe(expectedCredential(SHARED_SECRET, turn.username as string));
 
     const turns = servers[2]!;
     expect(turns.urls).toBe(TURN_TLS_URL);
-    expect(turns.username).toBe(turn.username);
-    expect(turns.credential).toBe(turn.credential);
+    // R7/F1: each entry carries its own fresh random id (not a shared one).
+    expect(turns.username).not.toBe(turn.username);
+    expect(turns.credential).toBe(expectedCredential(SHARED_SECRET, turns.username as string));
   });
 
   it("emits RTCIceServer-shaped entries (urls: string, optional username/credential)", () => {

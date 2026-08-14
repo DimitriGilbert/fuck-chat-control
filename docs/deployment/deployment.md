@@ -215,17 +215,18 @@ TCP connect on 3478.
 
 The server env surface is small. From `packages/env/src/server.ts`:
 
-| Variable              | Required | Purpose                                                                                          |
-| --------------------- | -------- | ------------------------------------------------------------------------------------------------ |
-| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                            |
-| `CORS_ORIGIN`         | No       | The origin allowed for CORS. Set to your deployed origin.                                        |
-| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`). |
-| `STUN_URL`            | No       | Public STUN endpoint, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`. |
-| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay), e.g. `turn:turn.example.com:3478`.                         |
-| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint, e.g. `turns:turn.example.com:5349`.                               |
-| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials. Never sent to the client.                       |
-| `TURN_REALM`          | No       | coturn `realm` directive; defaults to `turn.fuck-chat-control.eu`.                               |
-| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                   |
+| Variable              | Required | Purpose                                                                                            |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                              |
+| `CORS_ORIGIN`         | No       | The origin allowed for CORS. Set to your deployed origin.                                          |
+| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`).   |
+| `STUN_URL`            | No       | Public STUN endpoint, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`.   |
+| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay), e.g. `turn:turn.example.com:3478`.                           |
+| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint, e.g. `turns:turn.example.com:5349`.                                 |
+| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials. Never sent to the client.                         |
+| `TURN_REALM`          | No       | coturn `realm` directive. Set to your own domain; no default (empty falls back to coturn's).       |
+| `TURN_EXTERNAL_IP`    | No       | Host's public IPv4 when ports are NAT-forwarded (docker behind NAT); maps to coturn `external-ip`. |
+| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                     |
 
 Client side (`packages/env/src/web.ts`): none. The client bakes no ICE
 endpoints. STUN/TURN coordinates are fetched at runtime from `/ice-config`,

@@ -40,9 +40,15 @@ set -eu
 # into a normal substitution that tolerates unset/empty (`:-`) so the guard
 # produces a clear message rather than a shell-level "unbound variable" trace.
 secret=${TURN_SHARED_SECRET:-}
-# Realm is optional (coturn accepts an empty realm); read with `:-` for the
-# same `set -u` reason. Passed verbatim to `--realm` below.
+# Realm (R7:F2): deliberately NO default — the previous default
+# (turn.fuck-chat-control.eu) leaked the upstream project's identity into
+# every self-hoster's TURN allocations. Empty means coturn falls back to its
+# own default realm; operators should set TURN_REALM to their own domain.
 realm=${TURN_REALM:-}
+# External IP (R7/F2): set this to the HOST's public IPv4 when the published
+# ports are NAT-forwarded (the common docker deployment). Empty/unset means
+# coturn auto-detects — correct when the container has a public interface.
+external_ip=${TURN_EXTERNAL_IP:-}
 
 if [ -z "$secret" ]; then
   # stderr so `docker logs` surfaces it prominently (coturn itself logs to
@@ -56,19 +62,34 @@ if [ -z "$secret" ]; then
   exit 1
 fi
 
+# Build the optional CLI flags. `--realm`/`--external-ip` are only passed when
+# non-empty so coturn falls back to its own defaults rather than receiving an
+# empty string (which it would treat as a literal value). shellcheck: the
+# unquoted-conditional idiom is intentional — a quoted empty arg would be
+# passed as an empty flag value, which is NOT the same as omitting the flag.
+extra_flags=""
+if [ -n "$realm" ]; then
+  extra_flags="$extra_flags --realm=$realm"
+fi
+if [ -n "$external_ip" ]; then
+  echo "[coturn-entrypoint] advertising external-ip=$external_ip for NAT'd relay candidates" >&2
+  extra_flags="$extra_flags --external-ip=$external_ip"
+fi
+
 # Secret is present: hand off to coturn. `exec` replaces the shell so coturn
 # becomes PID 1 and receives SIGTERM directly on `docker stop` (clean shutdown).
 # The upstream image's CMD is `turnserver -c /etc/coturn/turnserver.conf
 # --log-file=stdout` (see coturn/coturn Dockerfile); we replicate that here
 # because overriding `entrypoint:` resets CMD — the docker-compose service
 # does not pass a separate `command:`, so the default invocation must live in
-# this script. The `--static-auth-secret`/`--realm` flags are appended AFTER
-# `-c …` so they OVERRIDE the config file: coturn takes `$secret`/`$realm`
-# (the resolved shell values) here, NOT the verbatim `$TURN_…` tokens that the
+# this script. `--static-auth-secret` (and the optional realm/external-ip
+# flags) come AFTER `-c …` so they OVERRIDE the config file: coturn takes the
+# resolved shell values here, NOT the verbatim `$TURN_…` tokens that the
 # config-file parser would otherwise treat as literals.
+# shellcheck disable=SC2086 # extra_flags is word-split by design (see above)
 exec turnserver \
   -c /etc/coturn/turnserver.conf \
   --static-auth-secret="$secret" \
-  --realm="$realm" \
+  $extra_flags \
   --log-file=stdout \
   "$@"

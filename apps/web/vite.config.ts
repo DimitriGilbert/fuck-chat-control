@@ -183,6 +183,11 @@ export default defineConfig({
         // endpoints. The client fetches this at boot and passes the result into
         // createChatController. See src/server/ice-config.ts.
         { route: "/ice-config", handler: "./src/server/ice-config.ts" },
+        // R7/F5: dedicated health probe. Exercises TURN-config consistency +
+        // the credential-minting path rather than the static SPA shell, so a
+        // broken /ice-config fails the docker healthcheck instead of hiding
+        // behind a prerendered page. See src/server/healthz.ts.
+        { route: "/healthz", handler: "./src/server/healthz.ts" },
       ],
       // Pre-compress every public asset >1KB (the ~1MB JS/CSS/WASM bundle +
       // prerendered HTML) to gzip + brotli at build time. Nitro negotiates the

@@ -14,7 +14,10 @@ import {
   InMemoryConversationRepository,
   setDurableStorage,
 } from "@fuck-eu-chat-control/chat-runtime/store";
-import type { ConversationRepository, DurableStorage } from "@fuck-eu-chat-control/chat-runtime/store";
+import type {
+  ConversationRepository,
+  DurableStorage,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
 import { setSpake2ModuleUrl } from "@fuck-eu-chat-control/chat-runtime/crypto/pake";
 import type {
@@ -189,17 +192,34 @@ function resolveBrowserDeps(): {
 async function fetchIceConfig(): Promise<{
   readonly iceServers: readonly IceServer[];
   readonly publicBaseUrl: string | undefined;
+  readonly degraded: boolean;
 }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
+  // R7/F4: fail-open is correct for dev/loopback, but a REAL prod failure
+  // (TURN down, route broken) used to be completely silent — the app came up
+  // host-candidate-only and cross-network peers just failed to connect. Log
+  // every degraded outcome so operators can see it in the console/Sentry.
+  const degraded = (): {
+    readonly iceServers: readonly IceServer[];
+    readonly publicBaseUrl: string | undefined;
+    readonly degraded: boolean;
+  } => {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[chat-provider] /ice-config fetch degraded — continuing with host-candidate-only ICE. " +
+        "Cross-network connections may fail in this deployment.",
+    );
+    return { iceServers: [], publicBaseUrl: undefined, degraded: true };
+  };
   try {
     const response = await fetch("/ice-config", { signal: controller.signal });
-    if (!response.ok) return { iceServers: [], publicBaseUrl: undefined };
+    if (!response.ok) return degraded();
     const body = (await response.json()) as {
       readonly iceServers?: unknown;
       readonly publicBaseUrl?: unknown;
     };
-    if (!Array.isArray(body.iceServers)) return { iceServers: [], publicBaseUrl: undefined };
+    if (!Array.isArray(body.iceServers)) return degraded();
     // Map the untyped JSON body into the neutral IceServer shape at the fetch
     // boundary so the DOM RTCIceServer type never threads into the runtime.
     // The /ice-config route only emits { urls, username, credential } so this
@@ -229,13 +249,14 @@ async function fetchIceConfig(): Promise<{
       typeof body.publicBaseUrl === "string" && body.publicBaseUrl.length > 0
         ? body.publicBaseUrl
         : undefined;
-    return { iceServers, publicBaseUrl };
+    return { iceServers, publicBaseUrl, degraded: false };
   } catch {
     // Swallow (covers both network errors and the abort timeout): the
     // controller accepts an empty list and falls back to host candidates.
     // Surfacing this error would block chat in loopback dev/CI, where
-    // /ice-config legitimately returns nothing.
-    return { iceServers: [], publicBaseUrl: undefined };
+    // /ice-config legitimately returns nothing. R7/F4 still logs it via
+    // degraded() so prod TURN outages are observable.
+    return degraded();
   } finally {
     clearTimeout(timeout);
   }
@@ -324,6 +345,13 @@ export interface ChatContextValue {
    * once can gate without destructuring.
    */
   readonly ready: boolean;
+  /**
+   * R7/F4: true when the /ice-config fetch degraded (network error, non-2xx,
+   * or malformed body). The app intentionally fails open — host-candidate ICE
+   * still works on loopback/LAN — but a prod TURN outage is now observable
+   * instead of silently producing "peers can't connect" reports.
+   */
+  readonly iceDegraded: boolean;
 }
 
 const ChatContext = React.createContext<ChatContextValue | null>(null);
@@ -338,6 +366,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
   const [controller, setController] = React.useState<ChatController | null>(null);
   const [state, setState] = React.useState<ChatControllerState>(initialControllerState);
   const [ready, setReady] = React.useState(false);
+  const [iceDegraded, setIceDegraded] = React.useState(false);
 
   React.useEffect(() => {
     let unsubscribe = (): void => {};
@@ -419,6 +448,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           ? Promise.resolve({
               iceServers: injectedIceServers,
               publicBaseUrl: undefined,
+              degraded: false,
             })
           : fetchIceConfig();
       void Promise.all([
@@ -428,6 +458,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       ])
         .then(async ([, , iceConfig]) => {
           if (cancelled) return;
+          // R7/F4: publish the degraded flag for the UI/observability even
+          // though the controller construction below proceeds fail-open.
+          setIceDegraded(iceConfig.degraded);
           // Phase A.4: inject the web WebRTC adapter. The runtime core calls
           // this factory instead of `new WebRtcAdapter(...)` so the no-DOM
           // chat-runtime package never references RTCPeerConnection directly.
@@ -529,8 +562,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
   }, []);
 
   const value = React.useMemo<ChatContextValue>(
-    () => ({ controller, state, ready }),
-    [controller, state, ready],
+    () => ({ controller, state, ready, iceDegraded }),
+    [controller, state, ready, iceDegraded],
   );
 
   return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>;

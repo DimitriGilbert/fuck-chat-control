@@ -16,12 +16,16 @@ services:
       - path: apps/web/.env
         required: false
     healthcheck:
+      # R7/F5: probe the dedicated /healthz route, not the prerendered SPA
+      # shell at `/`. /healthz fails (503) when the TURN configuration is
+      # half-set — exactly the failure that used to hide behind a green
+      # healthcheck while /ice-config served a degraded list.
       test:
         [
           "CMD",
           "node",
           "-e",
-          "fetch('http://localhost:9000/').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+          "fetch('http://localhost:9000/healthz').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
@@ -67,7 +71,15 @@ services:
       # in entrypoint.sh is the authority that refuses to start coturn without
       # one. This is what makes the service Dokploy-deployable.
       TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:-}
-      TURN_REALM: ${TURN_REALM:-turn.fuck-chat-control.eu}
+      # R7/F2: NO default realm — the previous default leaked the upstream
+      # project's domain into every self-hoster's TURN allocations. Set
+      # TURN_REALM to your own domain; empty means coturn's built-in default.
+      TURN_REALM: ${TURN_REALM:-}
+      # R7/F2: set to the HOST's public IPv4 when the published ports are
+      # NAT-forwarded (docker on a NAT'd VPS is the common case) so coturn
+      # advertises a reachable relay candidate instead of the container's
+      # private IP. Leave unset when the container has a public interface.
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-}
     entrypoint: ["/usr/local/bin/coturn-entrypoint.sh"]
     ports:
       # STUN + TURN (RFC 5766) on UDP and TCP. 3478/udp is the primary path

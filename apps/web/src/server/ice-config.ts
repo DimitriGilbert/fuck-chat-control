@@ -20,21 +20,23 @@
  * which is what makes `localhost`-to-`localhost` connections work without any
  * STUN/TURN infra.
  */
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 
-import { defineEventHandler, setHeader } from "nitro/h3";
+import { defineEventHandler, getRequestIP, setHeader, setResponseStatus } from "nitro/h3";
 
 import { env } from "@fuck-eu-chat-control/env/server";
 
 /**
- * Label embedded in the TURN REST API username. The spec is
- * `"<expiry>:<arbitrary-id>"`; the id is opaque to coturn and only surfaces in
- * its allocation logs. Using a constant here keeps the per-username entropy in
- * the expiry (which is driven by the request clock), avoids embedding any kind
- * of device/session identifier (which would leak into TURN logs), and matches
- * the deployment guide's "no identity material leaves the client" stance.
+ * Random per-request id embedded in the TURN REST API username (R7/F1). The
+ * spec is `"<expiry>:<arbitrary-id>"`; the id is opaque to coturn and only
+ * surfaces in its allocation logs. Each mint carries 128 bits of fresh CSPRNG
+ * entropy, so one anonymous /ice-config fetch yields a credential usable only
+ * as this one ephemeral "user" — a leaked pair cannot be pooled with other
+ * users' pairs, and coturn-side per-user accounting (user-quota) sees each
+ * request as its own user. The id carries no device/session identifier, so no
+ * identity material leaks into TURN logs.
  */
-const TURN_USERNAME_ID = "fck-web";
+const TURN_USERNAME_ID_BYTES = 16;
 
 /**
  * One-shot startup warning for the half-set TURN misconfiguration. `buildIceServers`
@@ -65,21 +67,67 @@ if (!process.env.SKIP_ENV_VALIDATION) {
 /**
  * How long a minted credential is valid. coturn enforces this server-side by
  * comparing the expiry prefix against its own clock, so the client MUST have
- * refreshed by then. 6 hours (21600s) covers a typical browser session without
- * forcing a re-fetch on every page navigation — `/ice-config` sets a Cache-
- * Control max-age well below this (see {@link CACHE_MAX_AGE_SECONDS}) so the
- * browser re-fetches comfortably before the credential lapses.
+ * refreshed by then. 2 hours (7200s) covers a chat session; the shorter the
+ * window, the less a leaked `username:credential` pair is worth to a relay
+ * abuser (R7:F1). `/ice-config` sets a Cache-Control max-age well below this
+ * (see {@link CACHE_MAX_AGE_SECONDS}) so the browser re-fetches comfortably
+ * before the credential lapses.
  */
-const TURN_CREDENTIAL_TTL_SECONDS = 6 * 60 * 60;
+const TURN_CREDENTIAL_TTL_SECONDS = 2 * 60 * 60;
 
 /**
- * Response `Cache-Control` max-age. Kept shorter than the credential TTL so a
- * cached response is always still valid when the client uses it, and so the
- * browser pulls a fresh credential pair on the next session without waiting
- * for the full TTL. 1 hour (3600s) vs. a 6-hour TTL gives a 5-hour validity
- * margin — ample headroom for clock skew between client and coturn.
+ * Response `Cache-Control` max-age. `private` (not `public`) because the
+ * minted credential is per-request (R7:F1): a shared CDN edge must not serve
+ * one client's credential to another. Kept shorter than the credential TTL so
+ * a cached response is always still valid when the client uses it.
  */
-const CACHE_MAX_AGE_SECONDS = 60 * 60;
+const CACHE_MAX_AGE_SECONDS = 30 * 60;
+
+/**
+ * Per-IP token bucket for /ice-config (R7:F1). The route is unauthenticated
+ * by design; without a limit a single host could mint unlimited (valid)
+ * relay credentials. Capacity 20 with a refill of one token every 6 seconds
+ * is far above any real client's needs (the browser caches each response for
+ * CACHE_MAX_AGE_SECONDS) while capping abuse. Best-effort and in-memory: a
+ * restart or multi-instance deployment resets/shards the counters, which the
+ * coturn-side quotas (deploy/coturn/turnserver.conf) bound regardless.
+ */
+const RATE_BUCKET_CAPACITY = 20;
+const RATE_REFILL_INTERVAL_MS = 6_000;
+const RATE_TRACKER_MAX_IPS = 10_000;
+
+interface RateBucket {
+  tokens: number;
+  lastRefillMs: number;
+}
+
+const rateBuckets = new Map<string, RateBucket>();
+
+function consumeRateToken(ip: string, nowMs: number): boolean {
+  const bucket = rateBuckets.get(ip);
+  if (bucket === undefined) {
+    if (rateBuckets.size >= RATE_TRACKER_MAX_IPS) {
+      // Cheap pruning: drop the whole table rather than growing unboundedly;
+      // abusers re-fill their entry on the next request.
+      rateBuckets.clear();
+    }
+    rateBuckets.set(ip, { tokens: RATE_BUCKET_CAPACITY - 1, lastRefillMs: nowMs });
+    return true;
+  }
+  const elapsed = nowMs - bucket.lastRefillMs;
+  const refilled = Math.min(
+    RATE_BUCKET_CAPACITY,
+    bucket.tokens + Math.floor(elapsed / RATE_REFILL_INTERVAL_MS),
+  );
+  if (refilled <= 0) {
+    bucket.tokens = 0;
+    bucket.lastRefillMs = nowMs - (elapsed % RATE_REFILL_INTERVAL_MS);
+    return false;
+  }
+  bucket.tokens = refilled - 1;
+  bucket.lastRefillMs = nowMs;
+  return true;
+}
 
 /**
  * Pure credential minter, exported so the unit suite can assert the
@@ -98,7 +146,8 @@ export function mintTurnCredentials(
   ttlSec: number = TURN_CREDENTIAL_TTL_SECONDS,
 ): { readonly username: string; readonly credential: string } {
   const expiry = now + ttlSec;
-  const username = `${expiry}:${TURN_USERNAME_ID}`;
+  const id = randomBytes(TURN_USERNAME_ID_BYTES).toString("hex");
+  const username = `${expiry}:${id}`;
   const credential = createHmac("sha1", secret).update(username).digest("base64");
   return { username, credential };
 }
@@ -198,13 +247,23 @@ export interface IceConfigResponse {
  * uses it (and the browser pulls a fresh credential pair on the next session).
  */
 export default defineEventHandler((event): IceConfigResponse => {
+  // R7:F1: per-IP token bucket. An anonymous route that mints valid relay
+  // credentials must not be scrappable at line rate; 429 tells honest clients
+  // (whose cached response is still valid) to back off and denies bulk
+  // minting to abusers.
+  const ip = getRequestIP(event, { xForwardedFor: true }) ?? "unknown";
+  if (!consumeRateToken(ip, Date.now())) {
+    setHeader(event, "Cache-Control", "no-store");
+    setResponseStatus(event, 429);
+    return { iceServers: [] };
+  }
   const now = Math.floor(Date.now() / 1000);
   const iceServers = buildIceServers(env, now);
-  // public: the response is identical for every client (no per-user state —
-  // the username carries a constant id, not an identity). This lets the
-  // browser AND any shared CDN edge cache it for the TTL below. With no CDN
-  // this degrades to a normal fetch cache.
-  setHeader(event, "Cache-Control", `public, max-age=${CACHE_MAX_AGE_SECONDS}`);
+  // private (R7:F1): the minted credential is per-request — a shared cache
+  // must not hand one client's pair to another. The browser itself may reuse
+  // its own cached response for CACHE_MAX_AGE_SECONDS, well inside the
+  // credential TTL.
+  setHeader(event, "Cache-Control", `private, max-age=${CACHE_MAX_AGE_SECONDS}`);
   // MEDIUM-E (Dokploy fix): surface the runtime PUBLIC_BASE_URL so the SPA
   // formats invitation links from a server-injected value instead of a
   // build-time bake. Conditionally spread so the field is ABSENT (not
