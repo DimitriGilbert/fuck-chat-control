@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createCollection, localOnlyCollectionOptions } from "@tanstack/db";
+import type { Collection } from "@tanstack/db";
 import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 
@@ -33,6 +34,18 @@ function makeRepo(): BrowserDbConversationRepository {
 function makeRepoWithDatabase(
   database: { close?: () => Promise<void> | void } | null,
 ): BrowserDbConversationRepository {
+  return makeRepoWithCollections(database).repo;
+}
+
+/**
+ * Like {@link makeRepoWithDatabase} but also exposes the backing collections
+ * so tests can inject corrupt rows directly (R6:F3).
+ */
+function makeRepoWithCollections(database: { close?: () => Promise<void> | void } | null = null): {
+  repo: BrowserDbConversationRepository;
+  conversations: Collection<ConversationRow, string>;
+  messages: Collection<MessageRow, string>;
+} {
   const atRestKey = generateAtRestKey();
   const conversations = createCollection(
     localOnlyCollectionOptions<ConversationRow, string>({
@@ -44,10 +57,16 @@ function makeRepoWithDatabase(
       getKey: (row) => row.id,
     }),
   );
-  return new BrowserDbConversationRepository(
+  const repo = new BrowserDbConversationRepository(
     { databaseName: "fck-chat-test", atRestKey },
     { databaseName: "fck-chat-test", database, conversations, messages },
   );
+  return { repo, conversations, messages };
+}
+
+/** Hex key of a ConversationId, matching the repo's row convention. */
+function idKeyOf(id: Uint8Array): string {
+  return Array.from(id, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 describe("BrowserDbConversationRepository", () => {
@@ -241,6 +260,143 @@ describe("BrowserDbConversationRepository", () => {
     };
     await expect(repo.reload(generateAtRestKey(), state)).rejects.toMatchObject({
       code: "malformed_bundle",
+    });
+  });
+
+  it("reload rejects a malformed conversation id hex WITHOUT wiping existing rows (R6/F2/F5)", async () => {
+    const repo = makeRepo();
+    const id = conversationId(21);
+    await repo.createConversation(id, 1);
+    await repo.appendMessage(id, "keep me", MessageDirection.Sent, 10);
+
+    const state = {
+      conversations: [{ id: "zz-not-hex", createdAt: 1, displayName: null, peer: null }],
+      messages: [],
+    };
+    await expect(repo.reload(generateAtRestKey(), state)).rejects.toMatchObject({
+      code: "malformed_bundle",
+    });
+    // Validation runs BEFORE any mutation: the pre-existing conversation and
+    // its message are untouched (previously a mid-loop throw left the repo
+    // wiped by clearAll but only partially repopulated).
+    const kept = await repo.getConversation(id);
+    expect(kept).not.toBeNull();
+    expect((await repo.getMessages(id)).map((m) => m.text)).toEqual(["keep me"]);
+  });
+
+  it("reload rejects a wrong-length conversation id without mutating (R6/F5)", async () => {
+    const repo = makeRepo();
+    await repo.createConversation(conversationId(22), 1);
+    const state = {
+      conversations: [{ id: "aabb", createdAt: 1, displayName: null, peer: null }],
+      messages: [],
+    };
+    await expect(repo.reload(generateAtRestKey(), state)).rejects.toMatchObject({
+      code: "malformed_bundle",
+    });
+    expect(await repo.listConversations()).toHaveLength(1);
+  });
+
+  it("reload REPLACES content on surviving keys and drops removed keys (R6:F2 diff)", async () => {
+    const repo = makeRepo();
+    const survivor = conversationId(26);
+    const removed = conversationId(27);
+    const added = conversationId(28);
+    await repo.createConversation(survivor, 1);
+    await repo.setDisplayName(survivor, "old-name");
+    await repo.appendMessage(survivor, "old-message", MessageDirection.Sent, 10);
+    await repo.createConversation(removed, 2);
+
+    const state = {
+      conversations: [
+        {
+          id: idKeyOf(survivor),
+          createdAt: 1,
+          displayName: "new-name",
+          peer: null,
+        },
+        {
+          id: idKeyOf(added),
+          createdAt: 3,
+          displayName: null,
+          peer: null,
+        },
+      ],
+      messages: [],
+    };
+    await repo.reload(repo.atRestKey, state);
+
+    const listed = await repo.listConversations();
+    expect(listed).toHaveLength(2);
+    const survivorRecord = await repo.getConversation(survivor);
+    expect(survivorRecord?.displayName).toBe("new-name");
+    // The old message was not in the incoming state, so it must be gone.
+    expect(await repo.getMessages(survivor)).toHaveLength(0);
+    expect(await repo.getConversation(removed)).toBeNull();
+    expect(await repo.getConversation(added)).not.toBeNull();
+  });
+
+  it("a single corrupt conversation row does not brick listConversations (R6:F3)", async () => {
+    const { repo, conversations } = makeRepoWithCollections();
+    const good = conversationId(23);
+    await repo.createConversation(good, 1);
+    // Inject a row whose id is not valid hex — simulates bit rot / a partial
+    // write in the SQLite page.
+    conversations.insert({
+      id: "!!!corrupt!!!",
+      createdAt: 2,
+      displayName: null,
+      peerFingerprint: null,
+      peerPublicKey: null,
+      authFailed: false,
+      authFailedAt: null,
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const list = await repo.listConversations();
+      expect(list).toHaveLength(1);
+      expect(list[0]!.id).toEqual(good);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a single undecryptable message row does not brick getMessages (R6:F3)", async () => {
+    const { repo, messages } = makeRepoWithCollections();
+    const id = conversationId(24);
+    await repo.createConversation(id, 1);
+    const first = await repo.appendMessage(id, "good-1", MessageDirection.Sent, 10);
+    await repo.appendMessage(id, "good-2", MessageDirection.Sent, 20);
+    // Corrupt the FIRST message's ciphertext so its GCM tag check fails.
+    messages.update(first.id, (draft) => {
+      draft.ciphertext = "AAAAAAAA";
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const list = await repo.getMessages(id);
+      expect(list.map((m) => m.text)).toEqual(["good-2"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("getMessages still surfaces WrongPassphrase when EVERY row fails to decrypt (R6:F3)", async () => {
+    const repo = makeRepo();
+    const id = conversationId(25);
+    await repo.createConversation(id, 1);
+    await repo.appendMessage(id, "a", MessageDirection.Sent, 10);
+    await repo.appendMessage(id, "b", MessageDirection.Sent, 20);
+
+    // Reading under a DIFFERENT at-rest key: every row fails — that is a wrong
+    // key, not corruption, and must not silently return an empty history.
+    repo.zeroizeAtRestKey();
+    repo.resetAtRestKey(generateAtRestKey());
+    await expect(repo.getMessages(id)).rejects.toMatchObject({
+      code: "wrong_passphrase",
     });
   });
 

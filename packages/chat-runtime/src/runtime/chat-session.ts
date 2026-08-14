@@ -326,6 +326,13 @@ export function seedSessionFromHistory(
  * controller removes it from the map.
  */
 export function teardownSession(session: ChatSession): void {
+  // R5/F5: idempotency guard. All current callers remove the session from the
+  // controller's map before any re-entrant path, but a second teardown (e.g.
+  // leaveConversation racing leaveAll) must not re-enter orchestrator.leave()
+  // / bridge.close() on an already-torn-down session.
+  if (session.connectionState === ConnectionState.Disconnected) {
+    return;
+  }
   // R9/F7: zero each received-file byte buffer BEFORE releasing the WebRTC +
   // signaling resources. Files are transient (PRD: nothing is persisted on
   // disk); teardown is the last chance to clear the plaintext bytes held in

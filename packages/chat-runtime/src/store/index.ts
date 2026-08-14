@@ -30,6 +30,8 @@ export { exportBundle, importBundle, ImportMode } from "./export-bundle";
 
 export {
   AUTH_FAILED_STORAGE_KEY,
+  clearAllAuthFailedDurable,
+  clearAuthFailedDurable,
   getAuthFailedDurable,
   markAuthFailedDurable,
 } from "./auth-failed-store";

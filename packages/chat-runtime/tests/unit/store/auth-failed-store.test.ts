@@ -5,6 +5,8 @@ import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol
 
 import {
   AUTH_FAILED_STORAGE_KEY,
+  clearAllAuthFailedDurable,
+  clearAuthFailedDurable,
   getAuthFailedDurable,
   markAuthFailedDurable,
 } from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
@@ -171,3 +173,51 @@ function spyOnStorage(
 ): void {
   Object.defineProperty(target, method, { value: impl, configurable: true });
 }
+
+describe("auth-failed-store reconciliation (R6/F4)", () => {
+  let storage: MemoryStorage;
+
+  beforeAll(() => {
+    storage = new MemoryStorage();
+    setDurableStorage(storage);
+  });
+
+  beforeEach(() => {
+    storage.clear();
+  });
+
+  afterAll(() => {
+    setDurableStorage(new MemoryStorage());
+  });
+
+  it("clearAuthFailedDurable removes one conversation's flag and leaves others", async () => {
+    await markAuthFailedDurable(ID_A);
+    await markAuthFailedDurable(ID_B);
+    await clearAuthFailedDurable(ID_A);
+    expect(await getAuthFailedDurable(ID_A)).toBe(false);
+    expect(await getAuthFailedDurable(ID_B)).toBe(true);
+  });
+
+  it("clearAuthFailedDurable is a no-op when the flag is absent", async () => {
+    await expect(clearAuthFailedDurable(ID_A)).resolves.toBeUndefined();
+    expect(storage.getItem(AUTH_FAILED_STORAGE_KEY)).toBeNull();
+  });
+
+  it("clearAllAuthFailedDurable wipes every flag", async () => {
+    await markAuthFailedDurable(ID_A);
+    await markAuthFailedDurable(ID_B);
+    await clearAllAuthFailedDurable();
+    expect(await getAuthFailedDurable(ID_A)).toBe(false);
+    expect(await getAuthFailedDurable(ID_B)).toBe(false);
+  });
+
+  it("clearing the durable record does not grow unboundedly (payload shrinks)", async () => {
+    await markAuthFailedDurable(ID_A);
+    await markAuthFailedDurable(ID_B);
+    const before = storage.getItem(AUTH_FAILED_STORAGE_KEY) ?? "";
+    await clearAuthFailedDurable(ID_A);
+    const after = storage.getItem(AUTH_FAILED_STORAGE_KEY) ?? "";
+    expect(after.length).toBeLessThan(before.length);
+    expect(after).not.toContain(hexOf(ID_A));
+  });
+});

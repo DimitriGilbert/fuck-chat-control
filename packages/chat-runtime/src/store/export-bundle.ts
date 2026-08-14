@@ -6,6 +6,7 @@ import { encodeConversationId, encodePublicKey } from "../protocol/codec";
 import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION } from "../protocol/limits";
 import type { ConversationId } from "../protocol/types";
 
+import { clearAllAuthFailedDurable } from "./auth-failed-store";
 import { base64ToBytes, bytesToBase64, bytesToHex, hexToBytes } from "./encoding";
 import {
   ARGON2_ITERATIONS_MAX,
@@ -201,6 +202,10 @@ export async function importBundle(
     // is just clearAll + re-populate from the snapshot array.
     const rollback = await snapshotRepoState(repo);
     await repo.clearAll();
+    // R6/F4: the durable auth-failed record must not outlive the Replace —
+    // the wiped conversations' flags are gone with their records, and the
+    // imported payload does not carry auth-failed state.
+    await clearAllAuthFailedDurable();
     try {
       let messagesImported = 0;
       for (const convo of validated) {
@@ -216,12 +221,17 @@ export async function importBundle(
     } catch (importError) {
       // Rollback: restore the pre-existing state captured before clearAll.
       // Best-effort — if the restore itself throws (e.g. the at-rest key is
-      // STILL locked), swallow the restore error and surface the original
-      // import error so the caller sees the real root cause.
+      // STILL locked), surface the restore failure with severity (R6/F2: it
+      // means the repo is left EMPTY, which the caller must know about) and
+      // still rethrow the original import error as the root cause.
       try {
         await restoreRepoState(repo, rollback);
-      } catch {
-        // best-effort; fall through to rethrow the original import error
+      } catch (restoreError) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "importBundle: Replace-mode rollback FAILED — the repository may be empty",
+          restoreError,
+        );
       }
       throw importError;
     }

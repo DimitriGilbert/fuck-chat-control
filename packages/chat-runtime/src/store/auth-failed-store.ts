@@ -78,3 +78,30 @@ export async function getAuthFailedDurable(id: ConversationId): Promise<boolean>
   const record = readRecord();
   return record[keyOf(id)] === true;
 }
+
+/**
+ * Remove the durable auth-failed flag for one conversation (R6/F4).
+ *
+ * Called when the conversation is cleared (its record is gone, so a stale
+ * durable flag would otherwise resurface on the next session start for an id
+ * that no longer exists). Best-effort and never throws, mirroring
+ * {@link markAuthFailedDurable}.
+ */
+export async function clearAuthFailedDurable(id: ConversationId): Promise<void> {
+  const record = readRecord();
+  const key = keyOf(id);
+  if (record[key] !== true) return;
+  delete record[key];
+  writeRecord(record);
+}
+
+/**
+ * Remove every durable auth-failed flag (R6/F4).
+ *
+ * Called on clearAll and on a Replace-mode import (which wipes the repo): the
+ * durable record must not outlive the conversations it describes. Best-effort
+ * and never throws.
+ */
+export async function clearAllAuthFailedDurable(): Promise<void> {
+  writeRecord({});
+}

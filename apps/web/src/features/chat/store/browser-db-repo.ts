@@ -3,7 +3,7 @@ import {
   openBrowserWASQLiteOPFSDatabase,
   persistedCollectionOptions,
 } from "@tanstack/browser-db-sqlite-persistence";
-import { createCollection } from "@tanstack/db";
+import { createCollection, createTransaction } from "@tanstack/db";
 import type { Collection } from "@tanstack/db";
 import { decryptAtRest, encryptAtRest } from "@fuck-eu-chat-control/chat-runtime/crypto/at-rest";
 import { ctEqual } from "@fuck-eu-chat-control/chat-runtime/crypto/ct-equal";
@@ -260,7 +260,19 @@ export class BrowserDbConversationRepository
 
   async listConversations(): Promise<ConversationRecord[]> {
     const rows = this.conversations.toArray;
-    const records = rows.map((row) => this.toRecord(hexToConversationId(row.id), row));
+    const records: ConversationRecord[] = [];
+    // R6/F3: per-row resilience. A single corrupt row (non-hex / wrong-length
+    // id — SQLite never scrubs deleted pages, so bit rot or a partial write
+    // can leave one) must not brick the whole sidebar listing: skip it, log
+    // it, return the rest.
+    for (const row of rows) {
+      try {
+        records.push(this.toRecord(decodeRowConversationId(row.id), row));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`listConversations: skipping corrupt conversation row (id=${row.id})`, err);
+      }
+    }
     records.sort((a, b) => a.createdAt - b.createdAt || idKeyCompare(a.id, b.id));
     return records;
   }
@@ -311,15 +323,33 @@ export class BrowserDbConversationRepository
     const atRestKey = this.requireKey();
     const rows = this.messages.toArray.filter((m) => m.conversationId === convoKey);
     const out: ConversationMessage[] = [];
+    // R6/F3: per-row resilience. A single ciphertext that fails to decrypt
+    // (corrupt nonce/ciphertext) must not brick the entire history: skip it,
+    // log it, return the rest. The all-rows-fail case is NOT corruption — it
+    // means the at-rest key itself is wrong (e.g. unlocked with the wrong
+    // passphrase), so surface the WrongPassphrase error instead of silently
+    // returning an empty history.
+    let decryptFailures = 0;
+    let firstFailure: unknown = null;
     for (const row of rows) {
-      const plaintext = await this.decryptMessage(atRestKey, row);
-      out.push({
-        id: row.id,
-        conversationId: cloneConversationId(id),
-        direction: row.direction,
-        timestamp: row.timestamp,
-        text: plaintext,
-      });
+      try {
+        const plaintext = await this.decryptMessage(atRestKey, row);
+        out.push({
+          id: row.id,
+          conversationId: cloneConversationId(id),
+          direction: row.direction,
+          timestamp: row.timestamp,
+          text: plaintext,
+        });
+      } catch (err) {
+        decryptFailures += 1;
+        firstFailure ??= err;
+        // eslint-disable-next-line no-console
+        console.warn(`getMessages: skipping undecryptable message row (id=${row.id})`, err);
+      }
+    }
+    if (rows.length > 0 && decryptFailures === rows.length && firstFailure !== null) {
+      throw firstFailure;
     }
     out.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
     return out;
@@ -494,10 +524,18 @@ export class BrowserDbConversationRepository
   }
 
   async reload(atRestKey: AtRestKey, state: SerializedState): Promise<void> {
-    await this.clearAll();
-    this.atRestKeyField = atRestKey;
+    // R6/F5: validate the ENTIRE incoming state BEFORE touching the
+    // collections — every conversation id must be well-formed hex of exactly
+    // CONVERSATION_ID_BYTES bytes, and every message group must reference a
+    // known conversation. Validation failures must reject the reload outright
+    // rather than half-applying.
+    const conversationRows: ConversationRow[] = [];
+    const conversationIds = new Set<string>();
     for (const convo of state.conversations) {
-      const row: ConversationRow = {
+      // Throws StoreError(MalformedBundle) on bad hex / wrong length.
+      decodeRowConversationId(convo.id);
+      conversationIds.add(convo.id);
+      conversationRows.push({
         id: convo.id,
         createdAt: convo.createdAt,
         displayName: convo.displayName,
@@ -505,18 +543,18 @@ export class BrowserDbConversationRepository
         peerPublicKey: convo.peer?.publicKey ?? null,
         authFailed: convo.authFailed === true,
         authFailedAt: convo.authFailedAt ?? null,
-      };
-      this.conversations.insert(row);
+      });
     }
+    const messageRows: MessageRow[] = [];
     for (const group of state.messages) {
-      if (!this.conversations.has(group.conversationId)) {
+      if (!conversationIds.has(group.conversationId)) {
         throw new StoreError(
           StoreErrorCode.MalformedBundle,
           `serialized state references messages for an unknown conversation ${group.conversationId}`,
         );
       }
       for (const m of group.messages) {
-        this.messages.insert({
+        messageRows.push({
           id: m.id,
           conversationId: group.conversationId,
           direction: assertDirection(m.direction),
@@ -526,6 +564,76 @@ export class BrowserDbConversationRepository
         });
       }
     }
+
+    this.atRestKeyField = atRestKey;
+    // R6/F2: apply the whole replace as ONE TanStack DB transaction so the
+    // persistence layer commits a single SQLite transaction. The previous
+    // clearAll-then-insert-loop shape committed each insert separately — a
+    // crash mid-reload left a partially wiped/partially populated database.
+    //
+    // The transaction is DIFFED per collection (delete keys leaving the store,
+    // update keys present in both, insert new keys) because TanStack DB
+    // forbids delete+insert of the same key inside one transaction — a raw
+    // wipe+repopulate would throw "Unhandled mutation combination:
+    // delete-insert" whenever a key survives the reload. The update branch is
+    // a full-row replacement, so a surviving key ends up byte-identical to the
+    // incoming row either way.
+    const incomingConversations = new Map(conversationRows.map((r) => [r.id, r]));
+    const existingConversationKeys = new Set(this.conversations.toArray.map((c) => c.id));
+    const incomingMessages = new Map(messageRows.map((r) => [r.id, r]));
+    const existingMessageKeys = new Set(this.messages.toArray.map((m) => m.id));
+
+    const tx = createTransaction({
+      mutationFn: async ({ transaction }) => {
+        // Local-only/persisted collections only durably apply mutations that
+        // the mutationFn explicitly accepts; each call filters the tx down to
+        // that collection's mutations and persists them in one applyCommittedTx.
+        await Promise.all([
+          this.conversations.utils.acceptMutations(transaction),
+          this.messages.utils.acceptMutations(transaction),
+        ]);
+      },
+    });
+    tx.mutate(() => {
+      for (const key of existingConversationKeys) {
+        if (!incomingConversations.has(key)) {
+          this.conversations.delete(key);
+        }
+      }
+      for (const row of conversationRows) {
+        if (existingConversationKeys.has(row.id)) {
+          this.conversations.update(row.id, (draft) => {
+            draft.createdAt = row.createdAt;
+            draft.displayName = row.displayName;
+            draft.peerFingerprint = row.peerFingerprint;
+            draft.peerPublicKey = row.peerPublicKey;
+            draft.authFailed = row.authFailed;
+            draft.authFailedAt = row.authFailedAt;
+          });
+        } else {
+          this.conversations.insert(row);
+        }
+      }
+      for (const key of existingMessageKeys) {
+        if (!incomingMessages.has(key)) {
+          this.messages.delete(key);
+        }
+      }
+      for (const row of messageRows) {
+        if (existingMessageKeys.has(row.id)) {
+          this.messages.update(row.id, (draft) => {
+            draft.conversationId = row.conversationId;
+            draft.direction = row.direction;
+            draft.timestamp = row.timestamp;
+            draft.nonce = row.nonce;
+            draft.ciphertext = row.ciphertext;
+          });
+        } else {
+          this.messages.insert(row);
+        }
+      }
+    });
+    await tx.isPersisted.promise;
   }
 
   /** CR-7: zeroize the live at-rest key when the {@link LockableRepository} observes a lock. */
@@ -611,8 +719,25 @@ function copyBytes(source: Uint8Array, length: number): Uint8Array {
   return out;
 }
 
-function hexToConversationId(hex: string): ConversationId {
-  return encodeConversationId(hexToBytes(hex));
+/**
+ * R6/F5: validate a stored/incoming conversation-id hex and return the decoded
+ * id. Mirrors the in-memory repo's `decodeConversationIdHex`: rejects non-hex
+ * and wrong-length ids with MalformedBundle instead of copying them verbatim.
+ */
+function decodeRowConversationId(hex: string): ConversationId {
+  let bytes: Uint8Array;
+  try {
+    bytes = hexToBytes(hex);
+  } catch {
+    throw new StoreError(StoreErrorCode.MalformedBundle, `malformed conversation id hex ${hex}`);
+  }
+  if (bytes.length !== CONVERSATION_ID_BYTES) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `conversation id must be ${CONVERSATION_ID_BYTES} bytes, got ${bytes.length}`,
+    );
+  }
+  return encodeConversationId(bytes);
 }
 
 function assertDirection(value: string): MessageDirection {

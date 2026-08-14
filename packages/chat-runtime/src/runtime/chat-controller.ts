@@ -10,6 +10,7 @@ import { ConnectionState } from "../signaling/state-machine";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "../store";
 import { AuthFailedRetryBlocked } from "../store";
+import { clearAllAuthFailedDurable, clearAuthFailedDurable } from "../store/auth-failed-store";
 import { LockableRepository } from "../store/lockable-repo";
 import type {
   ConversationMessage,
@@ -335,6 +336,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * negligible next to the React re-render it gates.
    */
   const sessions = new Map<string, ChatSession>();
+  // R5/F4: in-flight resumeConversation attempts keyed by hex id, so a
+  // concurrent resume of the same conversation dedupes onto one startSession.
+  const resuming = new Map<string, Promise<void>>();
   // Holders link each orchestrator's construction-time handlers to its session.
   const holders = new Map<string, SessionHolder>();
   let activeConversationId: ConversationId | null = null;
@@ -351,6 +355,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * (one pass over the session map + a slice of the conversation cache).
    */
   function emit(error: string | null): void {
+    // R5/F1: one shared dispose guard for every async path. Awaiting methods
+    // (sendText, clearConversation, boot-hydrate's `.catch(emit)`, …) can
+    // straddle disposal; without this they would mutate state and notify
+    // subscribers of a torn-down controller.
+    if (disposed) return;
     const state = buildState(error);
     for (const listener of listeners) {
       listener(state);
@@ -382,7 +391,26 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     };
   }
 
-  async function refreshConversations(): Promise<void> {
+  // R5/F2: refresh single-flight. Without this, the boot-hydrate refresh and
+  // a mutation-triggered refresh (startConversation/resumeConversation/
+  // setDisplayName) could run concurrently and resolve out of order, briefly
+  // overwriting conversationsCache with a stale snapshot (a just-created
+  // conversation disappearing from the sidebar for a tick). Every call is
+  // CHAINED onto the tail: concurrent callers never issue overlapping reads,
+  // and a refresh requested while one is in flight still re-reads afterwards
+  // (its mutations may postdate the in-flight read's snapshot), so the last
+  // write is always the freshest.
+  let refreshTail: Promise<void> = Promise.resolve();
+
+  function refreshConversations(): Promise<void> {
+    const next = refreshTail.then(runRefresh, runRefresh);
+    // The tail never retains a rejection: each caller gets `next` directly,
+    // and a failed refresh must not poison every subsequent chain.
+    refreshTail = next.catch(() => {});
+    return next;
+  }
+
+  async function runRefresh(): Promise<void> {
     const rows = await repository.listConversations();
     // The await can straddle disposal (e.g. a boot-time hydrate resolving after
     // the provider unmounted and called dispose()). Bail before mutating state
@@ -773,6 +801,35 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     emit(err instanceof Error ? err.message : String(err));
   });
 
+  /**
+   * The single-flight body of resumeConversation (R5/F4): only ever runs once
+   * per conversation at a time; concurrent callers await the stored promise.
+   */
+  async function performResume(conversationId: ConversationId, resumeKey: string): Promise<void> {
+    const record = await repository.getConversation(conversationId);
+    if (record === null) {
+      throw new Error(`cannot resume unknown conversation ${conversationId}`);
+    }
+    // Re-enter the conversation by joining with the existing conversation id
+    // (idempotent at the repository level for the in-memory store).
+    const fragment = `#${resumeKey}`;
+    // R9/F3 (Phase 8.5): seed the session snapshot INSIDE startSession,
+    // BEFORE the bridge is started. This closes the race where a fast peer
+    // rejoins and delivers a message between startSession returning and
+    // seedSessionFromHistory running — that ordering overwrote the live
+    // frame with persisted history. With the seed hook, the snapshot is
+    // populated first; the bridge opens only after seeding completes, so
+    // any inbound frame is APPENDED to the seeded history, not lost.
+    const { session } = await startSession(Role.Initiator, fragment, async (s) => {
+      const history = await s.orchestrator.getHistory();
+      seedSessionFromHistory(s, record, history);
+      recomputeUnread(s);
+    });
+    void session;
+    await refreshConversations();
+    emit(null);
+  }
+
   return {
     async startConversation(options?: { readonly code?: string }): Promise<{ invitation: string }> {
       assertNotDisposed(disposed);
@@ -811,28 +868,22 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         emit(null);
         return;
       }
-      const record = await repository.getConversation(conversationId);
-      if (record === null) {
-        throw new Error(`cannot resume unknown conversation ${conversationId}`);
+      // R5/F4: single-flight guard. Two concurrent resumeConversation(sameId)
+      // calls (e.g. a double-tap) both used to pass the synchronous
+      // sessions.has check above before either reached registerSession inside
+      // startSession — the second startSession orphaned the first session's
+      // orchestrator + bridge + signaling socket + RTCPeerConnection. Repeat
+      // callers now await the in-flight resume instead of starting a second
+      // one.
+      const inFlight = resuming.get(resumeKey);
+      if (inFlight !== undefined) {
+        return inFlight;
       }
-      // Re-enter the conversation by joining with the existing conversation id
-      // (idempotent at the repository level for the in-memory store).
-      const fragment = `#${keyOf(conversationId)}`;
-      // R9/F3 (Phase 8.5): seed the session snapshot INSIDE startSession,
-      // BEFORE the bridge is started. This closes the race where a fast peer
-      // rejoins and delivers a message between startSession returning and
-      // seedSessionFromHistory running — that ordering overwrote the live
-      // frame with persisted history. With the seed hook, the snapshot is
-      // populated first; the bridge opens only after seeding completes, so
-      // any inbound frame is APPENDED to the seeded history, not lost.
-      const { session } = await startSession(Role.Initiator, fragment, async (s) => {
-        const history = await s.orchestrator.getHistory();
-        seedSessionFromHistory(s, record, history);
-        recomputeUnread(s);
+      const attempt = performResume(conversationId, resumeKey).finally(() => {
+        resuming.delete(resumeKey);
       });
-      void session;
-      await refreshConversations();
-      emit(null);
+      resuming.set(resumeKey, attempt);
+      return attempt;
     },
 
     selectConversation(conversationId: ConversationId): void {
@@ -1096,6 +1147,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       if (target === null) return;
       const targetKey = keyOf(target);
       await repository.clearConversation(target);
+      // R6/F4: reconcile the durable auth-failed record with the cleared
+      // conversation — without this the flag would outlive its record and
+      // resurface on the next session start for an id that no longer exists.
+      await clearAuthFailedDurable(target);
       const session = sessions.get(targetKey);
       if (session !== undefined) {
         // (5.2.1) Drain the session's send queue FIRST, before any transfer
@@ -1166,6 +1221,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
 
     async clearAll(): Promise<void> {
       await repository.clearAll();
+      // R6/F4: the durable auth-failed record must not outlive the
+      // conversations it describes.
+      await clearAllAuthFailedDurable();
       // CR-9: bring clearAll to parity with clearConversation. Previously
       // clearAll only wiped store + previews and left receivedFiles, transfers,
       // and sendQueues untouched, AND did not set `detached` — so a late
