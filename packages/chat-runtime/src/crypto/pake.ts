@@ -8,6 +8,7 @@ import {
 import { Role } from "../protocol/types";
 
 import { PakeError, PakeErrorCode } from "./errors";
+import { dynamicImport } from "./pake-loader";
 import { hmacSha256, hkdfSha256 } from "./primitives";
 
 /**
@@ -116,23 +117,28 @@ let wasmModulePromise: Promise<PakeWasmModule> | null = null;
  * The browser resolves the `.wasm` asset via `import.meta.url` baked into the
  * pkg by wasm-pack.
  *
- * The dynamic `import()` uses a constant string identifier (not a literal) so
- * the bundler emits it as a separate chunk that a `SafetyNumberOnly` session
- * never fetches. The result is cast to the local {@link PakeWasmModuleBinding}
- * view; the committed `pkg/fck_spake2.d.ts` provides the underlying shapes.
+ * The dynamic `import()` goes through the platform-split loader
+ * (`./pake-loader` / `pake-loader.native.ts`) with a variable identifier, so
+ * no bundler tries to resolve the specifier statically and the pkg artifacts
+ * stay outside every bundle's module graph (the web build emits them via the
+ * `emit-spake2-pkg` Vite plugin instead). The result is cast to the local
+ * {@link PakeWasmModuleBinding} view; the committed `pkg/fck_spake2.d.ts`
+ * provides the underlying shapes.
  */
 async function loadWasm(): Promise<PakeWasmModule> {
   if (wasmModulePromise === null) {
-    // The dynamic `import(specifier)` is hidden behind `new Function` so every
-    // bundler's static analyzer (Metro, Vite, webpack) treats it as an opaque
-    // runtime eval — invisible to the transformer. Metro's transformer rejects
-    // `import(variable)` outright, AND Metro's resolver fails on
-    // `import(literalPathOnBlockList)` instead of dropping it; routing through
-    // `new Function` sidesteps both. At runtime it is a plain `import()`.
+    // The dynamic `import(specifier)` goes through the platform-split loader
+    // (`./pake-loader`, resolved to `pake-loader.ts` by Vite/Node and to
+    // `pake-loader.native.ts` by Metro). On web/desktop it is a REAL dynamic
+    // import — a script fetch subject to `script-src`, not an eval — which is
+    // what lets the desktop production CSP ship without `'unsafe-eval'`. On
+    // Metro the loader hides the import behind `new Function` because Metro's
+    // transformer rejects `import(variable)` and its resolver fails on
+    // blockListed literal paths (see `pake-loader.native.ts`).
     //
     // React Native v1 is safety-number-only and NEVER reaches this code path
-    // (no `~code` invitation reaches `createPakeSession`), so the runtime
-    // branch never fires on native — keeping the import hidden is sufficient.
+    // (no `~code` invitation reaches `createPakeSession`), so the native
+    // loader branch never fires on native.
     //
     // Web calls `setSpake2ModuleUrl` BEFORE the first PAKE handshake so the
     // override URL is the one resolved at runtime. Node tests bypass this
@@ -144,16 +150,6 @@ async function loadWasm(): Promise<PakeWasmModule> {
   }
   return wasmModulePromise;
 }
-
-/**
- * Runtime dynamic `import()` hidden from bundler static analysis. Constructed
- * via `new Function` so the call site never appears as a syntactic `import()`
- * in this file's AST — Metro, Vite, webpack, etc. cannot resolve, block, or
- * reject what they cannot see. The body is a perfectly normal dynamic import.
- */
-const dynamicImport = new Function("specifier", "return import(specifier)") as (
-  specifier: string,
-) => Promise<unknown>;
 
 /**
  * Test-only synchronous initializer. Node-based unit tests cannot rely on the
