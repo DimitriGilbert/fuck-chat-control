@@ -131,8 +131,7 @@ describe("at-rest nonce uniqueness (R1:F1, fresh random 96-bit nonce)", () => {
     const suffixA = a.nonce.subarray(8, 12);
     const suffixB = b.nonce.subarray(8, 12);
     const suffixC = c.nonce.subarray(8, 12);
-    const allSuffixEqual =
-      bytesEqual(suffixA, suffixB) && bytesEqual(suffixB, suffixC);
+    const allSuffixEqual = bytesEqual(suffixA, suffixB) && bytesEqual(suffixB, suffixC);
     expect(allSuffixEqual).toBe(false);
 
     // Likewise the prefix bytes [0..8) must NOT form a monotonic 0,1,2 counter.

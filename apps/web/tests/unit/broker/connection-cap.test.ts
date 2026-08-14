@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  MAX_CONNECTIONS,
-  shouldRejectConnection,
-} from "@/server/broker";
+import { MAX_CONNECTIONS, shouldRejectConnection } from "@/server/broker";
 
 describe("broker connection cap — R3/F2 (MAX_CONNECTIONS)", () => {
   it("exports MAX_CONNECTIONS with the documented v1 default", () => {

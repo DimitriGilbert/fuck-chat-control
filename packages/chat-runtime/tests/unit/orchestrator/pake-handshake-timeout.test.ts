@@ -16,7 +16,10 @@ import {
   PAKE_MESSAGE_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { getAuthFailedDurable, InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  getAuthFailedDurable,
+  InMemoryConversationRepository,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {

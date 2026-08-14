@@ -139,9 +139,7 @@ describe("ConversationOrchestrator PAKE feature gate (R8/F1 / Phase 6)", () => {
     it("joins a leading-# uncoded fragment without throwing", async () => {
       const { orchestrator } = await makeOrchestrator(false);
 
-      await expect(
-        orchestrator.join("#abcdef0123456789abcdef0123456789"),
-      ).resolves.toBeUndefined();
+      await expect(orchestrator.join("#abcdef0123456789abcdef0123456789")).resolves.toBeUndefined();
       expect(orchestrator.handshakeAuthMode).toBe(AuthMode.SafetyNumberOnly);
     });
 

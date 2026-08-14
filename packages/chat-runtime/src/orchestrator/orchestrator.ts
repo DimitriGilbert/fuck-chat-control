@@ -360,9 +360,7 @@ export class ConversationOrchestrator {
     // positive number is honoured (preserving the test seam).
     const timeoutOverride = deps.handshakeTimeoutMsOverride;
     this.handshakeTimeoutMs =
-      typeof timeoutOverride === "number" &&
-      Number.isFinite(timeoutOverride) &&
-      timeoutOverride > 0
+      typeof timeoutOverride === "number" && Number.isFinite(timeoutOverride) && timeoutOverride > 0
         ? timeoutOverride
         : HANDSHAKE_TIMEOUT_MS;
   }
