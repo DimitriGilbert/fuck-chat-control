@@ -81,7 +81,10 @@ export function ChatView(): React.ReactElement {
     const text = draft;
     setDraft("");
     void controller.sendText(text).catch((err: unknown) => {
-      setDraft(text);
+      // R7/F5 (Phase 12): restore only into an empty draft. sendText makes a
+      // network round-trip; resetting to `text` unconditionally would clobber
+      // whatever the user typed while the send was in flight.
+      setDraft((prev) => (prev === "" ? text : prev));
       toast.error("Send failed", {
         description: err instanceof Error ? err.message : String(err),
       });
@@ -109,12 +112,19 @@ export function ChatView(): React.ReactElement {
    * R7/F3 (Phase 3b / CR-3): once the session has durably failed auth, retry
    * is disabled (re-handshaking with the same identity would just re-trigger
    * the same failure). The only recovery path is to start a fresh, uncoded
-   * conversation. The orchestrator's `start()` allocates a new conversation
-   * id and the InvitationBanner takes over to surface the new link.
+   * conversation. The failed session is left FIRST (R7/F8, Phase 12):
+   * startConversation only swaps the active id, so without the leave every
+   * recovery click strands the dead session as a Disconnected sidebar row.
+   * The orchestrator's `start()` then allocates a new conversation id and the
+   * InvitationBanner takes over to surface the new link.
    */
   async function handleCreateFreshInvitation(): Promise<void> {
     if (controller === null) return;
     try {
+      const failedId = state.activeConversationId;
+      if (failedId !== null) {
+        controller.leaveConversation(failedId);
+      }
       await controller.startConversation();
     } catch (err: unknown) {
       toast.error("Could not create invitation", {
