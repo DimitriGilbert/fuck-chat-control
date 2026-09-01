@@ -1,8 +1,11 @@
+// @vitest-environment jsdom
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { extname, join, relative } from "node:path";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import { renderMarkdown } from "@/components/markdown";
 
 /**
  * LW-25 (SSR hardening): the docs renderer's SSR/prerender path skips
@@ -20,7 +23,7 @@ import { describe, expect, it } from "vitest";
  * `<Markdown>`, add it under `src/routes/docs/` with its own `?raw` import —
  * do NOT relax the "no non-docs importer" rule.
  */
-const SRC_ROOT = fileURLToPath(new URL("../../../src", import.meta.url));
+const SRC_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../src");
 const MARKDOWN_MODULE = "components/markdown.tsx";
 
 function walk(dir: string): string[] {
@@ -92,5 +95,63 @@ describe("LW-25: renderMarkdown input surface is trusted docs only", () => {
       return /\brenderMarkdown\b/.test(content);
     });
     expect(offenders.map((f) => relative(SRC_ROOT, f))).toEqual([]);
+  });
+});
+
+/**
+ * R6F2: the custom link renderer builds its anchor by string interpolation,
+ * and the resolved href used to be interpolated unescaped. marked's
+ * angle-bracket link form carries quotes and spaces through the parser
+ * (`[x](<foo" onmouseover="alert(1)>)`), `resolveDocsHref` passes the
+ * scheme-less href through unchanged, and the raw `"` broke out of the href
+ * attribute — the verifier reproduced `<a href="foo" onmouseover="alert(1)">x</a>`.
+ * The renderer now HTML-attribute-escapes the href, which must hold on BOTH
+ * render paths: the SSR passthrough (no `window`, so DOMPurify is skipped and
+ * the marked output ships as-is) and the client path (DOMPurify sanitize).
+ *
+ * This file runs under jsdom for the client path; the SSR branch is
+ * exercised by stubbing `window` to undefined for the call —
+ * `renderMarkdown` evaluates `typeof window` at call time, so the stub
+ * selects the raw-passthrough branch without re-importing the module.
+ */
+const BREAKOUT_SOURCE = '[x](<foo" onmouseover="alert(1)>)';
+const BREAKOUT_HREF = 'foo" onmouseover="alert(1)';
+const ESCAPED_ANCHOR = '<a href="foo&quot; onmouseover=&quot;alert(1)">x</a>';
+
+function requireAnchor(html: string): HTMLAnchorElement {
+  const anchor = new DOMParser().parseFromString(html, "text/html").querySelector("a");
+  if (anchor === null) {
+    throw new Error(`expected an <a> element in rendered output: ${html}`);
+  }
+  return anchor;
+}
+
+describe("R6F2: link renderer href attribute breakout", () => {
+  it("SSR path: the href quote is escaped, no injectable attribute", () => {
+    vi.stubGlobal("window", undefined); // force the SSR/prerender branch
+    try {
+      const out = renderMarkdown(BREAKOUT_SOURCE);
+      // Raw passthrough: the payload's `"` must render as &quot; — with the
+      // quote escaped the HTML attribute grammar cannot form a second
+      // attribute out of " onmouseover=...".
+      expect(out).toContain(ESCAPED_ANCHOR);
+      const anchor = requireAnchor(out);
+      expect(anchor.getAttribute("href")).toBe(BREAKOUT_HREF);
+      expect(anchor.getAttribute("onmouseover")).toBeNull();
+      expect(anchor.getAttributeNames()).toEqual(["href"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("client path: DOMPurify branch neutralizes the payload too", () => {
+    // Control: prove the DOMPurify branch is live in this module instance —
+    // otherwise both tests would silently exercise the raw passthrough.
+    expect(renderMarkdown("a <script>alert(1)</script> b")).not.toContain("<script");
+    const out = renderMarkdown(BREAKOUT_SOURCE);
+    const anchor = requireAnchor(out);
+    expect(anchor.getAttribute("href")).toBe(BREAKOUT_HREF);
+    expect(anchor.getAttribute("onmouseover")).toBeNull();
+    expect(anchor.getAttributeNames()).toEqual(["href"]);
   });
 });

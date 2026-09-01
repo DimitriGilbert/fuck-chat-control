@@ -20,10 +20,17 @@ marked.use({
     // The markdown's relative links (../adr/..., protocol-v1.md) become
     // pointers to the docs routes this app exposes.
     link({ href, tokens }: Tokens.Link): string {
+      // `text` needs no escaping here: `parser.parseInline` already
+      // HTML-escapes text tokens (`"` -> &quot;, `&` -> &amp;) for both the
+      // plain and angle-bracket link forms, and raw inline HTML inside link
+      // text is stock-marked passthrough that the DOMPurify stage strips on
+      // the client path (the SSR path trusts only repo docs, per LW-25). The
+      // href is the only attribute-context interpolation, so it alone is
+      // attribute-escaped.
       const text = this.parser.parseInline(tokens);
       const resolved = resolveDocsHref(href ?? "");
       const target = resolved.startsWith("http") ? ' target="_blank" rel="noreferrer"' : "";
-      return `<a href="${resolved}"${target}>${text}</a>`;
+      return `<a href="${escapeHtmlAttribute(resolved)}"${target}>${text}</a>`;
     },
   },
 });
@@ -43,6 +50,26 @@ function resolveDocsHref(href: string): string {
   if (href.includes("deployment.md")) return "/docs/deployment";
   if (href.includes("001-crypto-dependencies.md")) return "/docs/security#adrs";
   return href;
+}
+
+/**
+ * Escape a value for interpolation into a double-quoted HTML attribute
+ * context (R6F2). `resolveDocsHref` passes unrecognized hrefs through
+ * unchanged and `hasDangerousScheme` admits scheme-less hrefs, so a `"`
+ * carried through marked's angle-bracket link form
+ * (`[x](<foo" onmouseover="alert(1)>)`) would otherwise break out of
+ * `href="..."` and inject an attribute. DOMPurify catches that on the client
+ * path, but the SSR path returns marked output unsanitized, so the escape
+ * must happen here. Order matters: it is applied after scheme resolution
+ * (the checks must see the true href) and before template interpolation, and
+ * `&` is replaced first so the other replacements are not double-escaped.
+ */
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 /**

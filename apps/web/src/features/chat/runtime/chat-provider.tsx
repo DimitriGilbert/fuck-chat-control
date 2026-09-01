@@ -484,52 +484,101 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           // in via `repository` so the controller stays synchronous.
           const atRestKey = atRestKeyManager.get();
           let repository: ConversationRepository;
+          // R6/F1: true while THIS continuation solely owns the repository's
+          // resources (the OPFS DB + its dedicated Worker). Cleared at every
+          // ownership hand-off below: the cancelled branch hands the repository
+          // to `instance.dispose()`, and the success path hands it to the
+          // published controller (whose dispose — immediate or via the unmount
+          // cleanup — closes it). While true, a throw from the guarded section
+          // means no controller was built, so nothing else will ever close the
+          // repository — this catch is the only release path left.
+          let ownsRepository = false;
           try {
             repository = await BrowserDbConversationRepository.create({
               databaseName: "fck-chat-control",
               atRestKey,
             });
+            ownsRepository = true;
           } catch {
             repository = new InMemoryConversationRepository(atRestKey);
           }
 
-          const instance = createChatController({
-            brokerUrl,
-            baseUrl,
-            publicBaseUrl: resolvedPublicBaseUrl,
-            identityManager,
-            atRestKeyManager,
-            repository,
-            // Factory is required by the type but unused when `repository` is set.
-            repositoryFactory: () => repository,
-            socketFactory: createBrowserSocket,
-            peerConnectionFactory,
-            iceServers: iceConfig.iceServers,
-          });
-          // M3: re-check `cancelled` AFTER the async repository-create yield
-          // and BEFORE publishing the controller. The check at the top of this
-          // .then runs synchronously, but the `await BrowserDbConversationRepository.create`
-          // above is a real yield — if unmount fired during it, the cleanup
-          // already ran with `disposedController === null` (socket/peer/OPFS
-          // nothing yet to release) and this resumed continuation would
-          // otherwise assign `disposedController = instance`, then call
-          // setController/subscribe/setReady on an unmounted component (leaked
-          // controller + setState-on-unmounted). Construct-then-dispose here
-          // releases the broker socket, peer connections, and OPFS handles the
-          // constructor just opened, then bail without touching React state.
-          // This race is reachable via ordinary route transitions, not just
-          // StrictMode double-mount (StrictMode is not enabled in this app).
-          if (cancelled) {
-            instance.dispose();
-            return;
+          // R6/F1: the `await BrowserDbConversationRepository.create` above is
+          // a real yield. If unmount fires during it, the cleanup runs with
+          // `disposedController === null` and locks `atRestKeyManager`
+          // SYNCHRONOUSLY — the resumed continuation then throws
+          // AtRestKeyLockedError from createChatController's first statement
+          // (`deps.atRestKeyManager.get()`), and that throw used to sail past
+          // the cancelled guard below into the outer `.catch`, never closing
+          // the freshly opened repository: the OPFS DB + Worker leaked, and a
+          // prompt remount contended the fixed `"fck-chat-control"` OPFS handle.
+          // Guard EVERYTHING after the create — on any throw while this
+          // continuation still owns the repository, close it exactly once
+          // before rethrowing (the close also covers non-race
+          // createChatController failures: no controller was constructed, so
+          // no dispose() would ever reach the repository).
+          try {
+            const instance = createChatController({
+              brokerUrl,
+              baseUrl,
+              publicBaseUrl: resolvedPublicBaseUrl,
+              identityManager,
+              atRestKeyManager,
+              repository,
+              // Factory is required by the type but unused when `repository` is set.
+              repositoryFactory: () => repository,
+              socketFactory: createBrowserSocket,
+              peerConnectionFactory,
+              iceServers: iceConfig.iceServers,
+            });
+            // M3: re-check `cancelled` AFTER the async repository-create yield
+            // and BEFORE publishing the controller. The check at the top of this
+            // .then runs synchronously, but the `await BrowserDbConversationRepository.create`
+            // above is a real yield — if unmount fired during it, the cleanup
+            // already ran with `disposedController === null` (socket/peer/OPFS
+            // nothing yet to release) and this resumed continuation would
+            // otherwise assign `disposedController = instance`, then call
+            // setController/subscribe/setReady on an unmounted component (leaked
+            // controller + setState-on-unmounted). Construct-then-dispose here
+            // releases the broker socket, peer connections, and OPFS handles the
+            // constructor just opened, then bail without touching React state.
+            // This race is reachable via ordinary route transitions, not just
+            // StrictMode double-mount (StrictMode is not enabled in this app).
+            // R6/F1: since the R9/F8 cleanup locks the at-rest manager, that
+            // unmount race now throws inside createChatController BEFORE this
+            // guard is reached (owned by the catch below); the guard stays as
+            // defense-in-depth for any construction that succeeds despite the
+            // lock.
+            if (cancelled) {
+              instance.dispose();
+              // dispose() releases the repository (fire-and-forget close).
+              ownsRepository = false;
+              return;
+            }
+            disposedController = instance;
+            // The published controller — disposed by the unmount cleanup — now
+            // owns the repository's lifecycle.
+            ownsRepository = false;
+            setController(instance);
+            setState(instance.getState());
+            unsubscribe = instance.subscribe((next) => {
+              setState(next);
+            });
+            setReady(true);
+          } catch (err) {
+            if (ownsRepository) {
+              ownsRepository = false;
+              // Close BEFORE the rethrown error reaches the outer `.catch` and
+              // becomes UI error state, so the Worker is released deterministically.
+              await Promise.resolve(repository.close?.()).catch(() => {
+                // Swallow, mirroring the controller's dispose() call site:
+                // close() logs the failure itself (R4/F6 contract) and a
+                // teardown failure must not mask the construction error the
+                // UI is about to see.
+              });
+            }
+            throw err;
           }
-          disposedController = instance;
-          setController(instance);
-          setState(instance.getState());
-          unsubscribe = instance.subscribe((next) => {
-            setState(next);
-          });
-          setReady(true);
         })
         .catch((err: unknown) => {
           // Surface load failures as controller errors so the UI can render
