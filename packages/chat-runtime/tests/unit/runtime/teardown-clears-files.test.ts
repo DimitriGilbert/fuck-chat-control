@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { FileManifest, ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 import type { ConversationOrchestrator } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { teardownSession } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-session";
+import {
+  teardownSession,
+  type SessionHolder,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/chat-session";
 import type { ChatFileInput, ChatSession } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import type { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
@@ -77,7 +80,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
     const bufB = fileB.data;
     const session = makeSession([fileA, fileB]);
 
-    teardownSession(session);
+    teardownSession(session, null);
 
     // The map was cleared.
     expect(session.receivedFiles.size).toBe(0);
@@ -90,9 +93,20 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
 
   it("is a no-op on receivedFiles when the session has none", () => {
     const session = makeSession([]);
-    teardownSession(session);
+    teardownSession(session, null);
     expect(session.receivedFiles.size).toBe(0);
     expect(session.connectionState).toBe(ConnectionState.Disconnected);
+  });
+
+  it("R3F3: nulls the holder's session synchronously so late handler callbacks are dropped", () => {
+    const session = makeSession([]);
+    const holder: SessionHolder = { session };
+    teardownSession(session, holder);
+    // The documented drop gate (see buildOrchestrator's handlers): every
+    // orchestrator callback checks `holder.session !== null` before touching
+    // the session, so a late onError/onChange after teardown must observe
+    // null here, not the torn-down session.
+    expect(holder.session).toBeNull();
   });
 
   it("still runs orchestrator.leave + bridge.close (best-effort) when zeroing succeeds", () => {
@@ -130,7 +144,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
       authMode: AuthMode.SafetyNumberOnly,
     };
 
-    teardownSession(session);
+    teardownSession(session, null);
 
     expect(leaveCalled).toBe(true);
     expect(bridgeClosed).toBe(true);
@@ -169,7 +183,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
 
     // teardownSession swallows orchestrator/bridge errors; the buffer-zeroing
     // happened BEFORE those calls, so the contract still holds.
-    expect(() => teardownSession(session)).not.toThrow();
+    expect(() => teardownSession(session, null)).not.toThrow();
     expect(session.receivedFiles.size).toBe(0);
     for (const b of buf) expect(b).toBe(0);
   });

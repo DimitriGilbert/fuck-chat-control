@@ -95,10 +95,10 @@ export function buildOrchestrator(
 ): ConversationOrchestrator {
   /**
    * Apply a transfer event to the holder's session and notify. Late events
-   * (after the session was torn down) are dropped: holder.session is null'd
-   * on teardown. Events are also dropped while `session.detached` is true (set
-   * by clearConversation) so a late frame does not repopulate a cleared
-   * snapshot.
+   * (after the session was torn down) are dropped: teardownSession nulls
+   * holder.session synchronously (R3F3). Events are also dropped while
+   * `session.detached` is true (set by clearConversation) so a late frame does
+   * not repopulate a cleared snapshot.
    */
   function applyTransfer(event: TransferEvent): void {
     const session = holder.session;
@@ -324,8 +324,21 @@ export function seedSessionFromHistory(
  * Idempotent teardown of one session's orchestrator + bridge. After this
  * returns, the session's WebRTC + signaling resources are released; the
  * controller removes it from the map.
+ *
+ * R3F3 (Phase 3): the holder is detached SYNCHRONOUSLY at the top, before any
+ * resource is released. A late orchestrator callback (onError/onStateChange
+ * re-entry from a parked handleInbound rejection reaching failHandshake,
+ * transfer events, late frames) then observes `holder.session === null` and
+ * is dropped instead of mutating a torn-down session and re-entering the
+ * controller's onSessionChange for a session that was already removed.
  */
-export function teardownSession(session: ChatSession): void {
+export function teardownSession(session: ChatSession, holder: SessionHolder | null): void {
+  // R3F3: null the holder BEFORE the idempotency guard and BEFORE releasing
+  // resources, so the invariant "after teardownSession returns, holder.session
+  // is null" holds even for an already-Disconnected session.
+  if (holder !== null) {
+    holder.session = null;
+  }
   // R5/F5: idempotency guard. All current callers remove the session from the
   // controller's map before any re-entrant path, but a second teardown (e.g.
   // leaveConversation racing leaveAll) must not re-enter orchestrator.leave()

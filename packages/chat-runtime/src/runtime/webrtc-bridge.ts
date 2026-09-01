@@ -167,6 +167,11 @@ export class WebRtcBridge {
 
   /** Start signaling: connect the broker and, for the initiator, offer. */
   public start(): void {
+    // R3F1 (Phase 3): never dial on a closed bridge. Every other entry point
+    // already gates on `closed`; start() was the one unguarded path, so a late
+    // start() (a start/resume completing after teardown) could open a fresh
+    // signaling socket on a bridge the controller already released.
+    if (this.closed) return;
     this.signaling.connect();
   }
 

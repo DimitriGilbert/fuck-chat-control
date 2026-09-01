@@ -339,6 +339,36 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   // R5/F4: in-flight resumeConversation attempts keyed by hex id, so a
   // concurrent resume of the same conversation dedupes onto one startSession.
   const resuming = new Map<string, Promise<void>>();
+  // R3F1 (Phase 3): per-conversation lifecycle epochs, bumped by
+  // leaveConversation/leaveAll. An in-flight startSession snapshots the epochs
+  // at entry (the resume path captures its target's epoch in performResume
+  // BEFORE that function's first await, where the conversation id is already
+  // known) and re-checks after every await: if the epoch for its conversation
+  // advanced, a leave won the race and the half-built orchestrator/bridge is
+  // torn down instead of installed. Disposal is covered globally by the
+  // `disposed` flag, which aborts every in-flight start the same way. Entries
+  // are deliberately never deleted: a later resume of the same conversation
+  // snapshots the post-leave value and proceeds normally.
+  const conversationEpochs = new Map<string, number>();
+
+  function bumpConversationEpoch(key: string): void {
+    conversationEpochs.set(key, (conversationEpochs.get(key) ?? 0) + 1);
+  }
+
+  /**
+   * R3F1 (Phase 3): entry-time epoch snapshot for a start attempt. `target`
+   * (the resume path) may record an OLDER epoch than the current map value —
+   * it is captured in performResume before that function's first await, so a
+   * leave landing between the capture and startSession's entry is still
+   * detected as an epoch mismatch by the post-await re-checks.
+   */
+  function snapshotConversationEpochs(target?: ConversationLifecycle): Map<string, number> {
+    const snapshot = new Map(conversationEpochs);
+    if (target !== undefined) {
+      snapshot.set(target.key, target.epoch);
+    }
+    return snapshot;
+  }
   // Holders link each orchestrator's construction-time handlers to its session.
   const holders = new Map<string, SessionHolder>();
   let activeConversationId: ConversationId | null = null;
@@ -439,7 +469,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * the user had not actually seen the peer's message.
    */
   const onSessionChange: SessionChangeCallback = (session): void => {
-    if (activeConversationId !== session.id) {
+    // R3F2 (Phase 3): VALUE comparison via keyOf — `!==` on the branded
+    // Uint8Array was reference equality, so an activeConversationId stored
+    // from a caller-supplied reference (a repository record's deserialized
+    // id) made the ACTIVE session take the background branch forever (unread
+    // climbing, read marker never advancing) while buildState's keyOf lookup
+    // rendered it active. The assignment sites normalize to the session's own
+    // id; the comparison is value-based so a normalization lapse cannot
+    // reintroduce the divergence.
+    if (activeConversationId === null || keyOf(activeConversationId) !== keyOf(session.id)) {
       // Non-active session receiving a message: increment unread. The message
       // itself is already mirrored into `session.messages` by the handler; the
       // unread bump reflects "things the user hasn't looked at yet."
@@ -601,7 +639,17 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     fragment?: string,
     seed?: (session: ChatSession) => Promise<void>,
     pakeCode?: string,
-  ): Promise<{ session: ChatSession; invitation: string | null }> {
+    targetLifecycle?: ConversationLifecycle,
+  ): Promise<{ session: ChatSession | null; invitation: string | null }> {
+    // R3F1 (Phase 3): snapshot the lifecycle state BEFORE the first await.
+    // Every await below can straddle a dispose() or a leaveConversation() for
+    // this conversation; the re-checks compare against this snapshot so a
+    // losing start tears its half-built resources down instead of installing
+    // a zombie session (live broker socket, RTCPeerConnection, orchestrator)
+    // nobody will ever tear down. Until bridge.start() — the LAST statement —
+    // an attempt holds no socket and no registered state, so aborting at any
+    // check leaks nothing.
+    const entryEpochs = snapshotConversationEpochs(targetLifecycle);
     const { orchestrator, holder } = buildSessionOrchestrator();
     let conversationId: ConversationId;
     let invitation: string | null = null;
@@ -613,7 +661,21 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       await orchestrator.join(fragment as string);
       conversationId = orchestrator.conversationId as ConversationId;
     }
-    holders.set(keyOf(conversationId), holder);
+    const conversationKey = keyOf(conversationId);
+    if (startAborted(entryEpochs, conversationKey)) {
+      // R3F1: dispose()/leaveConversation() won the race before the session
+      // existed. Release the orchestrator (best-effort, mirroring
+      // teardownSession's swallow) and bail BEFORE the holder/bridge/session
+      // are built — nothing is registered and no socket was dialed.
+      try {
+        orchestrator.leave();
+      } catch {
+        // best-effort
+      }
+      assertNotDisposed(disposed);
+      return { session: null, invitation };
+    }
+    holders.set(conversationKey, holder);
     const presence = bridgePresenceCallbacks(orchestrator);
     const session = wireBridge({
       orchestrator,
@@ -637,9 +699,57 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     registerSession(session);
     if (seed !== undefined) {
       await seed(session);
+      if (startAborted(entryEpochs, conversationKey)) {
+        // R3F1: a leave/dispose landed while the seed read was in flight. The
+        // session registered itself, so mirror leaveConversation's eviction:
+        // tear the orchestrator + bridge down and remove everything
+        // registerSession installed. bridge.start() below is unreachable, so
+        // the freshly built bridge never dials.
+        abortRegisteredStart(session, holder, conversationKey);
+        assertNotDisposed(disposed);
+        return { session: null, invitation };
+      }
     }
     session.bridge.start();
     return { session, invitation };
+  }
+
+  /**
+   * R3F1 (Phase 3): true if the controller was disposed or the conversation's
+   * lifecycle epoch advanced past the entry snapshot while a start was parked
+   * at an await (leaveConversation/leaveAll bump the epoch of the target
+   * conversation).
+   */
+  function startAborted(
+    entryEpochs: ReadonlyMap<string, number>,
+    conversationKey: string,
+  ): boolean {
+    if (disposed) return true;
+    return (
+      (conversationEpochs.get(conversationKey) ?? 0) !== (entryEpochs.get(conversationKey) ?? 0)
+    );
+  }
+
+  /**
+   * R3F1 (Phase 3): evict a start that registered itself and then lost a
+   * leave/dispose race during its seed read. Mirrors leaveConversation's
+   * teardown + map cleanup so the aborted attempt leaves no trace; every step
+   * is idempotent because leaveConversation/dispose may have already run it.
+   */
+  function abortRegisteredStart(
+    session: ChatSession,
+    holder: SessionHolder,
+    conversationKey: string,
+  ): void {
+    teardownSession(session, holder);
+    sessions.delete(conversationKey);
+    holders.delete(conversationKey);
+    readMarkers.delete(conversationKey);
+    drainSendQueueForTarget(conversationKey);
+    if (activeConversationId !== null && keyOf(activeConversationId) === conversationKey) {
+      // Do NOT auto-select another session — same contract as leaveConversation.
+      activeConversationId = null;
+    }
   }
 
   function findSessionOrThrow(id: ConversationId): ChatSession {
@@ -806,6 +916,16 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * per conversation at a time; concurrent callers await the stored promise.
    */
   async function performResume(conversationId: ConversationId, resumeKey: string): Promise<void> {
+    // R3F1 (Phase 3): capture the target's lifecycle epoch BEFORE the first
+    // await. A leaveConversation(id) landing anywhere between here and
+    // startSession's own re-checks (the getConversation read,
+    // orchestrator.join, the seed hook) bumps the epoch past this snapshot,
+    // so the completing resume tears its half-built session down instead of
+    // installing a conversation the user already left.
+    const lifecycle: ConversationLifecycle = {
+      key: resumeKey,
+      epoch: conversationEpochs.get(resumeKey) ?? 0,
+    };
     const record = await repository.getConversation(conversationId);
     if (record === null) {
       throw new Error(`cannot resume unknown conversation ${conversationId}`);
@@ -820,12 +940,23 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     // frame with persisted history. With the seed hook, the snapshot is
     // populated first; the bridge opens only after seeding completes, so
     // any inbound frame is APPENDED to the seeded history, not lost.
-    const { session } = await startSession(Role.Initiator, fragment, async (s) => {
-      const history = await s.orchestrator.getHistory();
-      seedSessionFromHistory(s, record, history);
-      recomputeUnread(s);
-    });
-    void session;
+    const { session } = await startSession(
+      Role.Initiator,
+      fragment,
+      async (s) => {
+        const history = await s.orchestrator.getHistory();
+        seedSessionFromHistory(s, record, history);
+        recomputeUnread(s);
+      },
+      undefined,
+      lifecycle,
+    );
+    if (session === null) {
+      // R3F1: leave won the race; startSession already tore the half-built
+      // orchestrator/bridge down and registered nothing. Resolve quietly —
+      // the leave was the user's latest intent.
+      return;
+    }
     await refreshConversations();
     emit(null);
   }
@@ -836,6 +967,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       const code = options?.code;
       const trimmedCode = code === undefined ? undefined : code.trim();
       const result = await startSession(Role.Initiator, undefined, undefined, trimmedCode);
+      if (result.session === null) {
+        // R3F1: the start was aborted mid-flight. For a fresh conversation
+        // only a dispose can abort (startSession already threw for that — its
+        // id does not exist anywhere a leave could target it yet); the
+        // orchestrator was left and nothing was registered. Fail loudly
+        // rather than hand back an invitation whose room was already vacated.
+        throw new Error("conversation start aborted before the session was installed");
+      }
       // Initiator always produces an invitation link; the orchestrator's
       // `start()` returns it before we wire the bridge.
       const invitation = result.invitation as string;
@@ -858,10 +997,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     async resumeConversation(conversationId: ConversationId): Promise<void> {
       assertNotDisposed(disposed);
       const resumeKey = keyOf(conversationId);
-      if (sessions.has(resumeKey)) {
+      const existing = sessions.get(resumeKey);
+      if (existing !== undefined) {
         // Already live; just select it.
-        activeConversationId = conversationId;
-        const existing = sessions.get(resumeKey) as ChatSession;
+        // R3F2 (Phase 3): store the SESSION's own id reference, not the
+        // caller's value-equal one — repository rows hand back freshly
+        // deserialized arrays, and a foreign reference here used to flip
+        // onSessionChange into the background branch (see the keyOf
+        // comparison there).
+        activeConversationId = existing.id;
         syncActiveReadMarker(existing);
         // Re-arm inbound handlers on resume.
         existing.detached = false;
@@ -893,7 +1037,9 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         throw new Error(`cannot select unknown conversation ${conversationId}`);
       }
       // Cheap swap: no re-handshake. Clear unread + advance the read marker.
-      activeConversationId = conversationId;
+      // R3F2 (Phase 3): normalize to the session's own id reference (see the
+      // resumeConversation already-live branch).
+      activeConversationId = session.id;
       syncActiveReadMarker(session);
       // Re-arm inbound handlers: selecting a cleared conversation re-opens it
       // for live frames.
@@ -907,9 +1053,16 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       const target = conversationId ?? activeConversationId;
       if (target === null) return;
       const k = keyOf(target);
+      // R3F1 (Phase 3): record the leave BEFORE the map lookup. When a live
+      // session exists this is belt-and-braces (it is torn down below); when
+      // it does not — a start/resume for this conversation still in flight —
+      // the epoch bump is the ONLY record of the leave, and the completing
+      // startSession observes it after its awaits and aborts instead of
+      // installing a session the user just left.
+      bumpConversationEpoch(k);
       const session = sessions.get(k);
       if (session === undefined) return;
-      teardownSession(session);
+      teardownSession(session, holders.get(k) ?? null);
       sessions.delete(k);
       holders.delete(k);
       readMarkers.delete(k);
@@ -928,7 +1081,11 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     leaveAll(): void {
       assertNotDisposed(disposed);
       for (const session of sessions.values()) {
-        teardownSession(session);
+        // R3F1 (Phase 3): record the leave for every conversation (see
+        // leaveConversation) so an in-flight start for any of them aborts.
+        const k = keyOf(session.id);
+        bumpConversationEpoch(k);
+        teardownSession(session, holders.get(k) ?? null);
       }
       // CR-8: drain every session's send queue (reject + zero) before wiping
       // the session map. Collect keys first so we do not mutate sendQueues
@@ -1317,8 +1474,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      // R3F1 (Phase 3): `disposed` is the terminal lifecycle epoch for EVERY
+      // in-flight startSession. Each re-checks it after every await and tears
+      // its half-built orchestrator/bridge down without registering or
+      // dialing (until bridge.start() — startSession's last statement — an
+      // attempt holds no socket), so iterating sessions.values() below plus
+      // those re-checks covers both registered AND in-flight sessions.
       for (const session of sessions.values()) {
-        teardownSession(session);
+        teardownSession(session, holders.get(keyOf(session.id)) ?? null);
       }
       // CR-8: drain every queued send BEFORE sessions.clear() so each queued
       // promise rejects with "conversation cleared" and its byte buffer is
@@ -1458,6 +1621,17 @@ function compareConversationId(a: ConversationId, b: ConversationId): number {
     if (da !== db) return da - db;
   }
   return la - lb;
+}
+
+/**
+ * R3F1 (Phase 3): a resume target's lifecycle epoch, captured before the
+ * resume's first await (the conversation id is known upfront on that path,
+ * unlike fresh starts/joins which learn it only after the orchestrator entry
+ * point resolves). See `conversationEpochs` in {@link createChatController}.
+ */
+interface ConversationLifecycle {
+  readonly key: string;
+  readonly epoch: number;
 }
 
 /**
