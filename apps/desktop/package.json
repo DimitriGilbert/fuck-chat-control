@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build:desktop": "tauri build",
+    "dev": "node scripts/gen-tauri-csp.js --dev && tauri dev --config src-tauri/gen/tauri.conf.csp-overlay.json",
+    "build:desktop": "pnpm --filter web build && node scripts/copy-shell.js && node scripts/gen-tauri-csp.js && tauri build --config src-tauri/gen/tauri.conf.csp-overlay.json",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml"
   },

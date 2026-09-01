@@ -9,10 +9,22 @@
 //! `tauri://` webview, has no meaningful host).
 //!
 //! The broker URL is compile-time config, resolved here in priority order:
-//!   1. `FCK_BROKER_URL` env var (CI/release builds pass `-`) — the deployed
-//!      broker, e.g. `wss://chat.example.com/ws`.
-//!   2. The dev fallback `ws://localhost:3001/ws`, matching `build.devUrl` so
-//!      `tauri dev` talks to the `pnpm --filter web dev` server's `/ws` route.
+//!   1. `FCK_BROKER_URL` env var — the deployed broker, e.g.
+//!      `wss://chat.example.com/ws`. A value that is unset, empty, or
+//!      whitespace-only counts as unset (the same rule as `FCK_ICE_SERVERS`
+//!      below, checked after trimming), so a CI shape like `FCK_BROKER_URL=`
+//!      — or one holding only padding — cannot bake a blank URL into the SPA
+//!      config. A set value bakes verbatim (untrimmed): WHATWG URL parsing,
+//!      used by both the SPA's `new WebSocket()` and gen-tauri-csp.js's
+//!      `new URL()`, strips surrounding ASCII whitespace, so the dialed URL
+//!      and the CSP origin match the JS seam either way.
+//!   2. Debug/dev builds only: the plaintext fallback `ws://localhost:3001/ws`,
+//!      matching `build.devUrl` so `tauri dev` talks to the
+//!      `pnpm --filter web dev` server's `/ws` route. Release builds
+//!      (`debug_assertions` off) have NO fallback: `BROKER_URL` const-panics
+//!      during compilation unless a set (non-blank) `FCK_BROKER_URL` was
+//!      provided, failing the build — a distributable binary can never
+//!      silently dial a plaintext fixed localhost port.
 //!
 //! Operator-configured STUN/TURN/TURNS servers are read from the
 //! `FCK_ICE_SERVERS` env var at compile time. It holds a JSON array string
@@ -45,13 +57,48 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Whether a `FCK_BROKER_URL` value counts as set: it must contain a
+/// non-whitespace byte. Classification only — the caller bakes the verbatim
+/// value. `trim_ascii` (not Unicode `str::trim`) because only const fns may
+/// run in a const context, and ASCII whitespace is exactly what the WHATWG
+/// URL parser strips, so this matches the JS seam (`raw.trim() === ""` in
+/// gen-tauri-csp.js `brokerOrigin()`) for every URL a browser can dial.
+const fn broker_url_is_set(url: &str) -> bool {
+    !url.trim_ascii().is_empty()
+}
+
 /// The broker URL the desktop app dials. See the module docs for the resolution
 /// rules. Inline so a `const` (not a `String`) — it is interpolated into the
 /// init script as a JSON string literal via `serde_json` to avoid ad-hoc
 /// escaping bugs.
+///
+/// Resolution mirrors the `FCK_ICE_SERVERS` pattern below: a `FCK_BROKER_URL`
+/// that is unset, empty, or whitespace-only (per [`broker_url_is_set`]) is
+/// treated as unset, because the SPA gates on `brokerUrl !== undefined`
+/// (chat-provider.tsx) — a blank string would be handed to `new WebSocket("")`
+/// instead of any fallback, and a whitespace-only one would additionally pass
+/// a plain `is_empty` guard while baking nothing usable. A set value bakes
+/// verbatim (untrimmed).
+///
+/// The plaintext localhost fallback exists ONLY in debug builds (`tauri dev`,
+/// `cargo test`). In a release profile the fallback arm is a const `panic!`:
+/// `BROKER_URL` is a const whose value must be evaluated for
+/// `build_init_script`, so the panic aborts COMPILATION. The guard is
+/// structural — the dev URL is unrepresentable in a release binary, not
+/// merely discouraged at runtime.
 const BROKER_URL: &str = match option_env!("FCK_BROKER_URL") {
-    Some(url) => url,
-    None => "ws://localhost:3001/ws",
+    Some(url) if broker_url_is_set(url) => url,
+    _ => {
+        if cfg!(debug_assertions) {
+            "ws://localhost:3001/ws"
+        } else {
+            panic!(
+                "FCK_BROKER_URL is unset, empty, or whitespace-only in a release build: \
+                 refusing to bake in the plaintext ws://localhost:3001/ws dev fallback. \
+                 Set FCK_BROKER_URL to the deployed broker, e.g. wss://chat.example.com/ws"
+            )
+        }
+    }
 };
 
 /// The base URL the SPA uses to resolve same-origin relative fetches
@@ -141,9 +188,26 @@ fn build_init_script() -> String {
     let public_base_url =
         serde_json::to_string(PUBLIC_BASE_URL).expect("public base URL is a finite string");
     let ice_servers: Vec<IceServer> = serde_json::from_str(ICE_SERVERS_JSON).unwrap_or_else(|e| {
+        // Never log the raw value: FCK_ICE_SERVERS carries static TURN
+        // username/credential pairs (the desktop shell has no runtime
+        // /ice-config minting, so unlike the web path these are long-lived
+        // secrets). This fires at app launch on the end-user's machine —
+        // build_init_script runs from tauri::Builder::setup — so the raw JSON
+        // would land in terminal scrollback / captured stderr. Content-free
+        // diagnostics only — error category, position, and byte length —
+        // enough to hint at a truncation/misquote problem without leaking
+        // credential material. The serde_json::Error Display string is
+        // deliberately NOT interpolated: for an `invalid type` error it
+        // embeds the offending JSON value verbatim, which here is the entire
+        // raw string including any TURN username/credential.
         eprintln!(
             "FCK_ICE_SERVERS must be a JSON array of {{ urls, username?, credential? }} objects, \
-             falling back to [] (loopback-only). Parse error: {e}; raw value: {ICE_SERVERS_JSON}"
+             falling back to [] (loopback-only). Parse error: category {:?} at line {} column {}; \
+             value length: {} bytes",
+            e.classify(),
+            e.line(),
+            e.column(),
+            ICE_SERVERS_JSON.len()
         );
         Vec::new()
     });
@@ -197,4 +261,34 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    // Pins the BROKER_URL resolution as compiled into this test binary. The
+    // test profile has debug_assertions on, so the dev fallback arm is the
+    // reachable one here; the release half of the split is proven by
+    // compilation itself — without a set (non-blank) FCK_BROKER_URL a
+    // release build fails at BROKER_URL's const panic, so there is no binary
+    // to test in that configuration.
+    use super::{broker_url_is_set, BROKER_URL};
+
+    #[test]
+    fn broker_url_resolution_matches_env() {
+        match option_env!("FCK_BROKER_URL") {
+            Some(url) if broker_url_is_set(url) => assert_eq!(BROKER_URL, url),
+            // Unset, empty, or whitespace-only (which all count as unset).
+            _ => assert_eq!(BROKER_URL, "ws://localhost:3001/ws"),
+        }
+    }
+
+    #[test]
+    fn whitespace_only_broker_url_counts_as_unset() {
+        assert!(!broker_url_is_set(""));
+        assert!(!broker_url_is_set(" "));
+        assert!(!broker_url_is_set(" \t\r\n"));
+        // The guard trims only to classify: a padded real URL stays set and
+        // BROKER_URL bakes the verbatim (untrimmed) value.
+        assert!(broker_url_is_set(" wss://chat.example.com/ws "));
+    }
 }
