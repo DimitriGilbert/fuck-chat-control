@@ -88,13 +88,21 @@ const CACHE_MAX_AGE_SECONDS = 30 * 60;
  * by design; without a limit a single host could mint unlimited (valid)
  * relay credentials. Capacity 20 with a refill of one token every 6 seconds
  * is far above any real client's needs (the browser caches each response for
- * CACHE_MAX_AGE_SECONDS) while capping abuse. Best-effort and in-memory: a
- * restart or multi-instance deployment resets/shards the counters, which the
- * coturn-side quotas (deploy/coturn/turnserver.conf) bound regardless.
+ * CACHE_MAX_AGE_SECONDS) while capping abuse. The table is bounded at
+ * RATE_TRACKER_MAX_IPS entries via least-recently-used eviction, so flooding
+ * distinct keys cannot flush honest clients' buckets (R5:F2). Best-effort and
+ * in-memory: a restart or multi-instance deployment resets/shards the
+ * counters, which the coturn-side quotas (deploy/coturn/turnserver.conf)
+ * bound regardless.
  */
 const RATE_BUCKET_CAPACITY = 20;
 const RATE_REFILL_INTERVAL_MS = 6_000;
-const RATE_TRACKER_MAX_IPS = 10_000;
+/**
+ * Exported (like the pure helpers below) so the unit suite can drive the
+ * bucket table to overflow deterministically instead of mirroring the bound
+ * as a magic number in the test.
+ */
+export const RATE_TRACKER_MAX_IPS = 10_000;
 
 interface RateBucket {
   tokens: number;
@@ -107,13 +115,25 @@ function consumeRateToken(ip: string, nowMs: number): boolean {
   const bucket = rateBuckets.get(ip);
   if (bucket === undefined) {
     if (rateBuckets.size >= RATE_TRACKER_MAX_IPS) {
-      // Cheap pruning: drop the whole table rather than growing unboundedly;
-      // abusers re-fill their entry on the next request.
-      rateBuckets.clear();
+      // R5:F2: evict the least-recently-used entry instead of clearing the
+      // whole table — `rateBuckets.clear()` here let an attacker flooding
+      // distinct keys reset every honest client's bucket to a full 20 tokens,
+      // flushing the limiter for everyone. Maps iterate in insertion order
+      // and every hit re-inserts its entry (the touch below), so the first
+      // key is the least recently used; evicting one entry per insert keeps
+      // the table capped at RATE_TRACKER_MAX_IPS with O(1) work per request.
+      const oldest = rateBuckets.keys().next();
+      if (!oldest.done) {
+        rateBuckets.delete(oldest.value);
+      }
     }
     rateBuckets.set(ip, { tokens: RATE_BUCKET_CAPACITY - 1, lastRefillMs: nowMs });
     return true;
   }
+  // LRU touch: re-insert the entry so the insertion order the eviction above
+  // relies on tracks recency, not just first-seen time.
+  rateBuckets.delete(ip);
+  rateBuckets.set(ip, bucket);
   const elapsed = nowMs - bucket.lastRefillMs;
   const refilled = Math.min(
     RATE_BUCKET_CAPACITY,
@@ -251,7 +271,20 @@ export default defineEventHandler((event): IceConfigResponse => {
   // credentials must not be scrappable at line rate; 429 tells honest clients
   // (whose cached response is still valid) to back off and denies bulk
   // minting to abusers.
-  const ip = getRequestIP(event, { xForwardedFor: true }) ?? "unknown";
+  //
+  // R5:F2: buckets are keyed on the SOCKET peer address only.
+  // X-Forwarded-For is deliberately ignored — `getRequestIP(event)` without
+  // `xForwardedFor` never reads the header. The leftmost XFF entry is
+  // client-controlled both behind appending proxies (Traefik/Dokploy append
+  // the real peer AFTER any client-supplied value, leaving the leftmost
+  // attacker-chosen) and under direct exposure (no proxy at all, the header
+  // is pure client input), so honoring it would let every request mint a
+  // fresh 20-token bucket and defeat the limit entirely. Trade-off: behind
+  // an appending reverse proxy all clients share the proxy's own address
+  // bucket — acceptable for this best-effort anonymous-route limiter (a
+  // shared 429 still leaves honest clients' cached responses valid, and the
+  // coturn-side quotas bound abuse regardless).
+  const ip = getRequestIP(event) ?? "unknown";
   if (!consumeRateToken(ip, Date.now())) {
     setHeader(event, "Cache-Control", "no-store");
     setResponseStatus(event, 429);

@@ -15,6 +15,32 @@ services:
     env_file:
       - path: apps/web/.env
         required: false
+    environment:
+      # R5/F3: mirror coturn's passthrough below — /ice-config mints TURN
+      # credentials from the same TURN_SHARED_SECRET coturn's entrypoint
+      # validates, so both containers MUST resolve identical values. Without
+      # this block an operator exporting the TURN config via Dokploy (or any
+      # other runtime injector) instead of apps/web/.env leaves web TURN-less,
+      # or minting from a divergent .env secret that coturn rejects while
+      # /healthz stays green. compose `environment:` overrides `env_file:` —
+      # with the passthrough on BOTH services an exported value wins over .env
+      # identically in each. The inverse also holds: a value set ONLY in
+      # `env_file:` (apps/web/.env) is discarded for these vars, because the
+      # `environment:` entry (empty when nothing is exported) takes
+      # precedence — configuring them means exporting them in the deployment
+      # environment, a project-root .env, or --env-file (interpolation never
+      # reads service env_file files). `:-` (NOT `:?`) keeps this a pure
+      # passthrough: compose NEVER fails on unset vars; /healthz is the
+      # runtime authority that fails 503 on a HALF-set TURN config, but
+      # CANNOT distinguish all-TURN-vars-clobbered-to-empty (the .env-only
+      # failure mode above) from a legitimate no-relay deploy — both render
+      # as unset. Var names match packages/env/src/server.ts exactly;
+      # TURN_EXTERNAL_IP is coturn-only — web never reads it.
+      STUN_URL: ${STUN_URL:-}
+      TURN_URL: ${TURN_URL:-}
+      TURN_TLS_URL: ${TURN_TLS_URL:-}
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:-}
+      TURN_REALM: ${TURN_REALM:-}
     healthcheck:
       # R7/F5: probe the dedicated /healthz route, not the prerendered SPA
       # shell at `/`. /healthz fails (503) when the TURN configuration is

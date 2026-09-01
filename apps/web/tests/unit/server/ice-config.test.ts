@@ -1,3 +1,4 @@
+import type { H3Event } from "nitro/h3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildIceServers, mintTurnCredentials } from "@/server/ice-config";
@@ -184,5 +185,129 @@ describe("half-set TURN env — startup warning", () => {
     await import("@/server/ice-config");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]![0]).toMatch(/TURN_URL nor TURN_TLS_URL is configured/);
+  });
+});
+
+/**
+ * R5:F2: the limiter must key buckets on the SOCKET peer address — never on
+ * X-Forwarded-For — and an overflow of the bucket table must evict the
+ * least-recently-used entry instead of flushing every honest client's bucket.
+ *
+ * Each case resets the module registry and dynamically re-imports the route
+ * so the module-scope `rateBuckets` table starts empty (the healthz suite's
+ * importFresh pattern). The fake event exercises the real h3 helpers:
+ * `getRequestIP(event)` reads `event.req.context.clientAddress` (the
+ * transport-level socket peer), `setHeader`/`setResponseStatus` write
+ * `event.res`, and the client-supplied `x-forwarded-for` REQUEST header is
+ * present so any regression back to leftmost-XFF keying fails these tests —
+ * each spoofed value would mint a fresh 20-token bucket and the 429
+ * assertions below would observe 200s instead.
+ */
+describe("rate limiting — socket-peer keying + LRU-bounded table (R5:F2)", () => {
+  interface FakeResponse {
+    status: number;
+    headers: Headers;
+  }
+
+  type IceConfigRoute = typeof import("@/server/ice-config");
+
+  function fakeEvent(
+    peerAddress: string,
+    forwardedFor?: string,
+  ): { event: H3Event; res: FakeResponse } {
+    const reqHeaders = new Headers();
+    if (forwardedFor !== undefined) {
+      reqHeaders.set("x-forwarded-for", forwardedFor);
+    }
+    const res: FakeResponse = { status: 200, headers: new Headers() };
+    const event = {
+      req: { headers: reqHeaders, context: { clientAddress: peerAddress } },
+      res,
+    } as unknown as H3Event;
+    return { event, res };
+  }
+
+  async function importFreshRoute(): Promise<IceConfigRoute> {
+    vi.resetModules();
+    return import("@/server/ice-config");
+  }
+
+  function respond(
+    handler: IceConfigRoute["default"],
+    peerAddress: string,
+    forwardedFor?: string,
+  ): { status: number; body: ReturnType<IceConfigRoute["default"]>; res: FakeResponse } {
+    const { event, res } = fakeEvent(peerAddress, forwardedFor);
+    const body = handler(event);
+    return { status: res.status, body, res };
+  }
+
+  it("rotating attacker-chosen X-Forwarded-For values from ONE socket peer hit ONE bucket and get limited", async () => {
+    const route = await importFreshRoute();
+    const peer = "203.0.113.7";
+    // 20 requests, each spoofing a DIFFERENT leftmost XFF value — the exact
+    // posture that minted a fresh 20-token bucket per request under the old
+    // leftmost-XFF keying. All 20 must drain the peer's single bucket.
+    for (let i = 0; i < 20; i += 1) {
+      const r = respond(route.default, peer, `198.51.100.${i + 1}, 10.0.0.99`);
+      expect(r.status).toBe(200);
+    }
+    // 21st from the same peer — even with yet another fresh spoofed value —
+    // is a 429 carrying the empty-list body and a no-store cache directive.
+    const limited = respond(route.default, peer, "192.0.2.222");
+    expect(limited.status).toBe(429);
+    expect(limited.body).toEqual({ iceServers: [] });
+    expect(limited.res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("a request with NO X-Forwarded-For shares its socket peer's bucket", async () => {
+    const route = await importFreshRoute();
+    const peer = "198.18.0.1";
+    for (let i = 0; i < 20; i += 1) {
+      expect(respond(route.default, peer, `203.0.113.${i + 1}`).status).toBe(200);
+    }
+    // Header absent entirely: same socket peer, same drained bucket.
+    expect(respond(route.default, peer).status).toBe(429);
+  });
+
+  it("distinct socket peers get distinct buckets; an XFF naming a limited peer inherits nothing", async () => {
+    const route = await importFreshRoute();
+    const a = "198.51.100.10";
+    const b = "198.51.100.11";
+    for (let i = 0; i < 20; i += 1) {
+      expect(respond(route.default, a, `203.0.113.${i + 1}`).status).toBe(200);
+    }
+    expect(respond(route.default, a).status).toBe(429);
+    // Peer B dials in claiming (via XFF) to BE the limited peer A — it must
+    // not inherit A's drained bucket, and A's exhaustion must not limit B.
+    expect(respond(route.default, b, a).status).toBe(200);
+  });
+
+  it("tracker overflow evicts the LRU entry — other IPs' partial buckets survive (no flush)", async () => {
+    const route = await importFreshRoute();
+    const max = route.RATE_TRACKER_MAX_IPS;
+    // One filler peer per table entry, leaving room for the victim below.
+    // fillerPeer(0) is the first-inserted and never touched again, so it is
+    // the least-recently-used entry at overflow time.
+    const fillerPeer = (i: number): string =>
+      `10.${Math.floor(i / 65_536) % 256}.${Math.floor(i / 256) % 256}.${i % 256}`;
+    for (let i = 0; i < max - 1; i += 1) {
+      respond(route.default, fillerPeer(i));
+    }
+    // Victim brings the table exactly to capacity and spends one token
+    // (19 remain).
+    expect(respond(route.default, "198.51.100.50").status).toBe(200);
+    // The overflow: one more DISTINCT peer. The old `rateBuckets.clear()`
+    // flushed the whole table here — resetting the victim's bucket to a full
+    // 20 tokens; LRU eviction must evict fillerPeer(0) instead.
+    expect(respond(route.default, "198.51.100.99").status).toBe(200);
+    // Victim's bucket survived the overflow with its 19 remaining tokens:
+    // exactly 19 more allows, then 429. A flushed table would allow a 20th.
+    for (let i = 0; i < 19; i += 1) {
+      expect(respond(route.default, "198.51.100.50").status).toBe(200);
+    }
+    expect(respond(route.default, "198.51.100.50").status).toBe(429);
+    // The eviction hit the LRU entry (fillerPeer(0)), which starts fresh.
+    expect(respond(route.default, fillerPeer(0)).status).toBe(200);
   });
 });

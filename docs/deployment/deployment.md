@@ -205,11 +205,15 @@ only, not published on a host interface) and sets `restart: unless-stopped`.
 
 ### Health check
 
-The compose healthcheck hits `http://localhost:9000/` every 10 seconds and
-expects a 2xx. The `GET /` is the health endpoint: it returns the SSR'd
-landing page with HTTP 200 and produces no application-level chat or broker
-logs. There is no separate `/healthz`; `/` is it. coturn's healthcheck is a
-TCP connect on 3478.
+The compose healthcheck hits `http://localhost:9000/healthz` every 10 seconds
+and expects a 2xx. `/healthz` is a dedicated route
+(`apps/web/src/server/healthz.ts`), not the SSR'd landing page: it returns 503
+when the TURN configuration is half-set (URL without shared secret, or secret
+without URL) and mints one throwaway TURN credential when a secret is
+configured, so the HMAC path `/ice-config` depends on is exercised. A
+deployment running without TURN at all stays healthy; the broker WebSocket is
+not probed separately (same process, same event loop). coturn's healthcheck is
+a TCP connect on 3478.
 
 ### Production environment variables
 
@@ -235,13 +239,22 @@ which mints per-request TURN credentials from the server-held
 
 Validation is skipped when `SKIP_ENV_VALIDATION` is set (the Dockerfile sets
 it during the build phase, then unsets it). At runtime `NODE_ENV=production`
-is expected and `CORS_ORIGIN` should be set to your deployed origin. If you
-supply an `apps/web/.env` file, Compose loads it; otherwise export the
-variables in your deployment environment.
+is expected and `CORS_ORIGIN` should be set to your deployed origin. The TURN
+variables (`STUN_URL`, `TURN_URL`, `TURN_TLS_URL`, `TURN_SHARED_SECRET`,
+`TURN_REALM`) must be exported in the deployment environment
+(Dokploy/runtime injector), a project-root `.env`, or `--env-file`: both
+services pass them through an `environment:` block, which overrides
+`env_file:` entries (an empty passthrough value wins over a set
+`apps/web/.env` value), and Compose interpolation never reads service
+`env_file:` files. Values set only in `apps/web/.env` are therefore silently
+discarded for these variables — `apps/web/.env` still works for variables the
+passthrough does not cover (e.g. `CORS_ORIGIN`).
 
-\* `TURN_SHARED_SECRET` must match the value coturn is configured with
-(passed to the `coturn` service through the same `apps/web/.env` file or a
-compose `environment:` block). It is read server-side only — the
+\* `TURN_SHARED_SECRET` must match the value coturn is configured with (both
+services receive it through their compose `environment:` passthrough, which
+resolves from the deployment environment, a project-root `.env`, or
+`--env-file` — not from `apps/web/.env`, whose entry the passthrough
+overrides with empty). It is read server-side only — the
 `/ice-config` route uses it to compute per-request HMAC-SHA1 credentials and
 never serializes it into a response or log. The empty-or-set guard on the
 coturn side lives in `deploy/coturn/entrypoint.sh`, which exits if the
@@ -364,11 +377,15 @@ Before going live:
    uses `expose:`, not `ports:`.
 2. If peers will be on the open internet, configure coturn in the same
    `docker compose up` deployment:
-   - Generate a strong `TURN_SHARED_SECRET` and put it in `apps/web/.env`
-     (used by both the `web` and `coturn` services).
-   - Set `STUN_URL`, `TURN_URL` (and optionally `TURN_TLS_URL`) in
-     `apps/web/.env` to the public host:port clients will reach coturn on
-     (e.g. `stun:turn.example.com:3478`).
+   - Generate a strong `TURN_SHARED_SECRET` and export it where Compose
+     interpolation reads it: the deployment environment
+     (Dokploy/runtime injector), a project-root `.env`, or `--env-file`.
+     Both the `web` and `coturn` services receive it through their
+     `environment:` passthrough — a value set only in `apps/web/.env` is
+     overridden to empty and silently discarded.
+   - Set `STUN_URL`, `TURN_URL` (and optionally `TURN_TLS_URL`) the same way
+     to the public host:port clients will reach coturn on (e.g.
+     `stun:turn.example.com:3478`).
    - Publish the coturn ports on the host firewall: `3478/udp`, `3478/tcp`,
      `5349/tcp` (if using `turns:`), and the full relay range
      `49152-49172/udp`. These are already in `docker-compose.yml`'s `ports:`
@@ -377,8 +394,8 @@ Before going live:
 3. Disable reverse-proxy access logs and cap container log retention.
 4. Set `CORS_ORIGIN` to your deployed origin and `NODE_ENV=production`.
 5. `docker compose up -d --build` and confirm both healthchecks return
-   healthy (the `web` service probes `GET /`, the `coturn` service probes a
-   TCP connect on 3478).
+   healthy (the `web` service probes `GET /healthz`, the `coturn` service
+   probes a TCP connect on 3478).
 6. Verify the broker is reachable over WSS by opening the deployed app and
    creating an invitation; the broker must accept the `wss://<host>/ws`
    upgrade.
