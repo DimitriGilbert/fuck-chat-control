@@ -1007,7 +1007,22 @@ export class ConversationOrchestrator {
   }
 
   private async verifyPeerAndComplete(remoteSignature: Signature): Promise<void> {
+    // R2/F1: arm the re-entrancy latch as the FIRST synchronous statement,
+    // BEFORE any await. attachTransport dispatches every inbound message via
+    // `void this.handleInbound(bytes).catch(...)` with no serialization, and
+    // an async body runs synchronously up to its first await — so a duplicated
+    // SignatureMessage spawns two coroutines that BOTH pass the check below
+    // before either reaches an await. With the latch armed only after the
+    // verifyTranscript/getPeerIdentity awaits (its old position), both
+    // coroutines ran to completion: two FrameSender/FrameReceiver pairs (the
+    // first receiver's setInterval sweep leaks forever — teardownSession only
+    // tears down the currently-assigned receiver), double
+    // onSafetyNumber/storePeerIdentity, and in PAKE mode a duplicate SPAKE2
+    // share that aborts the honest peer's session. The latch is reset ONLY by
+    // teardownSession; the superseded bail-outs below must NOT reset it —
+    // after a teardown a newer handshake may already have re-armed it.
     if (this.handshakeCompleting) return;
+    this.handshakeCompleting = true;
     if (
       this.localHello === null ||
       this.remoteHello === null ||
@@ -1021,6 +1036,33 @@ export class ConversationOrchestrator {
         "signature arrived before the local hello was generated",
       );
     }
+
+    // R2/F2: capture the handshake generation at entry, mirroring the
+    // beginHandshake/handleInbound discipline. teardownSession bumps NEITHER
+    // the generation nor any explicit torn-down flag, and it does NOT reject
+    // the non-resolver awaits below (verifyTranscript, getPeerIdentity,
+    // createPakeSession, pakeFinish's inner crypto, deriveSessionKeys,
+    // computeSafetyNumber, storePeerIdentity) — they resolve normally into a
+    // coroutine that must not resume against torn-down state. Every
+    // handshakeSuperseded re-check bails out SILENTLY: no state mutation, no
+    // failHandshake, no onError. This closes both verified failure modes:
+    // (a) resuming into `toFrameTransport(this.transport)` with a nulled
+    //     transport — the FrameSender constructor's setDrainListener would
+    //     throw a raw TypeError into failHandshake, emitting a spurious
+    //     post-leave onError and latching handshakeError so failHandshake's
+    //     guard swallows the next genuine error;
+    // (b) teardown → retry() → re-attach while parked: this.transport is then
+    //     the NEW transport, and without the generation check the stale
+    //     coroutine would wire OLD session keys over it, assign the framing
+    //     fields, and kill the fresh session when setState(Connected) throws
+    //     InvalidTransitionError into failHandshake.
+    // The transport/ephemeral null-checks cover a teardown not (yet) followed
+    // by a re-attach; the generation check covers the re-attached case where
+    // both fields are non-null again but belong to a newer handshake. It also
+    // guards the deriveSessionKeys call, which reads this.ephemeral.privateKey
+    // — zeroized in place and then nulled by teardownSession while this
+    // coroutine is parked.
+    const generation = this.handshakeGeneration;
 
     const remoteIdentityKey = this.remoteHello.identityPublicKey;
     const remoteEphemeralKey = this.remoteHello.ephemeralPublicKey;
@@ -1043,6 +1085,11 @@ export class ConversationOrchestrator {
 
     // Signature verification against the transcript.
     const ok = await verifyTranscript(remoteIdentityKey, remoteSignature, this.transcript);
+    // R2/F2 re-check: runs BEFORE the !ok branch so a teardown during the
+    // verify await never surfaces a post-leave HandshakeSignatureMismatch
+    // onError (and never enters Verifying from a state the teardown already
+    // left — Disconnected → Verifying is an illegal transition).
+    if (this.handshakeSuperseded(generation)) return;
     if (!ok) {
       throw new OrchestratorError(
         OrchestratorErrorCode.HandshakeSignatureMismatch,
@@ -1058,6 +1105,10 @@ export class ConversationOrchestrator {
 
     // TOFU: first contact stores, resume must match.
     const existing = await this.repository.getPeerIdentity(this.conversation);
+    // R2/F2 re-check: repository awaits are never rejected by teardownSession;
+    // without this the coroutine would resume the TOFU comparison and every
+    // later stage against a torn-down session.
+    if (this.handshakeSuperseded(generation)) return;
     if (existing !== null) {
       const sameKey = ctEqual(existing.publicKey, remoteIdentityKey);
       if (!sameKey) {
@@ -1067,8 +1118,6 @@ export class ConversationOrchestrator {
         );
       }
     }
-
-    this.handshakeCompleting = true;
 
     // If this session negotiated PAKE, run the SPAKE2 exchange over the data
     // channel before deriving session keys. The shared secret is mixed into the
@@ -1091,6 +1140,23 @@ export class ConversationOrchestrator {
       const role = pakeRole;
       const sideByte = this.pakeLocalSideByte;
       const session = await createPakeSession(code, role);
+      // R2/F2 re-check: bail BEFORE assigning this.pakeSession or sending the
+      // share — a teardown during the wasm/crypto await must not resurrect
+      // handshake state or emit bytes on a dead transport.
+      if (this.handshakeSuperseded(generation)) {
+        // R1/F3 hygiene: this coroutine owns `session` but never assigned it
+        // to this.pakeSession, so teardownSession cannot reach it — dispose of
+        // it here instead: wipe the JS-side share copy in place (the
+        // teardownSession convention) and free the wasm state via
+        // PakeStateHandle.free(), the wrapper's only dispose surface. The
+        // share is public material (it was about to cross the wire in
+        // cleartext), so this is hygiene, not secrecy.
+        if (session.state !== null) {
+          session.state.outgoing_share.fill(0);
+          session.state.free();
+        }
+        return;
+      }
       this.pakeSession = session;
       // Send the local SPAKE2 share to the peer (cleartext, as with the Hello).
       const localShare = pakeOutgoingShare(session);
@@ -1098,6 +1164,18 @@ export class ConversationOrchestrator {
       // Await the peer's share; handlePakeShare stashes it and completes the
       // exchange when both shares are present.
       pakeSecret = await this.awaitPakeFinish();
+      // R2/F2 re-check: awaitPakeFinish REJECTS with PakeError(Cancelled) when
+      // teardownSession rejects a parked share resolver (the H1 contract), but
+      // when the peer's share was already stashed the coroutine instead parks
+      // in pakeFinish's own crypto await, which teardown does NOT reject — this
+      // re-check covers that window. Wipe the derived secret on the bail path
+      // too: the R1/F3 try/finally below is never reached.
+      if (this.handshakeSuperseded(generation)) {
+        if (pakeSecret !== null) {
+          zeroize(pakeSecret);
+        }
+        return;
+      }
     }
 
     // Derive session keys. For a Pake session the SPAKE2 shared secret is
@@ -1121,7 +1199,15 @@ export class ConversationOrchestrator {
         // traffic keys. pakeRole is guaranteed non-null here: the earlier guard
         // in the Pake block above threw if it was null, and pakeSecret is null
         // entirely for SafetyNumberOnly sessions (this branch is skipped).
-        await this.runPakeConfirmation(pakeSecret, pakeRole as Role);
+        await this.runPakeConfirmation(pakeSecret, pakeRole as Role, generation);
+        // R2/F2 re-check: runPakeConfirmation guards its own pre-park crypto
+        // awaits internally (see below), but its trailing tag-derivation await
+        // (the expectedPeerTag computation) is still not rejected by teardown.
+        // The bail must land BEFORE deriveSessionKeys reads
+        // this.ephemeral.privateKey, which teardownSession zeroized in place
+        // and then nulled. The return still flows through the finally below,
+        // preserving the R1/F3 wipe.
+        if (this.handshakeSuperseded(generation)) return;
       }
       sessionKeys = await deriveSessionKeys({
         localEcdhPrivateKey: this.ephemeral.privateKey,
@@ -1142,6 +1228,9 @@ export class ConversationOrchestrator {
         pakeSecret = null;
       }
     }
+    // R2/F2 re-check: keys derived by a superseded coroutine belong to no
+    // session — bail before mirroring the key or mutating any session state.
+    if (this.handshakeSuperseded(generation)) return;
     // CR-15: mirror the derived send key for the test-only seam. See the field
     // docstring on `derivedSendKeyForTest` — this is NOT read by any production
     // codepath; it exists so integration tests can assert the PAKE secret was
@@ -1153,12 +1242,23 @@ export class ConversationOrchestrator {
       this.identity.publicKey,
       remoteIdentityKey,
     );
+    // R2/F2 re-check: the last crypto await — bail before publishing the
+    // safety number or writing the TOFU identity for a torn-down session.
+    if (this.handshakeSuperseded(generation)) return;
     this.safetyNumberValue = safetyNumber;
 
     // TOFU: persist the peer identity on first contact (fingerprint = safety number).
     if (existing === null) {
       await this.repository.storePeerIdentity(this.conversation, safetyNumber, remoteIdentityKey);
     }
+    // R2/F2 re-check (final): the FrameSender construction below calls
+    // `toFrameTransport(this.transport)`, whose setDrainListener throws a raw
+    // TypeError on a nulled transport — the post-leave spurious-onError path
+    // (a). This is the last await before framing is wired, so it is also what
+    // stops a stale coroutine from wiring OLD keys over a NEW transport after
+    // teardown → retry() → re-attach: the re-attach bumps the generation and
+    // this check fires before any framing is constructed (b).
+    if (this.handshakeSuperseded(generation)) return;
 
     // Construct the framing layer and re-wire inbound delivery.
     const sender = new FrameSender({
@@ -1217,6 +1317,31 @@ export class ConversationOrchestrator {
 
     this.setState(ConnectionState.Connected);
     this.handlers.onSafetyNumber?.(safetyNumber, this.safetyNumberVerified);
+  }
+
+  /**
+   * R2/F2: true when the {@link verifyPeerAndComplete} coroutine that captured
+   * `generation` at entry has been superseded and must bail out silently.
+   * Two disjoint conditions, both caused by teardownSession running while the
+   * coroutine was parked on one of the awaits that teardown does not reject:
+   *
+   * 1. `generation !== this.handshakeGeneration` — the teardown was followed
+   *    by retry() + a fresh attachTransport (the only generation-bumping call,
+   *    reachable only from Waiting/Signaling, i.e. only after a teardown).
+   *    this.transport/this.ephemeral are non-null again but belong to the NEW
+   *    handshake; resuming would wire stale keys over the new session.
+   * 2. `this.transport === null || this.ephemeral === null` — teardown ran
+   *    with no re-attach yet; teardownSession nulled both (zeroizing the
+   *    ephemeral private key in place first).
+   *
+   * Callers must `return` without touching state, without throwing, and
+   * WITHOUT resetting the handshakeCompleting latch — a newer coroutine may
+   * already own it (teardownSession reset it on the teardown path).
+   */
+  private handshakeSuperseded(generation: number): boolean {
+    return (
+      generation !== this.handshakeGeneration || this.transport === null || this.ephemeral === null
+    );
   }
 
   /**
@@ -1352,13 +1477,40 @@ export class ConversationOrchestrator {
    * tag, and verifies it equals the locally-computed peer-role tag. A mismatch
    * proves a wrong-code attack (the SPAKE2 secrets diverged) and the handshake
    * aborts with {@link PakeErrorCode.Mismatch} — there is no path to Connected.
+   *
+   * R2/F2 (generation-guarded): `generation` is the caller's captured handshake
+   * generation. The pre-park crypto awaits (the transcript-hash sha256 + the
+   * local tag derivation) are NOT rejected by teardownSession, so a leave()
+   * landing inside them resumes this coroutine on a torn-down orchestrator.
+   * Without the re-checks below it would send the confirm on a dead (or, after
+   * a re-attach, FOREIGN) transport and then park in awaitPakeConfirmBounded —
+   * installing pakeConfirmResolve/pakeConfirmReject + the handshake-timeout
+   * timer on the CURRENT (possibly fresh) session. The timer's Timeout
+   * rejection later reaches failHandshake as a spurious onError long after the
+   * teardown, can tear down a FRESH re-attached session, and its callback
+   * nulls the fresh session's resolver fields. Both re-checks bail SILENTLY
+   * (return, no state change), mirroring the share-path guards above.
    */
-  private async runPakeConfirmation(pakeSecret: Uint8Array, localRole: Role): Promise<void> {
+  private async runPakeConfirmation(
+    pakeSecret: Uint8Array,
+    localRole: Role,
+    generation: number,
+  ): Promise<void> {
+    // R2/F2 entry bail — before the transcript invariant below: a torn-down
+    // session has a null transcript, and throwing Abort there would surface a
+    // spurious post-teardown onError instead of the required silent bail.
+    if (this.handshakeSuperseded(generation)) return;
     if (this.transcript === null) {
       throw new PakeError(PakeErrorCode.Abort, "runPakeConfirmation: no transcript");
     }
     const transcriptHash = await sha256(encodeTranscript(this.transcript));
     const localTag = await derivePakeConfirmationTag(pakeSecret, transcriptHash, localRole);
+    // R2/F2 re-check after the pre-park crypto awaits — LOAD-BEARING position:
+    // this must land BEFORE the outbound confirm is sent and BEFORE
+    // awaitPakeConfirmBounded installs pakeConfirmResolve/pakeConfirmReject and
+    // arms pakeConfirmTimeoutHandle. A stale install is never torn down by the
+    // teardown that already ran, so its timer fires into failHandshake later.
+    if (this.handshakeSuperseded(generation)) return;
     const localSideByte = localRole === Role.Initiator ? PAKE_ROLE_A : PAKE_ROLE_B;
     this.transport?.send(encodePakeConfirm(localSideByte, localTag));
     // Await the peer's confirmation tag, bounded by HANDSHAKE_TIMEOUT_MS so a
