@@ -24,6 +24,7 @@ import {
   base64ToBytes,
   hexToBytes,
 } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
+import { messageRecordAad } from "@fuck-eu-chat-control/chat-runtime/store/message-record-aad";
 import {
   MessageDirection,
   MESSAGE_DIRECTION_VALUES,
@@ -59,7 +60,12 @@ import type {
  *     never stored in the clear: {@link appendMessage} encrypts it with the
  *     at-rest key (AES-256-GCM) exactly as the in-memory repo does, and
  *     {@link getMessages} decrypts on read. The database at rest holds only
- *     ciphertext + nonce.
+ *     ciphertext + nonce. R1:F2: since the record-binding change the GCM seal
+ *     carries the row's conversationId + direction as AAD (see
+ *     `messageRecordAad`), so a stored (nonce, ciphertext) pair relocated to
+ *     another conversation — or relabeled sent/received — fails
+ *     authentication; rows sealed before the binding still decrypt via
+ *     decryptAtRest's legacy empty-AAD fallback.
  *
  * The repo is a drop-in for {@link InMemoryConversationRepository}: it keeps
  * the same TOFU peer-pinning guard, the same idempotent auth-failed flag, and
@@ -351,7 +357,12 @@ export class BrowserDbConversationRepository
     const messageId = messageIdFromOptions(options);
     const atRestKey = this.requireKey();
     const encoded = new TextEncoder().encode(plaintext);
-    const sealed = await encryptAtRest(atRestKey, encoded);
+    // R1:F2: bind the sealed body to this row's conversation + direction via
+    // GCM AAD, so a stored (nonce, ciphertext) pair cannot be relocated to
+    // another conversation or relabeled without failing authentication. Rows
+    // sealed before the binding still decrypt via decryptAtRest's legacy
+    // empty-AAD fallback.
+    const sealed = await encryptAtRest(atRestKey, encoded, messageRecordAad(id, direction));
     const row: MessageRow = {
       id: messageId,
       conversationId: convoKey,
@@ -392,7 +403,15 @@ export class BrowserDbConversationRepository
     let firstFailure: unknown = null;
     for (const row of rows) {
       try {
-        const plaintext = await this.decryptMessage(atRestKey, row);
+        // R1:F2: verify the record's conversation + direction binding. Rows
+        // were filtered by this conversation's key, so the queried id IS the
+        // row's conversation; rows sealed before the binding existed decrypt
+        // via decryptAtRest's legacy empty-AAD fallback.
+        const plaintext = await this.decryptMessage(
+          atRestKey,
+          row,
+          messageRecordAad(id, row.direction),
+        );
         out.push({
           id: row.id,
           conversationId: cloneConversationId(id),
@@ -750,12 +769,17 @@ export class BrowserDbConversationRepository
     };
   }
 
-  private async decryptMessage(atRestKey: AtRestKey, row: MessageRow): Promise<string> {
+  private async decryptMessage(
+    atRestKey: AtRestKey,
+    row: MessageRow,
+    aad: Uint8Array,
+  ): Promise<string> {
     try {
       const plaintext = await decryptAtRest(
         atRestKey,
         base64ToBytes(row.nonce),
         base64ToBytes(row.ciphertext),
+        aad,
       );
       return new TextDecoder().decode(plaintext);
     } catch (err) {

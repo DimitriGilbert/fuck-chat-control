@@ -9,7 +9,7 @@ import { Role } from "../protocol/types";
 
 import { PakeError, PakeErrorCode } from "./errors";
 import { dynamicImport } from "./pake-loader";
-import { hmacSha256, hkdfSha256 } from "./primitives";
+import { hmacSha256, hkdfSha256, zeroize } from "./primitives";
 
 /**
  * The lazy-loaded WASM module surface, declared locally so a SafetyNumberOnly
@@ -200,7 +200,13 @@ export async function derivePakeConfirmationTag(
   const message = new Uint8Array(1 + transcriptHash.length);
   message[0] = roleByte;
   message.set(transcriptHash, 1);
-  return hmacSha256(confirmKey, message);
+  const tag = await hmacSha256(confirmKey, message);
+  // R1/F3: the confirmation key has been consumed by the HMAC above (which
+  // copies its key input), so wipe it — the SPAKE2-derived key material must
+  // not linger on the heap after the tag is returned. It is function-local and
+  // never escapes, so this is its only wipe site.
+  zeroize(confirmKey);
+  return tag;
 }
 
 /**

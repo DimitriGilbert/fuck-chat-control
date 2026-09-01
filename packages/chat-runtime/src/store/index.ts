@@ -25,6 +25,8 @@ export type {
 
 export { InMemoryConversationRepository } from "./in-memory-repo";
 
+export { messageRecordAad } from "./message-record-aad";
+
 export { LockableRepository } from "./lockable-repo";
 
 export { exportBundle, importBundle, ImportMode } from "./export-bundle";

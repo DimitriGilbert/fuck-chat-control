@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createCollection, createTransaction, localOnlyCollectionOptions } from "@tanstack/db";
 import type { Collection } from "@tanstack/db";
-import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { encryptAtRest, generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { bytesToBase64 } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
@@ -553,5 +554,82 @@ describe("BrowserDbConversationRepository.close (OPFS handle release, R5:F3 / R6
     await closing;
     expect(close).toHaveBeenCalledTimes(1);
     insertSpy.mockRestore();
+  });
+});
+
+describe("BrowserDbConversationRepository — at-rest record binding AAD (R1:F2)", () => {
+  it("skips a row whose sealed pair was relocated from another conversation", async () => {
+    const { repo, messages } = makeRepoWithCollections();
+    const source = conversationId(40);
+    const target = conversationId(41);
+    await repo.createConversation(source, 1);
+    await repo.createConversation(target, 2);
+    await repo.appendMessage(source, "cut and paste me", MessageDirection.Sent, 10);
+    await repo.appendMessage(target, "native row", MessageDirection.Sent, 20);
+    const moved = repo
+      .serialize()
+      .messages.flatMap((group) => group.messages)
+      .find((m) => m.timestamp === 10);
+    expect(moved).toBeDefined();
+
+    // Store-write attacker overwrites the row's metadata column so the sealed
+    // pair now claims to belong to the target conversation. The GCM tag was
+    // computed over the SOURCE conversation, so verification (and the legacy
+    // empty-AAD fallback) fail and the row is skipped per R6/F3 resilience.
+    messages.update((moved as { id: string }).id, (draft) => {
+      draft.conversationId = idKeyOf(target);
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const list = await repo.getMessages(target);
+      expect(list.map((m) => m.text)).toEqual(["native row"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("skips a row whose direction was relabeled (provenance flip)", async () => {
+    const { repo, messages } = makeRepoWithCollections();
+    const id = conversationId(42);
+    await repo.createConversation(id, 1);
+    const sent = await repo.appendMessage(id, "outbox", MessageDirection.Sent, 10);
+    await repo.appendMessage(id, "inbox", MessageDirection.Received, 20);
+
+    // Relabel the sealed pair as received mail: the AAD bound "sent", so the
+    // row no longer authenticates and must be skipped.
+    messages.update(sent.id, (draft) => {
+      draft.direction = MessageDirection.Received;
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const list = await repo.getMessages(id);
+      expect(list.map((m) => m.text)).toEqual(["inbox"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still decrypts legacy rows sealed before the AAD binding (migration)", async () => {
+    const { repo, atRestKey, messages } = makeRepoWithCollections();
+    const id = conversationId(43);
+    await repo.createConversation(id, 1);
+    // Seal exactly as pre-R1:F2 code did (no AAD) and inject the row directly
+    // into the collection, simulating a record persisted by an older build.
+    const sealed = await encryptAtRest(atRestKey, new TextEncoder().encode("legacy row"));
+    messages.insert({
+      id: "legacy-row",
+      conversationId: idKeyOf(id),
+      direction: MessageDirection.Received,
+      timestamp: 5,
+      nonce: bytesToBase64(sealed.nonce),
+      ciphertext: bytesToBase64(sealed.ciphertext),
+    });
+
+    const list = await repo.getMessages(id);
+    expect(list.map((m) => m.text)).toEqual(["legacy row"]);
   });
 });

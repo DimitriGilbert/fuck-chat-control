@@ -82,6 +82,57 @@ describe("encryptAtRest / decryptAtRest (AES-256-GCM at-rest)", () => {
   });
 });
 
+describe("encryptAtRest / decryptAtRest record-binding AAD (R1:F2)", () => {
+  // Stand-ins for two different (conversationId, direction) bindings; the
+  // canonical record encoding lives in store/message-record-aad.ts and is
+  // covered by the store tests.
+  const AAD_A = new Uint8Array([0x01, 0xaa, 0xbb]);
+  const AAD_B = new Uint8Array([0x01, 0xcc, 0xdd]);
+
+  it("round-trips plaintext under the caller-supplied AAD", async () => {
+    const key = generateAtRestKey();
+    const enc = await encryptAtRest(key, PLAINTEXT, AAD_A);
+    const dec = await decryptAtRest(key, enc.nonce, enc.ciphertext, AAD_A);
+    expect(bytesEqual(dec, PLAINTEXT)).toBe(true);
+  });
+
+  it("a record sealed under one AAD fails authentication under another (relocation)", async () => {
+    const key = generateAtRestKey();
+    const enc = await encryptAtRest(key, PLAINTEXT, AAD_A);
+    await expect(decryptAtRest(key, enc.nonce, enc.ciphertext, AAD_B)).rejects.toMatchObject({
+      code: CryptoErrorCode.AuthenticationFailed,
+    });
+  });
+
+  it("the fallback is one-directional: an AAD-sealed record fails WITHOUT the AAD", async () => {
+    const key = generateAtRestKey();
+    const enc = await encryptAtRest(key, PLAINTEXT, AAD_A);
+    // No `aad` is the strict legacy path (empty AAD only) — an AAD-sealed
+    // record must not decrypt through it, otherwise the binding would be a
+    // no-op for any caller that simply omits the parameter.
+    await expect(decryptAtRest(key, enc.nonce, enc.ciphertext)).rejects.toMatchObject({
+      code: CryptoErrorCode.AuthenticationFailed,
+    });
+  });
+
+  it("a legacy empty-AAD record still decrypts when an AAD is supplied (migration)", async () => {
+    const key = generateAtRestKey();
+    const legacy = await encryptAtRest(key, PLAINTEXT);
+    const dec = await decryptAtRest(key, legacy.nonce, legacy.ciphertext, AAD_A);
+    expect(bytesEqual(dec, PLAINTEXT)).toBe(true);
+  });
+
+  it("the legacy fallback does not swallow corruption: a tampered legacy record still fails", async () => {
+    const key = generateAtRestKey();
+    const legacy = await encryptAtRest(key, PLAINTEXT);
+    const tampered = new Uint8Array(legacy.ciphertext);
+    tampered[0] ^= 0xff;
+    await expect(decryptAtRest(key, legacy.nonce, tampered, AAD_A)).rejects.toMatchObject({
+      code: CryptoErrorCode.AuthenticationFailed,
+    });
+  });
+});
+
 describe("wrapKey / unwrapKey (Argon2id, RFC 9106)", () => {
   it("round-trips an at-rest key under a passphrase", async () => {
     const key = generateAtRestKey();

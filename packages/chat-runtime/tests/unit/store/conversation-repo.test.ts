@@ -5,7 +5,10 @@ import {
   decryptAtRest,
   generateAtRestKey,
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
-import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  InMemoryConversationRepository,
+  messageRecordAad,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 import { StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
@@ -90,7 +93,15 @@ describe("InMemoryConversationRepository — slice 1 (conversation + encrypted t
     expect(storedText).not.toBe(PLAINTEXT_A);
     expect(raw[0].nonce.length).toBe(12);
 
-    const roundTripped = await decryptAtRest(key, raw[0].nonce, raw[0].ciphertext);
+    // R1:F2: the row is sealed with the conversation + direction AAD, so a raw
+    // decrypt must supply the same binding (rows sealed before the binding
+    // decrypt through decryptAtRest's legacy fallback instead).
+    const roundTripped = await decryptAtRest(
+      key,
+      raw[0].nonce,
+      raw[0].ciphertext,
+      messageRecordAad(id, MessageDirection.Sent),
+    );
     expect(new TextDecoder().decode(roundTripped)).toBe(PLAINTEXT_A);
   });
 

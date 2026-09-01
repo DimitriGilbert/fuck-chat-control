@@ -82,18 +82,46 @@ export function generateAtRestKey(): AtRestKey {
 export async function encryptAtRest(
   key: AtRestKey,
   plaintext: Uint8Array,
+  aad?: Uint8Array,
 ): Promise<AtRestCiphertext> {
   // R1:F1: fresh random 96-bit nonce per record. Stateless → survives reload
   // without reusing a nonce under the persisted key. See the file-level doc.
   const nonce = nextAtRestNonce();
-  const ciphertext = await aesGcmEncrypt(key, nonce, EMPTY_AAD, plaintext);
+  // R1:F2: when the caller supplies record-binding AAD, the GCM tag
+  // authenticates the linkage between the sealed body and that metadata; no
+  // `aad` seals against EMPTY_AAD (the legacy v0 record format, still used by
+  // the key-wrap and export-bundle envelope paths, which bind nothing).
+  const ciphertext = await aesGcmEncrypt(key, nonce, aad ?? EMPTY_AAD, plaintext);
   return { nonce, ciphertext };
 }
 
+/**
+ * R1:F2 — record-binding AAD with a mandatory legacy fallback (the ONE
+ * migration mechanism; documented here and pinned by unit tests in both
+ * directions).
+ *
+ * Stored message records written since R1:F2 are sealed with a caller-supplied
+ * AAD that canonically binds the row's conversation id + direction (built by
+ * `messageRecordAad` in `store/message-record-aad.ts`). Records written before
+ * the binding exist were sealed against EMPTY_AAD and MUST still decrypt, so
+ * when `aad` is provided this function:
+ *
+ *   1. verifies against `aad` first (the v1 binding), and
+ *   2. on an authentication failure retries ONCE against EMPTY_AAD (the
+ *      legacy v0 binding), re-throwing the AuthenticationFailed error if that
+ *      also fails.
+ *
+ * The fallback is one-directional and does NOT weaken the v1 binding: a record
+ * sealed WITH an AAD was not sealed under EMPTY_AAD, so relocating it to a
+ * different conversation/direction fails BOTH attempts. Only genuine legacy
+ * rows authenticate under the fallback (they remain relocatable — the
+ * documented residual window of the backward-compatibility requirement).
+ */
 export async function decryptAtRest(
   key: AtRestKey,
   nonce: Uint8Array,
   ciphertext: Uint8Array,
+  aad?: Uint8Array,
 ): Promise<Uint8Array> {
   if (nonce.length !== GCM_NONCE_BYTES) {
     throw new CryptoError(
@@ -101,7 +129,19 @@ export async function decryptAtRest(
       `at-rest nonce must be ${GCM_NONCE_BYTES} bytes, got ${nonce.length}`,
     );
   }
-  return aesGcmDecrypt(key, nonce, EMPTY_AAD, ciphertext);
+  if (aad === undefined) {
+    return aesGcmDecrypt(key, nonce, EMPTY_AAD, ciphertext);
+  }
+  try {
+    return await aesGcmDecrypt(key, nonce, aad, ciphertext);
+  } catch (err) {
+    if (err instanceof CryptoError && err.code === CryptoErrorCode.AuthenticationFailed) {
+      // R1:F2 migration: pre-binding records were sealed with empty AAD; give
+      // them exactly one legacy attempt before surfacing the failure.
+      return aesGcmDecrypt(key, nonce, EMPTY_AAD, ciphertext);
+    }
+    throw err;
+  }
 }
 
 /**

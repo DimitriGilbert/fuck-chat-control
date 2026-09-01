@@ -8,7 +8,7 @@ import type { PublicKey, Transcript } from "../protocol/types";
 
 import { ctEqual } from "./ct-equal";
 import { CryptoError, CryptoErrorCode } from "./errors";
-import { hkdfSha256, sha256, toAESKey } from "./primitives";
+import { hkdfSha256, sha256, toAESKey, zeroize } from "./primitives";
 import type { DeriveSessionKeysInput, EphemeralKeyPair, SessionKeys } from "./types";
 
 const ECDH_X_OFFSET = 1;
@@ -98,10 +98,26 @@ export async function deriveSessionKeys(input: DeriveSessionKeysInput): Promise<
     HKDF_TRAFFIC_KEY_BYTES,
   );
 
+  // R1/F3: toAESKey copies its input into the AESKey, so wipe both raw HKDF
+  // outputs once the copies exist — the same pattern as at-rest.ts
+  // deriveKeyFromPassphrase. These intermediates are function-local and never
+  // escape, so this is their only wipe site.
+  const initKey = toAESKey(initKeyBytes);
+  zeroize(initKeyBytes);
+  const respKey = toAESKey(respKeyBytes);
+  zeroize(respKeyBytes);
+  // R1/F3: the ECDH secret has now been consumed by both HKDF expansions.
+  // ecdhSecret is a subarray view of sharedPoint (the X coordinate), and
+  // zeroize honors byteOffset/byteLength — wiping the view alone would leave
+  // the rest of the point on the heap, so wipe BOTH the view and its parent
+  // buffer to clear the full shared secret.
+  zeroize(ecdhSecret);
+  zeroize(sharedPoint);
+
   if (role === Role.Initiator) {
-    return { sendKey: toAESKey(initKeyBytes), recvKey: toAESKey(respKeyBytes) };
+    return { sendKey: initKey, recvKey: respKey };
   }
-  return { sendKey: toAESKey(respKeyBytes), recvKey: toAESKey(initKeyBytes) };
+  return { sendKey: respKey, recvKey: initKey };
 }
 
 /**

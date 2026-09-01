@@ -7,6 +7,7 @@ import { CONVERSATION_ID_BYTES, PUBLIC_KEY_BYTES } from "../protocol/limits";
 import type { ConversationId, PublicKey } from "../protocol/types";
 
 import { bytesToBase64, bytesToHex, base64ToBytes, hexToBytes } from "./encoding";
+import { messageRecordAad } from "./message-record-aad";
 import { MessageDirection, MESSAGE_DIRECTION_VALUES, StoreError, StoreErrorCode } from "./types";
 import type {
   AppendMessageOptions,
@@ -160,7 +161,12 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     const messageId = messageIdFromOptions(options);
     const atRestKey = this.requireKey();
     const encoded = new TextEncoder().encode(plaintext);
-    const sealed = await encryptAtRest(atRestKey, encoded);
+    // R1:F2: bind the sealed body to this row's conversation + direction via
+    // GCM AAD, so a stored (nonce, ciphertext) pair cannot be relocated to
+    // another conversation or relabeled without failing authentication. Rows
+    // sealed before the binding still decrypt via decryptAtRest's legacy
+    // empty-AAD fallback.
+    const sealed = await encryptAtRest(atRestKey, encoded, messageRecordAad(id, direction));
     const list = this.messages.get(convoKey) ?? [];
     list.push({
       id: messageId,
@@ -192,7 +198,7 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     const out: ConversationMessage[] = [];
     for (let index = 0; index < list.length; index++) {
       const stored = list[index];
-      const plaintext = await decryptMessage(atRestKey, stored);
+      const plaintext = await decryptMessage(atRestKey, id, stored);
       out.push({
         id: stored.id,
         conversationId: cloneConversationId(id),
@@ -476,9 +482,21 @@ function deserializePeer(peer: SerializedPeerIdentity): PeerIdentityRecord {
   };
 }
 
-async function decryptMessage(atRestKey: AtRestKey, stored: InternalMessage): Promise<string> {
+async function decryptMessage(
+  atRestKey: AtRestKey,
+  conversationId: ConversationId,
+  stored: InternalMessage,
+): Promise<string> {
   try {
-    const plaintext = await decryptAtRest(atRestKey, stored.nonce, stored.ciphertext);
+    // R1:F2: verify the record's conversation + direction binding; rows sealed
+    // before the binding existed decrypt via decryptAtRest's legacy empty-AAD
+    // fallback.
+    const plaintext = await decryptAtRest(
+      atRestKey,
+      stored.nonce,
+      stored.ciphertext,
+      messageRecordAad(conversationId, stored.direction),
+    );
     return new TextDecoder().decode(plaintext);
   } catch (err) {
     if (err instanceof CryptoError && err.code === CryptoErrorCode.AuthenticationFailed) {
