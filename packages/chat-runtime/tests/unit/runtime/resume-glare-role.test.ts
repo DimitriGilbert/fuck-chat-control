@@ -132,7 +132,10 @@ function rawOfKind(socket: { readonly sent: string[] }, kind: string): string | 
  * both live sessions and resume both. Returns each side's resume socket (its
  * pool's SECOND dial; the first was the initial start/join).
  */
-async function resumePair(sideA: Side, sideB: Side): Promise<{
+async function resumePair(
+  sideA: Side,
+  sideB: Side,
+): Promise<{
   aResume: MockSignalingSocket;
   bResume: MockSignalingSocket;
 }> {
