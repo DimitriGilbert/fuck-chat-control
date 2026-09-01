@@ -52,7 +52,12 @@ describe("slice 6: backpressure reserves capacity for text and control", () => {
     transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES);
     await sender.sendText(utf8("priority"));
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 4);
-    const filePromise = sender.sendFile(data, "payload.bin", "application/octet-stream");
+    const filePromise = sender.sendFile(
+      sender.beginFileTransfer(),
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.texts).toHaveLength(1);
     expect(bytesEqual(rec.texts[0], utf8("priority"))).toBe(true);
@@ -72,7 +77,12 @@ describe("slice 6: backpressure reserves capacity for text and control", () => {
     transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES);
     await sender.sendControl(ControlSubtype.Leave, utf8("bye"));
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 4);
-    const filePromise = sender.sendFile(data, "payload.bin", "application/octet-stream");
+    const filePromise = sender.sendFile(
+      sender.beginFileTransfer(),
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.controls).toHaveLength(1);
     expect(rec.controls[0].subtype).toBe(ControlSubtype.Leave);
@@ -89,7 +99,12 @@ describe("slice 6: backpressure reserves capacity for text and control", () => {
     const { sender, transport } = await makePair(rec.handlers);
     transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES - 1);
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 4);
-    await sender.sendFile(data, "payload.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(transport.sent.filter(isChunkFrame)).toHaveLength(2);
     expect(rec.files).toHaveLength(1);

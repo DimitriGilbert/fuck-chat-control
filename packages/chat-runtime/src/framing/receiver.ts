@@ -103,11 +103,18 @@ export class FrameReceiver {
     return run;
   }
 
-  cancelTransfer(transferId: number): void {
-    if (this.tornDown) return;
+  /**
+   * R2/F3 (Phase 7): cancel an inbound transfer and report whether one was
+   * actually dropped. Returns `false` for an unknown id (no-op) — the caller
+   * (the orchestrator) uses the return value to emit `onTransferCancelled`
+   * exactly once and only for real cancellations.
+   */
+  cancelTransfer(transferId: number): boolean {
+    if (this.tornDown) return false;
     const transfer = this.transfers.get(transferId);
-    if (transfer === undefined) return;
+    if (transfer === undefined) return false;
     this.dropTransfer(transferId, transfer);
+    return true;
   }
 
   teardown(): void {

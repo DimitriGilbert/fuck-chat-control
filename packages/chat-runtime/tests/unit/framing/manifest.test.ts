@@ -129,7 +129,12 @@ describe("slice 3: authenticated manifest before allocation (receiver)", () => {
   it("accepts a valid manifest and allocates no chunk buffer yet", async () => {
     const rec = countingHandlers();
     const { sender, transport, recvKeys, peerSessionId } = await makePair(rec.handlers);
-    await sender.sendFile(new Uint8Array(100), "file.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      new Uint8Array(100),
+      "file.bin",
+      "application/octet-stream",
+    );
     const standalone = new FrameReceiver({
       sessionKeys: recvKeys,
       peerSessionId,
@@ -201,7 +206,12 @@ describe("slice 3: authenticated manifest before allocation (receiver)", () => {
   it("rejects a manifest whose ciphertext was tampered (not authenticated)", async () => {
     const rec = countingHandlers();
     const { sender, transport, recvKeys, peerSessionId } = await makePair(rec.handlers);
-    await sender.sendFile(new Uint8Array(100), "file.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      new Uint8Array(100),
+      "file.bin",
+      "application/octet-stream",
+    );
     const standalone = new FrameReceiver({
       sessionKeys: recvKeys,
       peerSessionId,

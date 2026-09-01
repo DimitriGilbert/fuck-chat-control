@@ -6,9 +6,21 @@ import {
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { IdentityKeyPair } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { encodePublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { ProtocolErrorCode } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { MAX_TEXT_PLAINTEXT_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
-import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  InMemoryConversationRepository,
+  MessageDirection,
+} from "@fuck-eu-chat-control/chat-runtime/store";
+import type {
+  AppendMessageOptions,
+  ConversationMessage,
+  ConversationRecord,
+  ConversationRepository,
+  PeerIdentityRecord,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 
 import {
   ConversationOrchestrator,
@@ -396,6 +408,197 @@ describe("ConversationOrchestrator", () => {
       await tick();
 
       expect(responder.spies.onMessage.calls[0]![0].text).toBe(text);
+    });
+
+    it("round-trips a text exactly at the frame plaintext cap (MAX_TEXT_PLAINTEXT_BYTES)", async () => {
+      const { initiator, responder } = await makeHandshakePair();
+      // ASCII: 1 byte per char, so char count === byte count. At exactly the
+      // cap the ciphertext (plaintext + 16-byte GCM tag) equals the codec's
+      // MAX_TEXT_FRAME_BYTES — the encode-side check is `> cap`, so the
+      // boundary value must be accepted end to end.
+      const text = "b".repeat(MAX_TEXT_PLAINTEXT_BYTES);
+
+      await initiator.orchestrator.sendText(text);
+      await tick();
+
+      expect(responder.spies.onMessage.calls[0]![0].text).toBe(text);
+    });
+  });
+
+  describe("R2/F5: sendText validates the frame cap BEFORE persisting", () => {
+    it("rejects an over-long text with ProtocolError(LimitExceeded) and writes no Sent row", async () => {
+      const { initiator } = await makeHandshakePair();
+      const text = "c".repeat(MAX_TEXT_PLAINTEXT_BYTES + 1);
+
+      await expect(initiator.orchestrator.sendText(text)).rejects.toMatchObject({
+        code: ProtocolErrorCode.LimitExceeded,
+      });
+
+      // The rejection happened BEFORE repository.appendMessage — the local
+      // history must not contain a phantom "Sent" message that was never
+      // transmitted (the pre-fix behavior: stored as Sent, then failed at
+      // encode time with nothing on the wire).
+      const messages = await initiator.repository.getMessages(
+        initiator.orchestrator.conversationId!,
+      );
+      expect(messages).toHaveLength(0);
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+    });
+
+    it("measures UTF-8 bytes, not UTF-16 code units (multi-byte chars count against the cap)", async () => {
+      const { initiator } = await makeHandshakePair();
+      // 8,201 emoji = 32,804 UTF-8 bytes (over the 16,368-byte cap) while only
+      // 16,402 UTF-16 code units — a code-unit check would pass it through.
+      const text = "🌍".repeat(8201);
+
+      await expect(initiator.orchestrator.sendText(text)).rejects.toMatchObject({
+        code: ProtocolErrorCode.LimitExceeded,
+      });
+      const messages = await initiator.repository.getMessages(
+        initiator.orchestrator.conversationId!,
+      );
+      expect(messages).toHaveLength(0);
+    });
+  });
+
+  describe("R2/F7: an inbound-text storage failure surfaces via onError, not an unhandled rejection", () => {
+    /**
+     * Delegating repository whose appendMessage rejects whenever the direction
+     * is Received — simulating a locked at-rest manager / OPFS failure on the
+     * responder side, after the frame has already been decrypted and
+     * authenticated. Everything else passes through to the in-memory repo.
+     */
+    class ReceivedAppendFailsRepository implements ConversationRepository {
+      private readonly inner: ConversationRepository;
+
+      constructor(inner: ConversationRepository) {
+        this.inner = inner;
+      }
+
+      appendMessage(
+        id: ConversationId,
+        plaintext: string,
+        direction: MessageDirection,
+        timestamp: number,
+        options?: AppendMessageOptions,
+      ): Promise<ConversationMessage> {
+        if (direction === MessageDirection.Received) {
+          return Promise.reject(new Error("simulated at-rest store failure"));
+        }
+        return this.inner.appendMessage(id, plaintext, direction, timestamp, options);
+      }
+
+      createConversation(id: ConversationId, createdAt: number): Promise<ConversationRecord> {
+        return this.inner.createConversation(id, createdAt);
+      }
+
+      getConversation(id: ConversationId): Promise<ConversationRecord | null> {
+        return this.inner.getConversation(id);
+      }
+
+      listConversations(): Promise<ConversationRecord[]> {
+        return this.inner.listConversations();
+      }
+
+      getMessages(id: ConversationId): Promise<ConversationMessage[]> {
+        return this.inner.getMessages(id);
+      }
+
+      storePeerIdentity(
+        id: ConversationId,
+        fingerprint: string,
+        publicKey: PublicKey,
+      ): Promise<void> {
+        return this.inner.storePeerIdentity(id, fingerprint, publicKey);
+      }
+
+      replacePeerIdentity(
+        id: ConversationId,
+        fingerprint: string,
+        publicKey: PublicKey,
+      ): Promise<void> {
+        return this.inner.replacePeerIdentity(id, fingerprint, publicKey);
+      }
+
+      getPeerIdentity(id: ConversationId): Promise<PeerIdentityRecord | null> {
+        return this.inner.getPeerIdentity(id);
+      }
+
+      setDisplayName(id: ConversationId, name: string): Promise<void> {
+        return this.inner.setDisplayName(id, name);
+      }
+
+      getDisplayName(id: ConversationId): Promise<string | null> {
+        return this.inner.getDisplayName(id);
+      }
+
+      markAuthFailed(id: ConversationId): Promise<void> {
+        return this.inner.markAuthFailed(id);
+      }
+
+      getAuthFailed(id: ConversationId): Promise<boolean> {
+        return this.inner.getAuthFailed(id);
+      }
+
+      clearConversation(id: ConversationId): Promise<void> {
+        return this.inner.clearConversation(id);
+      }
+
+      clearAll(): Promise<void> {
+        return this.inner.clearAll();
+      }
+    }
+
+    it("fires onError with a DurableStoreWriteFailed cause and keeps the session alive", async () => {
+      // Hand-build the pair so the RESPONDER's repository rejects received
+      // appends (mirror of makeOrchestrator with the wrapped repo).
+      const initiator = await makeOrchestrator();
+      const responderIdentity = await generateIdentityKeyPair();
+      const responderSpies = makeSpies();
+      const responderSocket = new MockSignalingSocket();
+      const responderDeps: OrchestratorDeps = {
+        brokerUrl: "wss://broker.example",
+        baseUrl: SAMPLE_BASE_URL,
+        repository: new ReceivedAppendFailsRepository(
+          new InMemoryConversationRepository(generateAtRestKey()),
+        ),
+        socketFactory: mockSocketFactory(responderSocket),
+        identity: responderIdentity,
+        handlers: spiesToHandlers(responderSpies),
+      };
+      const responder: OrchestratorKit = {
+        orchestrator: new ConversationOrchestrator(responderDeps),
+        repository: responderDeps.repository,
+        identity: responderIdentity,
+        spies: responderSpies,
+        socket: responderSocket,
+      };
+
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      responder.orchestrator.attachTransport(b);
+      await waitForConnected(initiator.orchestrator);
+      await waitForConnected(responder.orchestrator);
+
+      await initiator.orchestrator.sendText("drops on the responder's floor");
+      await tick(100);
+
+      // The decrypted message could not be persisted: onError (not an
+      // unhandled rejection, not silence) carries a wrapped, diagnosable
+      // error whose cause is the underlying storage failure.
+      expect(responder.spies.onError.calls).toHaveLength(1);
+      const surfaced = responder.spies.onError.calls[0]![0];
+      expect(surfaced).toBeInstanceOf(OrchestratorError);
+      expect((surfaced as OrchestratorError).code).toBe(
+        OrchestratorErrorCode.DurableStoreWriteFailed,
+      );
+      expect((surfaced as OrchestratorError).cause).toBeInstanceOf(Error);
+      // The session survives — the message handler failure is not fatal.
+      expect(responder.orchestrator.state).toBe(ConnectionState.Connected);
+      // A subsequent send still round-trips (the pipeline is not wedged).
+      expect(responder.spies.onMessage.calls).toHaveLength(0);
     });
   });
 

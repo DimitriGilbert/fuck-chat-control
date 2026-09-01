@@ -153,6 +153,82 @@ describe("ConversationOrchestrator PAKE feature gate (R8/F1 / Phase 6)", () => {
     });
   });
 
+  describe("R2/F6: start(code) is gated and validated like join()", () => {
+    it("throws MalformedInvitation for a non-6-digit code, before any state mutation", async () => {
+      const { orchestrator, repository } = await makeOrchestrator(true);
+
+      // A 5-digit code would mint an invitation every responder rejects
+      // (HEX_WITH_CODE_PATTERN requires exactly 6 digits), parking the
+      // initiator forever — reject it at the entry boundary instead.
+      await expect(orchestrator.start("12345")).rejects.toMatchObject({
+        code: OrchestratorErrorCode.MalformedInvitation,
+      });
+
+      // Fail-fast contract: nothing was persisted, no PAKE state was written,
+      // and the orchestrator is still reusable (a plain start() works).
+      expect(await repository.listConversations()).toHaveLength(0);
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.SafetyNumberOnly);
+      const invitation = await orchestrator.start();
+      expect(invitation).not.toContain("~");
+    });
+
+    it("throws PakeDisabled on an enablePake:false build and persists nothing", async () => {
+      const { orchestrator, repository } = await makeOrchestrator(false);
+
+      await expect(orchestrator.start("123456")).rejects.toMatchObject({
+        code: OrchestratorErrorCode.PakeDisabled,
+      });
+
+      expect(await repository.listConversations()).toHaveLength(0);
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.SafetyNumberOnly);
+    });
+
+    it("accepts a 6-digit code on an enablePake:true build and formats a coded invitation", async () => {
+      const { orchestrator, repository } = await makeOrchestrator(true);
+
+      const invitation = await orchestrator.start("654321");
+
+      expect(invitation.endsWith("~654321")).toBe(true);
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.Pake);
+      expect(await repository.listConversations()).toHaveLength(1);
+    });
+  });
+
+  describe("R2/F6: setPakeCode is gated and validated like join()", () => {
+    it("throws MalformedInvitation for a non-6-digit code and writes no PAKE state", async () => {
+      const { orchestrator } = await makeOrchestrator(true);
+
+      for (const bad of ["12345", "1234567", "12a456", "123 56"]) {
+        expect(() => orchestrator.setPakeCode(bad)).toThrow(OrchestratorError);
+      }
+
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.SafetyNumberOnly);
+    });
+
+    it("throws PakeDisabled on an enablePake:false build and writes no PAKE state", async () => {
+      const { orchestrator } = await makeOrchestrator(false);
+
+      expect(() => orchestrator.setPakeCode("123456")).toThrow(
+        new OrchestratorError(
+          OrchestratorErrorCode.PakeDisabled,
+          "coded invitations (PAKE) are not supported in this build",
+        ),
+      );
+
+      // The gate fired before pakeCode/authMode were written — no `~code`
+      // path can reach createPakeSession/loadWasm on this build.
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.SafetyNumberOnly);
+    });
+
+    it("accepts a 6-digit code on an enablePake:true build and flips the auth mode", async () => {
+      const { orchestrator } = await makeOrchestrator(true);
+
+      orchestrator.setPakeCode("012345");
+
+      expect(orchestrator.handshakeAuthMode).toBe(AuthMode.Pake);
+    });
+  });
+
   describe("enablePake: true (default) leaves the coded-invitation path unchanged", () => {
     it("does NOT throw PakeDisabled on a <32hex>~<code> fragment (web/desktop behavior)", async () => {
       const { orchestrator } = await makeOrchestrator(true);

@@ -16,6 +16,7 @@ import {
   type OrchestratorHandlers,
   type TransferSummary,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import { OrchestratorErrorCode } from "@fuck-eu-chat-control/chat-runtime/orchestrator/errors";
 
 import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "../orchestrator/_helpers";
@@ -38,12 +39,14 @@ interface OrchKit {
   readonly received: ReceivedFile[];
   readonly summaries: TransferSummary[];
   readonly cancelled: number[];
+  readonly errors: Array<{ readonly id: number; readonly error: unknown }>;
 }
 
 function makeHandlers(
   received: ReceivedFile[],
   summaries: TransferSummary[],
   cancelled: number[],
+  errors: Array<{ readonly id: number; readonly error: unknown }>,
 ): OrchestratorHandlers {
   return {
     onFileReceived: (file: ReceivedFile): void => {
@@ -61,6 +64,9 @@ function makeHandlers(
     onTransferCancelled: (id: number): void => {
       cancelled.push(id);
     },
+    onTransferError: (id: number, error: unknown): void => {
+      errors.push({ id, error });
+    },
   };
 }
 
@@ -71,13 +77,14 @@ async function makeOrchestrator(): Promise<OrchKit> {
   const received: ReceivedFile[] = [];
   const summaries: TransferSummary[] = [];
   const cancelled: number[] = [];
+  const errors: Array<{ readonly id: number; readonly error: unknown }> = [];
   const deps: OrchestratorDeps = {
     brokerUrl: "wss://broker.example",
     baseUrl: SAMPLE_BASE_URL,
     repository,
     socketFactory: mockSocketFactory(socket),
     identity,
-    handlers: makeHandlers(received, summaries, cancelled),
+    handlers: makeHandlers(received, summaries, cancelled, errors),
   };
   return {
     orchestrator: new ConversationOrchestrator(deps),
@@ -87,6 +94,7 @@ async function makeOrchestrator(): Promise<OrchKit> {
     received,
     summaries,
     cancelled,
+    errors,
   };
 }
 
@@ -252,9 +260,150 @@ describe("ConversationOrchestrator file transfer", () => {
     initiator.orchestrator.cancelTransfer(startedId);
     await expect(sendPromise).rejects.toBeDefined();
 
-    expect(initiator.cancelled).toContain(startedId);
+    // R2/F3: the cancellation surfaces as EXACTLY ONE onTransferCancelled —
+    // emitted by cancelTransfer itself; the rejected sendFile coroutine must
+    // NOT emit a second event for the same id.
+    expect(initiator.cancelled.filter((id) => id === startedId)).toHaveLength(1);
     // Receiver-side cancel of the same id is a safe no-op when nothing is
     // known yet; assert it does not throw.
     expect(() => responder.orchestrator.cancelTransfer(startedId)).not.toThrow();
+  });
+
+  it("R2/F3: cancelling an unknown id is a silent no-op — no emission, no throw", async () => {
+    const { initiator } = await makeHandshakePair();
+    const unknownId = 4_242_424;
+
+    expect(() => initiator.orchestrator.cancelTransfer(unknownId)).not.toThrow();
+
+    // Neither the sender nor the receiver knows the id, so no event fires.
+    expect(initiator.cancelled).toHaveLength(0);
+    expect(initiator.errors).toHaveLength(0);
+  });
+
+  it("R2/F4: concurrent sendFile calls keep per-transfer id and metadata attribution", async () => {
+    const { initiator, responder } = await makeHandshakePair();
+    // Two multi-chunk payloads (MAX_CHUNK_BYTES = 16 KiB) so both sends really
+    // interleave across the sha256/manifest/chunk awaits, firing progress
+    // events whose summaries must be resolved from EACH transfer's own
+    // metadata registration.
+    const dataA = new Uint8Array(40 * 1024);
+    for (let i = 0; i < dataA.length; i++) dataA[i] = (i * 13 + 1) & 0xff;
+    const dataB = new Uint8Array(32 * 1024);
+    for (let i = 0; i < dataB.length; i++) dataB[i] = (i * 29 + 5) & 0xff;
+
+    // Launch both WITHOUT awaiting in between: the second call reserves its
+    // id and registers its metadata while the first is still hashing.
+    const sendA = initiator.orchestrator.sendFile(dataA, "a.bin", "application/octet-stream");
+    const sendB = initiator.orchestrator.sendFile(dataB, "b.bin", "application/octet-stream");
+    const [idA, idB] = await Promise.all([sendA, sendB]);
+
+    expect(idA).not.toBe(idB);
+
+    // Start summaries carry each transfer's own name/size under its own id.
+    const startOf = (id: number): TransferSummary | undefined =>
+      initiator.summaries.find(
+        (s) => s.direction === "sent" && s.transferId === id && s.bytesTransferred === 0,
+      );
+    expect(startOf(idA)).toMatchObject({ name: "a.bin", size: dataA.length });
+    expect(startOf(idB)).toMatchObject({ name: "b.bin", size: dataB.length });
+
+    // Progress summaries (fired from the per-chunk hook, which only carries
+    // id + counts) must be attributed via each transfer's own metadata.
+    const progressOf = (id: number): TransferSummary[] =>
+      initiator.summaries.filter(
+        (s) =>
+          s.direction === "sent" &&
+          s.transferId === id &&
+          s.bytesTransferred > 0 &&
+          s.bytesTransferred < s.size,
+      );
+    expect(progressOf(idA).length).toBeGreaterThan(0);
+    expect(progressOf(idB).length).toBeGreaterThan(0);
+    for (const p of progressOf(idA)) expect(p.name).toBe("a.bin");
+    for (const p of progressOf(idB)) expect(p.name).toBe("b.bin");
+
+    // Both completed and both were delivered — no cross-transfer corruption.
+    // (Delivery through the loopback transport's async ingest needs a wait,
+    // mirroring the single-send test's tick.)
+    expect(
+      initiator.summaries.some(
+        (s) =>
+          s.direction === "sent" &&
+          s.transferId === idA &&
+          s.bytesTransferred === s.size &&
+          s.name === "a.bin",
+      ),
+    ).toBe(true);
+    expect(
+      initiator.summaries.some(
+        (s) =>
+          s.direction === "sent" &&
+          s.transferId === idB &&
+          s.bytesTransferred === s.size &&
+          s.name === "b.bin",
+      ),
+    ).toBe(true);
+    const deliveryDeadline = Date.now() + 2000;
+    while (responder.received.length < 2 && Date.now() < deliveryDeadline) {
+      await tick(10);
+    }
+    expect(responder.received.map((f) => f.manifest.name).sort()).toEqual(["a.bin", "b.bin"]);
+    expect(initiator.cancelled).toHaveLength(0);
+    expect(initiator.errors).toHaveLength(0);
+  });
+
+  it("R2/F8: the concurrent-transfer cap is enforced at sendFile entry, before hashing", async () => {
+    const { initiator, responder } = await makeHandshakePair((t) => backpressuredTransport(t));
+    const payload = (): Uint8Array => {
+      const data = new Uint8Array(32 * 1024);
+      for (let i = 0; i < data.length; i++) data[i] = (i * 17 + 3) & 0xff;
+      return data;
+    };
+
+    // Saturate all MAX_CONCURRENT_TRANSFERS slots. The backpressured wrapper
+    // parks every chunk loop in waitForDrain after its manifest, so all four
+    // sends stay in-flight for the whole test.
+    const sends: Array<Promise<number>> = [];
+    for (let i = 0; i < 4; i++) {
+      sends.push(initiator.orchestrator.sendFile(payload(), "big.bin", "application/octet-stream"));
+    }
+    // All four reservations were made synchronously at each call's entry, so
+    // by the time all four start events have fired the cap is fully held.
+    const deadline = Date.now() + 2000;
+    while (
+      initiator.summaries.filter((s) => s.direction === "sent" && s.bytesTransferred === 0).length <
+      4
+    ) {
+      if (Date.now() > deadline) throw new Error("timed out waiting for the four in-flight sends");
+      await tick(5);
+    }
+
+    // The fifth send must be rejected AT ENTRY (the id reservation counts
+    // against the cap from the sendFile call, not from onTransferStart) —
+    // pre-fix all five passed the check because registration happened only
+    // after the sha256 await.
+    await expect(
+      initiator.orchestrator.sendFile(payload(), "fifth.bin", "application/octet-stream"),
+    ).rejects.toMatchObject({
+      code: OrchestratorErrorCode.NotConnected,
+      message: expect.stringMatching(/concurrent transfer limit/),
+    });
+    expect(initiator.cancelled).toHaveLength(0);
+
+    // Tear down: the four parked sends reject with TearingDown and each
+    // failure is attributed to its OWN transfer id (no id cross-attribution).
+    initiator.orchestrator.leave();
+    const settled = await Promise.allSettled(sends);
+    expect(settled.every((r) => r.status === "rejected")).toBe(true);
+    const erroredIds = new Set(initiator.errors.map((e) => e.id));
+    expect(erroredIds.size).toBe(4);
+    const startedIds = new Set(
+      initiator.summaries
+        .filter((s) => s.direction === "sent" && s.bytesTransferred === 0)
+        .map((s) => s.transferId),
+    );
+    for (const id of erroredIds) expect(startedIds.has(id)).toBe(true);
+    expect(initiator.errors.every((e) => !initiator.cancelled.includes(e.id))).toBe(true);
+    responder.orchestrator.leave();
   });
 });

@@ -17,11 +17,13 @@ import { ctEqual } from "../crypto/ct-equal";
 import { zeroize } from "../crypto/primitives";
 import type { EphemeralKeyPair, IdentityKeyPair, PakeSession } from "../crypto";
 import { deriveRole, encodeSessionId, encodeTranscript } from "../protocol/codec";
+import { ProtocolError, ProtocolErrorCode } from "../protocol/errors";
 import {
   HANDSHAKE_TIMEOUT_MS,
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
+  MAX_TEXT_PLAINTEXT_BYTES,
   PAKE_CONFIRM_MESSAGE_BYTES,
   PAKE_MESSAGE_BYTES,
   PAKE_ROLE_A,
@@ -164,6 +166,15 @@ export interface OrchestratorDeps {
 
 const HELLO_BYTES = 163;
 const SIGNATURE_MESSAGE_BYTES = 65;
+/**
+ * R2/F6 (Phase 7): a PAKE code must be exactly 6 decimal digits (PRD #90) —
+ * the same shape the responder's invitation parser enforces
+ * (`HEX_WITH_CODE_PATTERN` in invitation.ts, whose loud non-6-digit error this
+ * gate mirrors). start(code)/setPakeCode validate against this BEFORE any
+ * state mutation so `start("12345")` fails fast instead of minting an
+ * invitation every responder rejects.
+ */
+const PAKE_CODE_PATTERN = /^\d{6}$/;
 
 /**
  * Application-layer orchestrator: the integration layer that ties together
@@ -325,21 +336,21 @@ export class ConversationOrchestrator {
    */
   private authFailedCached = false;
   /**
-   * Tracks the most recently started send transfer's id, so a rejection from
-   * the framing layer (which may not carry the id) can be correlated to the
-   * right `onTransferError`/`onTransferCancelled` emission. Set per-call by
-   * {@link sendFile} via the sender's onTransferStart hook.
-   */
-  private currentTransferIdTracker: ((transferId: number) => void) | null = null;
-  /**
    * Per-transfer metadata for in-flight sends, so the framing layer's progress
    * hook (which only carries id + byte counts) can emit a full summary with
-   * name/mimeType/size. Populated by {@link sendFile}, drained on
-   * complete/cancel/error.
+   * name/mimeType/size. R2/F4 (Phase 7): each entry is registered SYNCHRONOUSLY
+   * at {@link sendFile} entry under the id that call reserved via
+   * {@link FrameSender.beginFileTransfer} — per-transfer state can never
+   * interleave between concurrent sends the way the old shared
+   * currentTransferIdTracker slot (invoked at onTransferStart fire time, i.e.
+   * after the sha256 await) did. `cancelEmitted` records whether
+   * {@link cancelTransfer} already emitted `onTransferCancelled` for this id so
+   * the sendFile catch does not double-emit (R2/F3). Drained in the send's
+   * finally, so the entry (and flag) live exactly as long as the send.
    */
   private readonly sendTransferMetadata = new Map<
     number,
-    { name: string; mimeType: string; size: number }
+    { name: string; mimeType: string; size: number; cancelEmitted: boolean }
   >();
 
   constructor(deps: OrchestratorDeps) {
@@ -419,6 +430,14 @@ export class ConversationOrchestrator {
    * auth mode to {@link AuthMode.Pake}. This is the seam Phase 8's invitation
    * fragment parser (`~code`) will call; Phase 1's own tests call it directly.
    *
+   * R2/F6 (Phase 7): mirrors the {@link join} gate. Throws
+   * {@link OrchestratorErrorCode.PakeDisabled} when this orchestrator was
+   * constructed with `enablePake === false` (no `~code` path may ever reach
+   * `createPakeSession`/`loadWasm` on such builds), and
+   * {@link OrchestratorErrorCode.MalformedInvitation} when the code is not
+   * exactly 6 decimal digits (the same loud PRD #90 error the responder's
+   * invitation parser raises). No PAKE state is written when either fires.
+   *
    * Must be called before {@link attachTransport} (i.e. before the handshake
    * begins). Once set, PAKE is mandatory: a peer offering `SafetyNumberOnly`
    * against this invitation aborts at transcript binding, and a PAKE failure
@@ -435,6 +454,18 @@ export class ConversationOrchestrator {
       throw new OrchestratorError(
         OrchestratorErrorCode.MalformedHandshakeMessage,
         "PAKE code must be non-empty",
+      );
+    }
+    if (!this.enablePake) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.PakeDisabled,
+        "coded invitations (PAKE) are not supported in this build",
+      );
+    }
+    if (!PAKE_CODE_PATTERN.test(code)) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedInvitation,
+        "PAKE code must be exactly 6 decimal digits per PRD #90 (got: '" + code + "')",
       );
     }
     this.pakeCode = code;
@@ -467,6 +498,14 @@ export class ConversationOrchestrator {
    * code rides in the URL fragment (hash), which browsers never send to the
    * server — the broker only sees the bare conversation id.
    *
+   * R2/F6 (Phase 7): a supplied code is validated BEFORE any state mutation
+   * (before `started` flips, before the conversation is persisted, before an
+   * invitation is minted). Throws {@link OrchestratorErrorCode.PakeDisabled}
+   * on `enablePake === false` builds (same error shape as the join() gate) and
+   * {@link OrchestratorErrorCode.MalformedInvitation} for a non-6-digit code —
+   * fail fast instead of parking the initiator on an invitation every
+   * responder rejects. The orchestrator remains reusable after either throw.
+   *
    * The code is written directly to {@link pakeCode} / {@link authMode} rather
    * than via {@link setPakeCode} because {@link setPakeCode} is the public
    * seam and refuses post-`start` calls (we have already flipped
@@ -478,6 +517,20 @@ export class ConversationOrchestrator {
         OrchestratorErrorCode.AlreadyStarted,
         "orchestrator has already been started",
       );
+    }
+    if (code !== undefined && code.length > 0) {
+      if (!this.enablePake) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.PakeDisabled,
+          "coded invitations (PAKE) are not supported in this build",
+        );
+      }
+      if (!PAKE_CODE_PATTERN.test(code)) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedInvitation,
+          "PAKE code must be exactly 6 decimal digits per PRD #90 (got: '" + code + "')",
+        );
+      }
     }
     this.started = true;
     const id = generateConversationId();
@@ -625,7 +678,18 @@ export class ConversationOrchestrator {
     });
   }
 
-  /** Send a text message (UTF-8). Persists locally, encrypts, sends. */
+  /**
+   * Send a text message (UTF-8). Persists locally, encrypts, sends.
+   *
+   * R2/F5 (Phase 7): the plaintext is validated against
+   * {@link MAX_TEXT_PLAINTEXT_BYTES} BEFORE the persist. Previously the bound
+   * was enforced only deep in `encodeFrameHeader`, so a text above the 16 KiB
+   * AEAD cap was durably stored as `Sent` and then rejected at send time with
+   * nothing transmitted — history diverged from the peer with no retry path.
+   * The bound is derived in limits.ts from the codec's
+   * `MAX_TEXT_FRAME_BYTES` minus the GCM tag, so it can never drift from what
+   * the codec actually enforces.
+   */
   async sendText(text: string): Promise<void> {
     if (this.currentState !== ConnectionState.Connected || this.frameSender === null) {
       throw new OrchestratorError(
@@ -639,9 +703,15 @@ export class ConversationOrchestrator {
         "conversation is not initialized",
       );
     }
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.length > MAX_TEXT_PLAINTEXT_BYTES) {
+      throw new ProtocolError(
+        ProtocolErrorCode.LimitExceeded,
+        `text payload of ${bytes.length} bytes exceeds the Text frame plaintext cap (${MAX_TEXT_PLAINTEXT_BYTES} bytes)`,
+      );
+    }
     const timestamp = Date.now();
     await this.repository.appendMessage(this.conversation, text, MessageDirection.Sent, timestamp);
-    const bytes = new TextEncoder().encode(text);
     await this.frameSender.sendText(bytes);
   }
 
@@ -651,8 +721,18 @@ export class ConversationOrchestrator {
    * emits start/progress/complete (or error/cancelled) via the transfer
    * handlers. Returns the new transfer id.
    *
+   * R2/F4 + R2/F8 (Phase 7): the transfer id is allocated AND reserved
+   * synchronously via {@link FrameSender.beginFileTransfer} at this method's
+   * entry — before the sender's sha256 await — so the reservation counts
+   * against {@link MAX_CONCURRENT_TRANSFERS} immediately (closing the
+   * check-then-act race where N concurrent calls all passed the cap) and every
+   * per-call state below (metadata registration, error attribution) is bound
+   * to THIS call's own id. The old design installed a shared mutable tracker
+   * slot that the sender invoked at onTransferStart fire time (after hashing),
+   * which cross-attributed ids/metadata between concurrent sends.
+   *
    * The framing layer chunks, hashes, and backpressures internally. This
-   * method installs a per-call progress hook on the sender so the
+   * method registers a per-transfer progress hook on the sender so the
    * orchestrator can surface `onTransferStart`/`onTransferProgress` to the
    * UI while the chunk loop runs.
    */
@@ -685,23 +765,18 @@ export class ConversationOrchestrator {
     }
     const sender = this.frameSender;
     const total = data.length;
-
-    // The sender is constructed with onTransferStart/onProgress hooks that
-    // route every transfer through our handlers (the transferId disambiguates
-    // concurrent sends). To associate a rejection with its id when the sender
-    // throws before/after allocation, we track the latest started id locally
-    // for the duration of this call, and register its metadata so the
-    // progress hook can emit a full summary.
-    let allocatedId: number | null = null;
-    const prevIdTracker = this.currentTransferIdTracker;
-    this.currentTransferIdTracker = (transferId: number): void => {
-      allocatedId = transferId;
-      this.sendTransferMetadata.set(transferId, { name, mimeType, size: total });
-      prevIdTracker?.(transferId);
-    };
+    // R2/F4 + R2/F8: reserve the id synchronously (counted against the cap from
+    // this instant) and bind THIS call's metadata to it — no shared slot.
+    const transferId = sender.beginFileTransfer();
+    this.sendTransferMetadata.set(transferId, {
+      name,
+      mimeType,
+      size: total,
+      cancelEmitted: false,
+    });
 
     try {
-      const transferId = await sender.sendFile(data, name, mimeType);
+      await sender.sendFile(transferId, data, name, mimeType);
       this.handlers.onTransferComplete?.({
         transferId,
         name,
@@ -712,34 +787,52 @@ export class ConversationOrchestrator {
       });
       return transferId;
     } catch (err: unknown) {
-      const id = allocatedId;
-      if (id !== null) {
-        if (this.isCancellationError(err)) {
-          this.handlers.onTransferCancelled?.(id);
-        } else {
-          this.handlers.onTransferError?.(id, err);
+      if (this.isCancellationError(err)) {
+        // R2/F3: cancelTransfer is the single emission point — it already
+        // emitted (and flagged the metadata entry) when it actually cancelled
+        // this transfer. The skip check keeps this path from double-emitting;
+        // the emit below is the belt-and-braces branch for a cancellation
+        // rejection that did not route through cancelTransfer.
+        const meta = this.sendTransferMetadata.get(transferId);
+        if (meta === undefined || !meta.cancelEmitted) {
+          this.handlers.onTransferCancelled?.(transferId);
         }
+      } else {
+        this.handlers.onTransferError?.(transferId, err);
       }
       throw err;
     } finally {
-      this.currentTransferIdTracker = prevIdTracker;
-      if (allocatedId !== null) {
-        this.sendTransferMetadata.delete(allocatedId);
-      }
+      this.sendTransferMetadata.delete(transferId);
     }
   }
 
   /**
    * Cancel an in-flight transfer on both sides: the sender stops the chunk
    * loop and the receiver drops any buffered chunks. Either side is safe to
-   * call; an unknown id is a no-op. Emits {@link onTransferCancelled} once.
+   * call; an unknown id (no active transfer on either side) is a silent no-op.
+   *
+   * R2/F3 (Phase 7): `onTransferCancelled` is emitted exactly ONCE, from HERE,
+   * and only when an active transfer was actually cancelled — the sender and
+   * receiver {@link cancelTransfer} implementations report whether they found
+   * one. The rejected in-flight `sendFile` coroutine checks the
+   * `cancelEmitted` flag on its metadata entry and skips its own emission, so
+   * a cancelled send surfaces one event total, and cancelling an id nothing
+   * knows surfaces zero.
    */
   cancelTransfer(transferId: number): void {
+    let cancelled = false;
     if (this.frameSender !== null) {
-      this.frameSender.cancelTransfer(transferId);
+      cancelled = this.frameSender.cancelTransfer(transferId) || cancelled;
     }
     if (this.frameReceiver !== null) {
-      this.frameReceiver.cancelTransfer(transferId);
+      cancelled = this.frameReceiver.cancelTransfer(transferId) || cancelled;
+    }
+    if (!cancelled) {
+      return;
+    }
+    const meta = this.sendTransferMetadata.get(transferId);
+    if (meta !== undefined) {
+      meta.cancelEmitted = true;
     }
     this.handlers.onTransferCancelled?.(transferId);
   }
@@ -995,7 +1088,23 @@ export class ConversationOrchestrator {
       authMode: this.authMode,
     });
     this.transcript = transcript;
+    // Capture the handshake generation BEFORE the signTranscript await (the
+    // same discipline as beginHandshake/handleInbound/verifyPeerAndComplete).
+    // A stale sign coroutine parked across a teardown → retry() → re-attach
+    // must NOT resume against the fresh handshake: it would send a signature
+    // over the OLD transcript on the NEW transport (the honest peer's
+    // verifyTranscript then fails and failHandshake kills the fresh session)
+    // and latch `localSignatureSent` on the fresh handshake, stalling its own
+    // signature round. Bail silently — no send, no flag, no error emission.
+    const generation = this.handshakeGeneration;
     const signature = await signTranscript(this.identity.privateKey, transcript);
+    if (this.handshakeSuperseded(generation)) {
+      return;
+    }
+    // Idempotence under a duplicate Hello: a second maybeSignAndSend coroutine
+    // of the SAME handshake can have completed the send while this one was
+    // parked in signTranscript — send at most one signature per handshake.
+    if (this.localSignatureSent) return;
     this.transport?.send(encodeSignatureMessage(signature));
     this.localSignatureSent = true;
   }
@@ -1267,7 +1376,9 @@ export class ConversationOrchestrator {
       peerSessionId: remoteSessionId,
       transport: toFrameTransport(this.transport),
       onTransferStart: (transferId: number, name: string, mimeType: string, size: number): void => {
-        this.currentTransferIdTracker?.(transferId);
+        // R2/F4 (Phase 7): no shared tracker slot here anymore — each send's
+        // metadata was already registered under its own reserved id at
+        // orchestrator.sendFile entry; this hook only surfaces the event.
         this.handlers.onTransferStart?.({
           transferId,
           name,
@@ -1293,7 +1404,21 @@ export class ConversationOrchestrator {
       sessionKeys,
       peerSessionId: remoteSessionId,
       onText: (plaintext: Uint8Array): void => {
-        void this.handleReceivedText(plaintext);
+        // R2/F7 (Phase 7): handleReceivedText awaits repository.appendMessage;
+        // a storage rejection (locked at-rest manager, OPFS/IndexedDB failure)
+        // must surface via onError — with a bare `void` it became an unhandled
+        // promise rejection and the decrypted authenticated message was
+        // silently dropped. Wrapping matches the failHandshake fire-and-forget
+        // repo-write convention (cause preserved for diagnostics).
+        void this.handleReceivedText(plaintext).catch((err: unknown) => {
+          this.handlers.onError?.(
+            new OrchestratorError(
+              OrchestratorErrorCode.DurableStoreWriteFailed,
+              "failed to persist received message",
+              err,
+            ),
+          );
+        });
       },
       onControl: (): void => {
         // Control frames are not part of this slice's surface area.

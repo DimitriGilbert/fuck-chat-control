@@ -89,6 +89,44 @@ describe("transfer-state reducer", () => {
     expect(findTransfer(next, 1)?.status).toBe("complete");
   });
 
+  describe("R3/F7: terminal transfers ignore ALL events, including error", () => {
+    it("ignores a late error after completion (returns the same reference, keeps status complete)", () => {
+      const started = applyTransferEvent([], startSent);
+      const done = applyTransferEvent(started, { type: "complete", id: 1 });
+      const next = applyTransferEvent(done, { type: "error", id: 1, error: "late hash mismatch" });
+      expect(next).toBe(done);
+      const transfer = findTransfer(next, 1);
+      expect(transfer?.status).toBe("complete");
+      expect(transfer?.error).toBeUndefined();
+      // bytesTransferred stays at full size — not rewritten by the late error.
+      expect(transfer?.bytesTransferred).toBe(100);
+    });
+
+    it("ignores a late error after cancellation", () => {
+      const started = applyTransferEvent([], startSent);
+      const cancelled = applyTransferEvent(started, { type: "cancelled", id: 1 });
+      const next = applyTransferEvent(cancelled, { type: "error", id: 1, error: "boom" });
+      expect(next).toBe(cancelled);
+      expect(findTransfer(next, 1)?.status).toBe("cancelled");
+    });
+
+    it("ignores a second error once the transfer already errored (first error wins)", () => {
+      const started = applyTransferEvent([], startSent);
+      const errored = applyTransferEvent(started, { type: "error", id: 1, error: "first" });
+      const next = applyTransferEvent(errored, { type: "error", id: 1, error: "second" });
+      expect(next).toBe(errored);
+      const transfer = findTransfer(next, 1);
+      expect(transfer?.status).toBe("error");
+      expect(transfer?.error).toBe("first");
+    });
+
+    it("still records an error for an ACTIVE (non-terminal) transfer", () => {
+      const started = applyTransferEvent([], startSent);
+      const next = applyTransferEvent(started, { type: "error", id: 1, error: "real failure" });
+      expect(findTransfer(next, 1)).toMatchObject({ status: "error", error: "real failure" });
+    });
+  });
+
   it("returns the same reference when nothing changes", () => {
     const started = applyTransferEvent([], startSent);
     const next = applyTransferEvent(started, {

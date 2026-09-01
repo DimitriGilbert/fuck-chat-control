@@ -30,10 +30,7 @@ import {
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "./_helpers";
 
 const PKG_JS = fileURLToPath(
-  new URL(
-    "../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js",
-    import.meta.url,
-  ),
+  new URL("../../../../../packages/chat-runtime/wasm/spake2/pkg/fck_spake2.js", import.meta.url),
 );
 const PKG_WASM = fileURLToPath(
   new URL(
@@ -57,6 +54,7 @@ const cryptoGates = vi.hoisted(() => {
   });
   return {
     verifyTranscript: makeGate(),
+    signTranscript: makeGate(),
     createPakeSession: makeGate(),
     deriveSessionKeys: makeGate(),
     computeSafetyNumber: makeGate(),
@@ -101,13 +99,13 @@ function releaseGate(gate: Gate): void {
 // The vi.mock factory is hoisted above every import; it may only reference
 // hoisted state (cryptoGates) and hoisted function declarations (runGated).
 vi.mock("@fuck-eu-chat-control/chat-runtime/crypto", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("@fuck-eu-chat-control/chat-runtime/crypto")
-  >();
+  const actual = await importOriginal<typeof import("@fuck-eu-chat-control/chat-runtime/crypto")>();
   return {
     ...actual,
     verifyTranscript: (...args: Parameters<typeof actual.verifyTranscript>) =>
       runGated(cryptoGates.verifyTranscript, () => actual.verifyTranscript(...args)),
+    signTranscript: (...args: Parameters<typeof actual.signTranscript>) =>
+      runGated(cryptoGates.signTranscript, () => actual.signTranscript(...args)),
     createPakeSession: (...args: Parameters<typeof actual.createPakeSession>) =>
       runGated(cryptoGates.createPakeSession, () => actual.createPakeSession(...args)),
     deriveSessionKeys: (...args: Parameters<typeof actual.deriveSessionKeys>) =>
@@ -246,17 +244,17 @@ class GatedRepository implements ConversationRepository {
     return this.inner.getMessages(id);
   }
 
-  storePeerIdentity(
-    id: ConversationId,
-    fingerprint: string,
-    publicKey: PublicKey,
-  ): Promise<void> {
+  storePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void> {
     return runGated(this.gates.storePeerIdentity, () =>
       this.inner.storePeerIdentity(id, fingerprint, publicKey),
     );
   }
 
-  replacePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void> {
+  replacePeerIdentity(
+    id: ConversationId,
+    fingerprint: string,
+    publicKey: PublicKey,
+  ): Promise<void> {
     return this.inner.replacePeerIdentity(id, fingerprint, publicKey);
   }
 
@@ -445,8 +443,9 @@ describe("verifyPeerAndComplete teardown races (R2/F2)", () => {
 
         // Both sides' verifyPeerAndComplete coroutines are now parked at the
         // gated await (the handshake reached it — not a timeout).
-        await waitUntil(`${scenario.label} park on both sides`, () =>
-          scenario.parkedCount(repoGates) >= 2,
+        await waitUntil(
+          `${scenario.label} park on both sides`,
+          () => scenario.parkedCount(repoGates) >= 2,
         );
         expect(initiator.orchestrator.state).not.toBe(ConnectionState.Idle);
 
@@ -520,7 +519,10 @@ describe("verifyPeerAndComplete generation advance across a re-attach (R7/F4 + R
       // Both STALE coroutines park inside the gated deriveSessionKeys await —
       // past every earlier R2/F2 re-check, one resumption step away from
       // wiring framing.
-      await waitUntil("stale park on both sides", () => cryptoGates.deriveSessionKeys.parkedCount >= 2);
+      await waitUntil(
+        "stale park on both sides",
+        () => cryptoGates.deriveSessionKeys.parkedCount >= 2,
+      );
 
       // Teardown, then — BEFORE releasing the gate — retry() and attach a
       // FRESH transport pair on both sides. The re-attach bumps the handshake
@@ -535,7 +537,10 @@ describe("verifyPeerAndComplete generation advance across a re-attach (R7/F4 + R
       const { a: freshA, b: freshB } = linkLoopbackPair();
       initiator.orchestrator.attachTransport(freshA);
       responder.orchestrator.attachTransport(freshB);
-      await waitUntil("fresh park on both sides", () => cryptoGates.deriveSessionKeys.parkedCount >= 4);
+      await waitUntil(
+        "fresh park on both sides",
+        () => cryptoGates.deriveSessionKeys.parkedCount >= 4,
+      );
 
       // Release: the stale coroutines parked first, so they resume first and
       // must bail WITHOUT wiring anything — no second FrameSender/FrameReceiver
@@ -565,6 +570,88 @@ describe("verifyPeerAndComplete generation advance across a re-attach (R7/F4 + R
       expect(responderConnected).toHaveLength(1);
       expect(initiator.spies.onSafetyNumber.calls).toHaveLength(1);
       expect(responder.spies.onSafetyNumber.calls).toHaveLength(1);
+
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+    },
+  );
+});
+
+/**
+ * Adjacent Phase 7 hardening: maybeSignAndSend captures the handshake
+ * generation before its signTranscript await and bails silently when
+ * superseded. A stale sign coroutine parked across a teardown → retry() →
+ * re-attach must NOT send its OLD signature on the NEW transport (the honest
+ * peer's verifyTranscript would fail and failHandshake would kill the fresh
+ * session) and must NOT latch `localSignatureSent` on the fresh handshake
+ * (which would stall the fresh signature round entirely).
+ */
+describe("stale maybeSignAndSend across a re-attach", () => {
+  it(
+    "a stale sign coroutine released after a fresh re-attach sends nothing and does not stall the fresh handshake",
+    { timeout: 15_000 },
+    async () => {
+      const repoGates = makeRepoGates();
+      enableGate(cryptoGates.signTranscript);
+
+      const initiator = await makeOrchestrator(repoGates);
+      const responder = await makeOrchestrator(repoGates);
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      responder.orchestrator.attachTransport(b);
+
+      // Each side's signature round is triggered by the peer's Hello: both
+      // maybeSignAndSend coroutines park inside the gated signTranscript await
+      // (after the real signature over the OLD transcript has been computed).
+      await waitUntil(
+        "stale sign park on both sides",
+        () => cryptoGates.signTranscript.parkedCount >= 2,
+      );
+
+      // Teardown, then — BEFORE releasing the gate — retry() and attach a
+      // FRESH transport pair. The fresh handshakes exchange fresh Hellos and
+      // park their own maybeSignAndSend coroutines at the same gated await.
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+      initiator.orchestrator.retry();
+      responder.orchestrator.retry();
+      const { a: freshA, b: freshB } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(freshA);
+      responder.orchestrator.attachTransport(freshB);
+      await waitUntil(
+        "fresh sign park on both sides",
+        () => cryptoGates.signTranscript.parkedCount >= 4,
+      );
+
+      // Release: the stale coroutines (parked first, woken first) must bail
+      // silently; only the fresh coroutines may send signatures. Pre-fix the
+      // stale coroutine sent a signature over the OLD transcript on the FRESH
+      // transport — the peer's verifyTranscript failed and failHandshake tore
+      // down the fresh session.
+      releaseGate(cryptoGates.signTranscript);
+
+      await waitForConnected(initiator.orchestrator);
+      await waitForConnected(responder.orchestrator);
+
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+      expect(responder.spies.onError.calls).toHaveLength(0);
+
+      // Exactly one Connected transition per side, and each side sent exactly
+      // one 65-byte signature message on its FRESH transport (the stale
+      // coroutine's signature never crossed the wire).
+      const initiatorConnected = initiator.spies.onStateChange.calls.filter(
+        (call) => call[0] === ConnectionState.Connected,
+      );
+      const responderConnected = responder.spies.onStateChange.calls.filter(
+        (call) => call[0] === ConnectionState.Connected,
+      );
+      expect(initiatorConnected).toHaveLength(1);
+      expect(responderConnected).toHaveLength(1);
+      expect(freshA.sent.filter((bytes) => bytes.length === 65)).toHaveLength(1);
+      expect(freshB.sent.filter((bytes) => bytes.length === 65)).toHaveLength(1);
 
       initiator.orchestrator.leave();
       responder.orchestrator.leave();

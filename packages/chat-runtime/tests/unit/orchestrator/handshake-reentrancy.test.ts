@@ -116,7 +116,11 @@ class CountingRepository implements ConversationRepository {
     await this.inner.storePeerIdentity(id, fingerprint, publicKey);
   }
 
-  replacePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void> {
+  replacePeerIdentity(
+    id: ConversationId,
+    fingerprint: string,
+    publicKey: PublicKey,
+  ): Promise<void> {
     return this.inner.replacePeerIdentity(id, fingerprint, publicKey);
   }
 
@@ -308,9 +312,7 @@ describe("verifyPeerAndComplete re-entrancy (R2/F1)", () => {
 
     await initiator.orchestrator.sendText("after duplicate signature");
     await new Promise<void>((resolve) => setTimeout(resolve, 100));
-    const received = await responder.repository.getMessages(
-      responder.orchestrator.conversationId!,
-    );
+    const received = await responder.repository.getMessages(responder.orchestrator.conversationId!);
     expect(received.filter((m) => m.direction === "received").map((m) => m.text)).toEqual([
       "after duplicate signature",
     ]);

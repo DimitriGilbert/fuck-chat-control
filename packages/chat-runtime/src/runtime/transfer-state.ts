@@ -79,10 +79,13 @@ export function applyTransferEvent(
   const idx = state.findIndex((t) => t.id === event.id);
   if (idx === -1) return state;
   const current = state[idx]!;
-  if (isTerminal(current.status) && event.type !== "error") {
-    // Once complete/cancelled/error, ignore progress/complete/cancelled noise.
-    // An error after completion is still ignored: a late hash-mismatch report
-    // on an already-complete transfer would only confuse the UI.
+  if (isTerminal(current.status)) {
+    // R3/F7 (Phase 7): a terminal status (complete/cancelled/error) is final —
+    // ALL later events for the transfer are ignored, including `error`. A late
+    // hash-mismatch or timeout report on an already-complete transfer must not
+    // flip the snapshot back to "error" (with bytesTransferred still at full
+    // size); the pre-fix `event.type !== "error"` exception allowed exactly
+    // that, contradicting this comment.
     return state;
   }
 

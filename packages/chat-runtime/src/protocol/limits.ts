@@ -12,6 +12,23 @@ export const GCM_NONCE_BYTES = 12 as const;
 export const MAX_SEQUENCE = 0xffffffff as const;
 
 export const MAX_TEXT_FRAME_BYTES = 16384 as const;
+/**
+ * AES-GCM authentication tag length in bytes. Every encrypted frame's
+ * ciphertext is `plaintext + tag` (the 128-bit tag configured as
+ * `GCM_TAG_BITS` in crypto/primitives.ts), so the largest plaintext a frame
+ * type capped at `MAX_TEXT_FRAME_BYTES` can carry is the cap minus this tag.
+ */
+export const GCM_TAG_BYTES = 16 as const;
+/**
+ * R2/F5 (Phase 7): largest UTF-8 plaintext a Text frame may carry, derived
+ * from the codec's ciphertext cap (`MAX_TEXT_FRAME_BYTES`, enforced in
+ * `encodeFrameHeader`/`decodeFrameHeader` via `ciphertextCapForFrameType`)
+ * minus the GCM tag — NOT an independent magic number. The orchestrator's
+ * `sendText` validates against this bound BEFORE persisting, so an over-long
+ * text is rejected up front instead of being durably stored as `Sent` and
+ * then failing at encode time with nothing transmitted.
+ */
+export const MAX_TEXT_PLAINTEXT_BYTES = MAX_TEXT_FRAME_BYTES - GCM_TAG_BYTES;
 export const MAX_CHUNK_BYTES = 16384 as const;
 export const MAX_MANIFEST_NAME_BYTES = 255 as const;
 export const MAX_MANIFEST_MIME_BYTES = 127 as const;

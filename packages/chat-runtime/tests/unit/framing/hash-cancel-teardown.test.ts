@@ -14,7 +14,7 @@ import type {
   FrameReceiverHandlers,
   ReceivedFile,
 } from "@fuck-eu-chat-control/chat-runtime/framing";
-import { bytesEqual, deterministicData, forgeFrame, makePair, waitFor } from "./_helpers";
+import { bytesEqual, deterministicData, forgeFrame, makePair } from "./_helpers";
 
 function collectHandlers(): {
   files: ReceivedFile[];
@@ -68,7 +68,12 @@ describe("slice 5: hash verification", () => {
     const rec = collectHandlers();
     const { sender, transport } = await makePair(rec.handlers);
     const data = deterministicData(250, 11);
-    await sender.sendFile(data, "payload.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.files).toHaveLength(1);
     expect(bytesEqual(rec.files[0].data, data)).toBe(true);
@@ -132,12 +137,19 @@ describe("slice 5: cancellation releases buffers", () => {
     const { sender, transport } = await makePair(rec.handlers);
     transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES);
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 5);
-    const filePromise = sender.sendFile(data, "payload.bin", "application/octet-stream");
-    await waitFor(() => sender.activeTransferCount === 1);
-    // R9/F4 (Phase 8.5): the sender allocates transfer ids starting at
-    // FIRST_TRANSFER_ID = 1_000_000 (see framing/sender.ts). The first
-    // sendFile call yields id = 1_000_000; cancel that id.
-    sender.cancelTransfer(1_000_000);
+    // R2/F4 (Phase 7): the transfer id is reserved SYNCHRONOUSLY via
+    // beginFileTransfer (counted in activeTransfers from this instant, before
+    // any hashing), so the test cancels the exact reserved id instead of
+    // hardcoding FIRST_TRANSFER_ID.
+    const transferId = sender.beginFileTransfer();
+    const filePromise = sender.sendFile(
+      transferId,
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
+    expect(sender.activeTransferCount).toBe(1);
+    sender.cancelTransfer(transferId);
     await expect(filePromise).rejects.toMatchObject({
       code: FramingErrorCode.TransferCancelled,
     });
@@ -230,12 +242,49 @@ describe("slice 5: teardown releases all transfer buffers", () => {
     const { sender, transport } = await makePair(rec.handlers);
     transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES);
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 8);
-    const filePromise = sender.sendFile(data, "payload.bin", "application/octet-stream");
-    await waitFor(() => sender.activeTransferCount === 1);
+    const transferId = sender.beginFileTransfer();
+    const filePromise = sender.sendFile(
+      transferId,
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
+    expect(sender.activeTransferCount).toBe(1);
     sender.teardown();
     await expect(filePromise).rejects.toMatchObject({
       code: FramingErrorCode.TearingDown,
     });
     expect(sender.activeTransferCount).toBe(0);
+  });
+
+  it("R2/F8: a cancel issued during the hashing window rejects the send (registration is synchronous)", async () => {
+    const rec = collectHandlers();
+    const { sender, transport } = await makePair(rec.handlers);
+    // No backpressure: the transfer parks only inside sendFile's own
+    // `await sha256(data)` over a 32 MiB buffer, which is slow enough that the
+    // cancel below lands inside the hashing window — deterministically before
+    // the manifest frame is ever sent.
+    const data = deterministicData(32 * 1024 * 1024, 9);
+    const transferId = sender.beginFileTransfer();
+    // The reservation must be observable BEFORE sendFile begins hashing —
+    // pre-fix the id joined activeTransfers only after the hash, so this
+    // cancel was silently lost and the send ran to completion.
+    expect(sender.activeTransferCount).toBe(1);
+    const filePromise = sender.sendFile(
+      transferId,
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
+    sender.cancelTransfer(transferId);
+    await expect(filePromise).rejects.toMatchObject({
+      code: FramingErrorCode.TransferCancelled,
+    });
+    expect(sender.activeTransferCount).toBe(0);
+    expect(rec.files).toHaveLength(0);
+    await transport.ingestSettled;
+    // No manifest frame was ever sent — the cancel landed before hashing
+    // completed, so the receiver never saw the transfer.
+    expect(transport.sent).toHaveLength(0);
   });
 });

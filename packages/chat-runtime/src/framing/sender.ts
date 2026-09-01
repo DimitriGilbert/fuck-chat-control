@@ -2,6 +2,7 @@ import { encryptFrame } from "../crypto/aead";
 import { encodeTransferCancelPayload } from "../protocol/codec";
 import {
   MAX_BUFFERED_DATA_BYTES,
+  MAX_CONCURRENT_TRANSFERS,
   MAX_INCOMPLETE_TRANSFER_BYTES,
   MAX_SEQUENCE,
   PROTOCOL_VERSION,
@@ -77,90 +78,151 @@ export class FrameSender {
     await this.sendEncryptedFrame(FrameType.Control, body, 0, 0);
   }
 
-  async sendFile(data: Uint8Array, name: string, mimeType: string): Promise<number> {
+  /**
+   * R2/F4 + R2/F8 (Phase 7): synchronously allocate AND reserve a transfer id.
+   * The id is added to `activeTransfers` — so it counts against
+   * {@link activeTransferCount} and {@link MAX_CONCURRENT_TRANSFERS} — the
+   * moment this returns, BEFORE any hashing. Callers then drive the bytes with
+   * {@link sendFile} passing the reserved id back.
+   *
+   * This closed two races the old self-allocating `sendFile` had:
+   *   - the orchestrator learned the id only from the `onTransferStart` hook,
+   *     which fires AFTER `await sha256(data)` and the manifest send — two
+   *     concurrent sends cross-attributed ids/metadata through a shared
+   *     mutable slot (R2/F4);
+   *   - the id joined `activeTransfers` only after hashing, so N concurrent
+   *     calls all passed the cap check (check-then-act race) and a cancel
+   *     issued during the hashing window was silently lost (R2/F8).
+   *
+   * Throws when the sender is tearing down or the concurrent-transfer cap is
+   * already saturated. The reservation is released by `sendFile`'s finally on
+   * every exit path (or by {@link teardown}).
+   */
+  beginFileTransfer(): number {
     this.assertNotTearingDown();
-    // LW-5: reject an oversized input BEFORE hashing it. The receiver's budget
-    // check and the manifest encoder's size guard both reject sizes above
-    // MAX_INCOMPLETE_TRANSFER_BYTES, but they run only after this method has
-    // already paid for the sha256 over the full buffer. Hoisting the cap above
-    // the hash avoids wasted work on an input that can never be sent, and
-    // surfaces the error at the sender instead of after a round-trip.
-    if (data.length > MAX_INCOMPLETE_TRANSFER_BYTES) {
+    if (this.activeTransfers.size >= MAX_CONCURRENT_TRANSFERS) {
       throw new FramingError(
-        FramingErrorCode.SizeExceeded,
-        `file size ${data.length} exceeds MAX_INCOMPLETE_TRANSFER_BYTES (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+        FramingErrorCode.ConcurrentTransfersExceeded,
+        `concurrent transfer limit (${MAX_CONCURRENT_TRANSFERS}) reached`,
       );
     }
     const transferId = this.allocateTransferId();
-    const contentHash = await sha256(data);
-    const chunkCount = computeChunkCount(data.length);
-    const manifest: FileManifest = {
-      transferId,
-      name,
-      mimeType,
-      size: data.length,
-      chunkCount,
-      contentHash,
-    };
     this.activeTransfers.add(transferId);
-    try {
-      this.assertNotTearingDown(transferId);
-      await this.sendEncryptedFrame(
-        FrameType.FileManifest,
-        encodeManifest(manifest),
-        transferId,
-        0,
+    return transferId;
+  }
+
+  async sendFile(
+    transferId: number,
+    data: Uint8Array,
+    name: string,
+    mimeType: string,
+  ): Promise<number> {
+    // The id MUST come from {@link beginFileTransfer} on THIS sender: it is the
+    // reservation that counts the transfer against the cap and makes an
+    // immediate {@link cancelTransfer} observable. An unreserved id would
+    // silently bypass both invariants, so reject it loudly.
+    if (!this.activeTransfers.has(transferId)) {
+      throw new FramingError(
+        FramingErrorCode.UnknownTransfer,
+        `transfer ${transferId} was not reserved via beginFileTransfer()`,
       );
-      this.config.onTransferStart?.(transferId, name, mimeType, data.length);
-      for (let i = 0; i < chunkCount; i++) {
-        this.assertNotTearingDown(transferId);
-        await this.waitForDrain(transferId);
-        this.assertNotTearingDown(transferId);
-        const { start, end } = chunkBoundaries(data.length, i);
-        const chunk = data.subarray(start, end);
-        await this.sendEncryptedFrame(FrameType.FileChunk, chunk, transferId, i);
-        this.config.onProgress?.(transferId, end, data.length);
+    }
+    try {
+      this.assertNotTearingDown();
+      // LW-5: reject an oversized input BEFORE hashing it. The receiver's budget
+      // check and the manifest encoder's size guard both reject sizes above
+      // MAX_INCOMPLETE_TRANSFER_BYTES, but they run only after this method has
+      // already paid for the sha256 over the full buffer. Hoisting the cap above
+      // the hash avoids wasted work on an input that can never be sent, and
+      // surfaces the error at the sender instead of after a round-trip.
+      if (data.length > MAX_INCOMPLETE_TRANSFER_BYTES) {
+        throw new FramingError(
+          FramingErrorCode.SizeExceeded,
+          `file size ${data.length} exceeds MAX_INCOMPLETE_TRANSFER_BYTES (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+        );
       }
-    } catch (err) {
-      // R3/F2 (Phase 8.2): if the sender hit a fatal sequence/transfer-id
-      // exhaustion mid-send, the chunks the receiver is still buffering will
-      // never arrive. Emit a TransferCancel control frame so the receiver can
-      // drop its matching inbound transfer state promptly instead of waiting
-      // for a transport-level timeout. Fire-and-forget: we are about to
-      // re-throw the original error and the transport may itself be tearing
-      // down, so swallow any secondary failure of the control send.
-      if (isSequenceExhaustedError(err)) {
-        try {
-          // sendControl routes through sendEncryptedFrame, which also consumes
-          // a sequence number. Under genuine exhaustion there may not be a
-          // sequence left to spend — in that case the control frame is a
-          // best-effort signal and the receiver will still time out. We do
-          // NOT re-enter the chunk loop; the cancel is emitted and the
-          // original error propagates.
-          await this.sendControl(
-            ControlSubtype.TransferCancel,
-            encodeTransferCancelPayload(transferId),
-          );
-        } catch {
-          // best-effort: the original error is the one callers see.
+      const contentHash = await sha256(data);
+      const chunkCount = computeChunkCount(data.length);
+      const manifest: FileManifest = {
+        transferId,
+        name,
+        mimeType,
+        size: data.length,
+        chunkCount,
+        contentHash,
+      };
+      try {
+        this.assertNotTearingDown(transferId);
+        await this.sendEncryptedFrame(
+          FrameType.FileManifest,
+          encodeManifest(manifest),
+          transferId,
+          0,
+        );
+        this.config.onTransferStart?.(transferId, name, mimeType, data.length);
+        for (let i = 0; i < chunkCount; i++) {
+          this.assertNotTearingDown(transferId);
+          await this.waitForDrain(transferId);
+          this.assertNotTearingDown(transferId);
+          const { start, end } = chunkBoundaries(data.length, i);
+          const chunk = data.subarray(start, end);
+          await this.sendEncryptedFrame(FrameType.FileChunk, chunk, transferId, i);
+          this.config.onProgress?.(transferId, end, data.length);
         }
+      } catch (err) {
+        // R3/F2 (Phase 8.2): if the sender hit a fatal sequence/transfer-id
+        // exhaustion mid-send, the chunks the receiver is still buffering will
+        // never arrive. Emit a TransferCancel control frame so the receiver can
+        // drop its matching inbound transfer state promptly instead of waiting
+        // for a transport-level timeout. Fire-and-forget: we are about to
+        // re-throw the original error and the transport may itself be tearing
+        // down, so swallow any secondary failure of the control send.
+        if (isSequenceExhaustedError(err)) {
+          try {
+            // sendControl routes through sendEncryptedFrame, which also consumes
+            // a sequence number. Under genuine exhaustion there may not be a
+            // sequence left to spend — in that case the control frame is a
+            // best-effort signal and the receiver will still time out. We do
+            // NOT re-enter the chunk loop; the cancel is emitted and the
+            // original error propagates.
+            await this.sendControl(
+              ControlSubtype.TransferCancel,
+              encodeTransferCancelPayload(transferId),
+            );
+          } catch {
+            // best-effort: the original error is the one callers see.
+          }
+        }
+        throw err;
       }
-      throw err;
     } finally {
+      // Release the reservation on EVERY exit path — including the
+      // assertNotTearingDown/size-check throws above — so a failed send never
+      // pins a slot against the concurrent-transfer cap.
       this.activeTransfers.delete(transferId);
       this.cancelledTransfers.delete(transferId);
     }
     return transferId;
   }
 
-  cancelTransfer(transferId: number): void {
-    if (!this.activeTransfers.has(transferId)) return;
+  /**
+   * R2/F3 (Phase 7): cancel an in-flight SEND and report whether a transfer
+   * was actually cancelled. Returns `false` for an unknown id (no-op) — the
+   * caller (the orchestrator) uses the return value to emit
+   * `onTransferCancelled` exactly once and only for real cancellations.
+   * The id stays in `cancelledTransfers` until the send's own finally, so a
+   * send still hashing (or between chunks) observes the cancel via
+   * `assertNotTearingDown(transferId)` / the rejected drain waiters.
+   */
+  cancelTransfer(transferId: number): boolean {
+    if (!this.activeTransfers.has(transferId)) return false;
     this.cancelledTransfers.add(transferId);
     this.activeTransfers.delete(transferId);
     this.rejectWaiters(
       transferId,
       new FramingError(FramingErrorCode.TransferCancelled, `transfer ${transferId} cancelled`),
     );
+    return true;
   }
 
   teardown(): void {

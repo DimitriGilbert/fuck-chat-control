@@ -60,7 +60,12 @@ describe("slice 4: bounded chunking and reassembly (end-to-end)", () => {
     const rec = collectHandlers();
     const { sender, transport } = await makePair(rec.handlers);
     const data = deterministicData(100);
-    await sender.sendFile(data, "payload.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.files).toHaveLength(1);
     expect(bytesEqual(rec.files[0].data, data)).toBe(true);
@@ -71,7 +76,7 @@ describe("slice 4: bounded chunking and reassembly (end-to-end)", () => {
     const rec = collectHandlers();
     const { sender, transport } = await makePair(rec.handlers);
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2 + 500);
-    await sender.sendFile(data, "big.bin", "application/octet-stream");
+    await sender.sendFile(sender.beginFileTransfer(), data, "big.bin", "application/octet-stream");
     await transport.ingestSettled;
     expect(rec.files).toHaveLength(1);
     expect(rec.files[0].data.length).toBe(data.length);
@@ -84,7 +89,7 @@ describe("slice 4: bounded chunking and reassembly (end-to-end)", () => {
     const rec = collectHandlers();
     const { sender, transport } = await makePair(rec.handlers);
     const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 3);
-    await sender.sendFile(data, "big.bin", "application/octet-stream");
+    await sender.sendFile(sender.beginFileTransfer(), data, "big.bin", "application/octet-stream");
     await transport.ingestSettled;
     const chunkCiphertextLens = transport.sent.slice(1).map((wire) => wire.length - 50 - 12);
     for (const len of chunkCiphertextLens) {
@@ -96,7 +101,12 @@ describe("slice 4: bounded chunking and reassembly (end-to-end)", () => {
   it("reassembles an empty file (size 0, chunkCount 0)", async () => {
     const rec = collectHandlers();
     const { sender, transport } = await makePair(rec.handlers);
-    await sender.sendFile(new Uint8Array(0), "empty.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      new Uint8Array(0),
+      "empty.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.files).toHaveLength(1);
     expect(rec.files[0].data.length).toBe(0);
@@ -249,7 +259,12 @@ describe("slice 4: chunk rejection rules", () => {
   it("drops the transfer after complete reassembly; a stray chunk is unknown", async () => {
     const rec = collectHandlers();
     const { sender, transport, receiver, recvKeys, peerSessionId } = await makePair(rec.handlers);
-    await sender.sendFile(deterministicData(100), "payload.bin", "application/octet-stream");
+    await sender.sendFile(
+      sender.beginFileTransfer(),
+      deterministicData(100),
+      "payload.bin",
+      "application/octet-stream",
+    );
     await transport.ingestSettled;
     expect(rec.files).toHaveLength(1);
     expect(receiver.activeTransferCount).toBe(0);
