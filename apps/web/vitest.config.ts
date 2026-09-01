@@ -6,6 +6,9 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
+      "@fuck-eu-chat-control/chat-runtime": fileURLToPath(
+        new URL("../../packages/chat-runtime/src", import.meta.url),
+      ),
     },
   },
   test: {

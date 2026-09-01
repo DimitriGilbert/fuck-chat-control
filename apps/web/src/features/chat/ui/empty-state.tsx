@@ -10,23 +10,26 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import type { ConversationRecord } from "@/features/chat/store";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
 
 /**
  * Shown when no conversation is active. A quiet, on-brand prompt: one short
  * stance line, one primary action, one security footnote. Deliberately NOT
  * the old centered marketing wall, NOT a hero, NOT three feature cards.
  *
- * If persisted conversations exist in the repository (and none are live), a
- * compact list offers to resume each one. This is the home base; the sidebar
- * stays focused on currently-live sessions.
+ * If persisted conversations exist in the repository, a compact list offers
+ * to resume each one. This lists persisted records; the sidebar additionally
+ * lists live sessions whose record was deleted (R7/F3 union), so the two
+ * surfaces can disagree only in that one direction.
  */
 export function EmptyState(): React.ReactElement {
   const { state, controller, ready } = useChat();
-  // Show every conversation — the same set the sidebar lists — so the center
-  // and sidebar stay in sync. (Previously this excluded live sessions, which
-  // made the two lists show different things.)
+  // Show every persisted conversation. Rows with a live background session
+  // additionally offer the non-destructive Leave (teardown only); there is
+  // nothing to leave on a persisted-only row, so no Leave is rendered there.
   const resumable = state.conversations;
+  const liveKeys = new Set(state.sessions.map((s) => resumeKey(s.id)));
 
   function handleResume(record: ConversationRecord): void {
     if (controller === null) return;
@@ -39,13 +42,15 @@ export function EmptyState(): React.ReactElement {
 
   function handleLeave(record: ConversationRecord): void {
     if (controller === null) return;
-    // clearConversation deletes the persisted record and tears down any live
-    // session — the persisted row vanishes from this list on the next emit.
-    void controller.clearConversation(record.id).catch((err: unknown) => {
-      toast.error("Could not remove", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    });
+    // R7/F3: Leave is NON-destructive. leaveConversation tears down the live
+    // session (signaling socket, peer connection, in-memory snapshot) and
+    // KEEPS the persisted record — the same semantics as the identically
+    // labeled sidebar Leave. It does NOT delete anything: the destructive
+    // action is the sidebar's separately-labeled, confirmed "Delete
+    // conversation". Previously this called clearConversation, which deleted
+    // the record while the session stayed live and connected — an orphaned,
+    // invisible background session.
+    controller.leaveConversation(record.id);
   }
 
   function handleStart(): void {
@@ -120,9 +125,10 @@ export function EmptyState(): React.ReactElement {
           </h2>
           <ul className="flex flex-col gap-1">
             {resumable.map((record) => (
-              <li key={resumeKey(record)}>
+              <li key={resumeKey(record.id)}>
                 <ResumeRow
                   record={record}
+                  live={liveKeys.has(resumeKey(record.id))}
                   onResume={() => handleResume(record)}
                   onLeave={() => handleLeave(record)}
                 />
@@ -137,11 +143,13 @@ export function EmptyState(): React.ReactElement {
 
 interface ResumeRowProps {
   readonly record: ConversationRecord;
+  /** True when a live session exists for this record (Leave is offered). */
+  readonly live: boolean;
   readonly onResume: () => void;
   readonly onLeave: () => void;
 }
 
-function ResumeRow({ record, onResume, onLeave }: ResumeRowProps): React.ReactElement {
+function ResumeRow({ record, live, onResume, onLeave }: ResumeRowProps): React.ReactElement {
   const label = record.displayName ?? "Untitled conversation";
   const when = new Date(record.createdAt).toLocaleString();
   return (
@@ -153,16 +161,20 @@ function ResumeRow({ record, onResume, onLeave }: ResumeRowProps): React.ReactEl
       <Button variant="outline" size="sm" onClick={onResume}>
         Resume
       </Button>
-      <Button variant="ghost" size="sm" onClick={onLeave}>
-        Leave
-      </Button>
+      {/* R7/F3: only rendered for rows with a live session — leaveConversation
+          is a no-op without one, and a button that does nothing is a lie. */}
+      {live && (
+        <Button variant="ghost" size="sm" onClick={onLeave}>
+          Leave
+        </Button>
+      )}
     </div>
   );
 }
 
-function resumeKey(record: ConversationRecord): string {
-  // ConversationId is a Uint8Array; convert to hex for React keys.
-  const id = record.id;
+function resumeKey(id: ConversationId): string {
+  // ConversationId is a Uint8Array; convert to hex for React keys and live
+  // lookups (same normalization as the sidebar's sessionKey).
   let hex = "";
   for (let i = 0; i < id.length; i++) {
     hex += id[i].toString(16).padStart(2, "0");

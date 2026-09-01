@@ -16,7 +16,15 @@ test.describe("landing shell", () => {
 
     // The shell renders the sidebar on desktop (md+). The primary New
     // conversation button is the load-bearing start affordance.
-    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible();
+    // The production prerender of `/` aborts the SSR Suspense boundary (React
+    // #419 — see FAILURE-react-419.md) and the client recovers by re-rendering
+    // the whole shell from scratch. That cold-client-recovery path can push
+    // the button's first paint past the default 5s `toBeVisible` timeout on a
+    // loaded/CI machine, so allow the same 10s the fragment tests below grant
+    // for the identical selector. Dev mode renders in ~2s and is unaffected.
+    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+      timeout: 10_000,
+    });
   });
 
   test("layout does not overflow horizontally on a mobile viewport", async ({ page }) => {
@@ -48,8 +56,11 @@ test.describe("landing shell", () => {
     await page.goto("/");
 
     // The hamburger button is labeled "Open conversations".
+    // Same React #419 cold-client-render caveat as the shell test above: the
+    // mobile top bar (hamburger included) only mounts after the client-render
+    // recovery completes, which can exceed the default 5s on a loaded machine.
     const toggle = page.getByRole("button", { name: "Open conversations" });
-    await expect(toggle).toBeVisible();
+    await expect(toggle).toBeVisible({ timeout: 10_000 });
 
     // The empty state also exposes a Start affordance on mobile, so scope the
     // drawer-open assertion to the Sheet's content, which only mounts when the

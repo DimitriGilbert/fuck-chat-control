@@ -1,0 +1,76 @@
+diff --git a/dist/presets/node/runtime/node-server.mjs b/dist/presets/node/runtime/node-server.mjs
+index cd13e631c0eec61671c662a7dfe3f6f0fe919e13..8ef3c189298c06404c80216307eee558e06e1d47 100644
+--- a/dist/presets/node/runtime/node-server.mjs
++++ b/dist/presets/node/runtime/node-server.mjs
+@@ -24,7 +24,31 @@ const server = serve({
+ 	plugins: [...tracingSrvxPlugins]
+ });
+ if (import.meta._websocket) {
+-	const { handleUpgrade } = wsAdapter({ resolve: resolveWebsocketHooks });
++	// [fck-chat-control patch, R3/F1] Forward a wire-level ws maxPayload to
++	// the crossws node adapter (it spreads options.serverOptions into the
++	// underlying `ws` WebSocketServer). Upstream nitro 3.0.260610-beta exposes
++	// no config key for this, so `ws` keeps its 100 MiB/frame default and a
++	// few sockets can OOM the process before any app-layer cap fires. Default
++	// 32 KiB (just above this app's 16 KiB broker cap); override with
++	// NITRO_WS_MAX_PAYLOAD, disable with exactly "0". Malformed values (NaN,
++	// negative, trailing junk, hex) fail CLOSED to the 32 KiB default with a
++	// console.warn (R5/F4).
++	const _wsMaxPayloadFromEnv = (raw) => {
++		if (raw === undefined || raw === "") return 32768;
++		if (raw === "0") return 0; // documented opt-out: no wire-level cap (exact "0" only)
++		const trimmed = raw.trim();
++		const parsed = Number.parseInt(trimmed, 10);
++		if (/^\d+$/.test(trimmed) && parsed > 0) return parsed;
++		console.warn(
++			`[fck-chat-control nitro patch] Ignoring malformed NITRO_WS_MAX_PAYLOAD=${JSON.stringify(raw)}, failing closed to 32768`,
++		);
++		return 32768;
++	};
++	const _wsMaxPayload = _wsMaxPayloadFromEnv(process.env.NITRO_WS_MAX_PAYLOAD);
++	const { handleUpgrade } = wsAdapter({
++		resolve: resolveWebsocketHooks,
++		...(_wsMaxPayload > 0 ? { serverOptions: { maxPayload: _wsMaxPayload } } : {}),
++	});
+ 	server.node.server.on("upgrade", (req, socket, head) => {
+ 		handleUpgrade(
+ 			req,
+diff --git a/dist/runtime/internal/vite/dev-entry.mjs b/dist/runtime/internal/vite/dev-entry.mjs
+index cb1176ee093ecfc362080044279eae86abd82f9a..e8b2cad9e0aac7c5ac137ebfe8073020cddea57e 100644
+--- a/dist/runtime/internal/vite/dev-entry.mjs
++++ b/dist/runtime/internal/vite/dev-entry.mjs
+@@ -9,7 +9,33 @@ const nitroApp = useNitroApp();
+ 
+ export const fetch = nitroApp.fetch;
+ 
+-const ws = import.meta._websocket ? wsAdapter({ resolve: resolveWebsocketHooks }) : undefined;
++// [fck-chat-control patch, R3/F1] Forward a wire-level ws maxPayload to the
++// crossws node adapter (it spreads options.serverOptions into the underlying
++// `ws` WebSocketServer). Upstream nitro 3.0.260610-beta exposes no config key
++// for this, so `ws` keeps its 100 MiB/frame default and a few sockets can OOM
++// the process before any app-layer cap fires. Default 32 KiB (just above this
++// app's 16 KiB broker cap); override with NITRO_WS_MAX_PAYLOAD, disable with
++// exactly "0". Malformed values (NaN, negative, trailing junk, hex) fail
++// CLOSED to the 32 KiB default with a console.warn (R5/F4).
++const _wsMaxPayloadFromEnv = (raw) => {
++	if (raw === undefined || raw === "") return 32768;
++	if (raw === "0") return 0; // documented opt-out: no wire-level cap (exact "0" only)
++	const trimmed = raw.trim();
++	const parsed = Number.parseInt(trimmed, 10);
++	if (/^\d+$/.test(trimmed) && parsed > 0) return parsed;
++	console.warn(
++		`[fck-chat-control nitro patch] Ignoring malformed NITRO_WS_MAX_PAYLOAD=${JSON.stringify(raw)}, failing closed to 32768`,
++	);
++	return 32768;
++};
++const _wsMaxPayload = _wsMaxPayloadFromEnv(process.env.NITRO_WS_MAX_PAYLOAD);
++
++const ws = import.meta._websocket
++	? wsAdapter({
++			resolve: resolveWebsocketHooks,
++			...(_wsMaxPayload > 0 ? { serverOptions: { maxPayload: _wsMaxPayload } } : {}),
++		})
++	: undefined;
+ 
+ if (import.meta._tasks) {
+   startScheduleRunner({});

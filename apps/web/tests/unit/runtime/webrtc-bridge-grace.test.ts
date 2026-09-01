@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import { Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
+import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 
 import { MockSignalingSocket, parse } from "../signaling/_helpers";
 import { mockSocketFactory } from "../orchestrator/_helpers";
@@ -148,6 +149,7 @@ describe("LW-21: WebRtcBridge broker-teardown grace timer (BROKER_TEARDOWN_GRACE
       role: Role.Responder,
       socketFactory: mockSocketFactory(socket),
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         transportReadyCalls++;
       },
@@ -223,6 +225,7 @@ describe("LW-21: WebRtcBridge broker-teardown grace timer (BROKER_TEARDOWN_GRACE
       role: Role.Responder,
       socketFactory: mockSocketFactory(socket),
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // expected once
       },
@@ -257,6 +260,7 @@ describe("LW-21: WebRtcBridge broker-teardown grace timer (BROKER_TEARDOWN_GRACE
       role: Role.Responder,
       socketFactory: mockSocketFactory(socket),
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // expected
       },

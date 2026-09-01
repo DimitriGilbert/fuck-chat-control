@@ -11,7 +11,7 @@ import { Progress } from "@fuck-eu-chat-control/ui/components/progress";
 import { DownloadIcon, FileIcon, XIcon } from "lucide-react";
 import * as React from "react";
 
-import type { ReceivedFile } from "@/features/chat/framing";
+import type { ReceivedFile } from "@fuck-eu-chat-control/chat-runtime/framing";
 
 /**
  * Inline transfer card. Renders one in-flight or completed transfer inside the

@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { encodeConversationId } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import { Role } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { WebRtcBridge } from "@/features/chat/runtime/webrtc-bridge";
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import { Role } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { WebRtcBridge } from "@fuck-eu-chat-control/chat-runtime/runtime/webrtc-bridge";
+import { WebRtcAdapter } from "@/features/chat/signaling/webrtc-adapter";
 
 import { MockSignalingSocket, parse } from "./_helpers";
 
@@ -156,6 +157,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -198,6 +200,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -228,7 +231,7 @@ describe("perfect-negotiation glare + rollback", () => {
     bridge.close();
   });
 
-  it("polite peer (responder) answers a remote offer when no local offer is in flight", async () => {
+  it("polite peer (responder) answers a remote offer — rolling back the nascent offer auto-promotion originated", async () => {
     const fakePc = installFakeRtc();
     const socket = new MockSignalingSocket();
     const roomId = deterministicConversationId(303);
@@ -239,6 +242,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Responder,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -246,20 +250,26 @@ describe("perfect-negotiation glare + rollback", () => {
     bridge.start();
     socket.serverOpen();
 
-    // Establish peer presence so the bridge is in a working state.
-    deliver(socket, { t: "ice", candidate: { candidate: "early-probe" } });
-    await new Promise<void>((resolve) => setTimeout(resolve));
-
-    // No local offer is in flight (the bridge only offers for the initiator).
-    expect(fakePc.localDescription).toBeNull();
-
-    // A remote offer arrives; the polite peer with no in-flight offer answers.
+    // A remote offer from a previously-unknown peer promotes the peer
+    // (R6/F7 auto-promotion), which fires onPeerJoin — and any notified
+    // side originates an offer, regardless of role. The polite side must
+    // roll that nascent local offer back and then answer the remote one.
     deliver(socket, { t: "offer", sdp: { type: "offer", sdp: "remote" } });
     await new Promise<void>((resolve) => setTimeout(resolve));
 
     expect(fakePc.remoteDescription?.type).toBe("offer");
     expect(findKind(socket, "answer")).toBeDefined();
-    expect(fakePc.rollbackCount).toBe(0);
+    expect(fakePc.rollbackCount).toBe(1);
+
+    // A second (renegotiation) offer now arrives with peer presence known
+    // and NO local offer in flight: it is answered directly, with no
+    // further rollback.
+    deliver(socket, { t: "offer", sdp: { type: "offer", sdp: "renegotiation" } });
+    await new Promise<void>((resolve) => setTimeout(resolve));
+
+    expect(fakePc.rollbackCount).toBe(1);
+    const answers = socket.sent.map((raw) => parse(raw)).filter((m) => m.t === "answer");
+    expect(answers.length).toBe(2);
 
     bridge.close();
   });
@@ -270,13 +280,12 @@ describe("perfect-negotiation glare + rollback", () => {
     // (a) call setLocalDescription({type:"rollback"}) BEFORE setting the
     // remote description, (b) release the glare flag, and (c) send an answer.
     //
-    // The bridge only triggers an outbound offer from the initiator role
-    // (handlePeerJoin gates on role === Initiator), so to reach the
-    // polite-with-in-flight-offer rollback branch we drive the bridge's
-    // internal negotiation flag directly — this is the same state the
-    // bridge itself enters during a real simultaneous-rejoin where the
-    // transcript's deterministic role assignment makes one side the
-    // responder with a pending offer.
+    // Any notified side originates offers (handlePeerJoin does not gate on
+    // role), but driving the internal negotiation flag directly keeps this
+    // test pinned to the rollback ORDERING rather than join-delivery timing —
+    // it is the same state the bridge itself enters during a real crossing
+    // rejoin where the polite side holds its own offer when the peer's
+    // arrives.
     const fakePc = installFakeRtc();
     const socket = new MockSignalingSocket();
     const roomId = deterministicConversationId(606);
@@ -286,6 +295,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Responder,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -338,6 +348,7 @@ describe("perfect-negotiation glare + rollback", () => {
       role: Role.Initiator,
       socketFactory: () => socket,
       iceServers: [],
+      peerConnectionFactory: (opts) => new WebRtcAdapter(opts),
       transportReady: () => {
         // not exercised
       },
@@ -369,9 +380,7 @@ describe("perfect-negotiation glare + rollback", () => {
 
     // The renegotiation offer was applied and a fresh answer was sent.
     expect(fakePc.remoteDescription?.type).toBe("offer");
-    const answers = socket.sent
-      .map((raw) => parse(raw))
-      .filter((m) => m.t === "answer");
+    const answers = socket.sent.map((raw) => parse(raw)).filter((m) => m.t === "answer");
     expect(answers.length).toBeGreaterThanOrEqual(1);
 
     bridge.close();

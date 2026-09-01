@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the desktop shell. The app is a wrapped web build: the page uses no Tauri core commands (no IPC, no filesystem, no shell) — the only Tauri surface is the webview itself. core:default grants the read-only metadata commands (app version, identifier) the window needs to initialize; nothing else is exposed.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -1,3 +1,13 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@fuck-eu-chat-control/ui/components/alert-dialog";
 import { Button } from "@fuck-eu-chat-control/ui/components/button";
 import {
   DropdownMenu,
@@ -19,11 +29,12 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { deriveSessionLabel } from "@/features/chat/runtime/types";
-import type { SessionSummary } from "@/features/chat/runtime/types";
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ConversationId } from "@/features/chat/protocol/types";
-import { ConnectionState } from "@/features/chat/signaling/state-machine";
+import { deriveSessionLabel } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type { SessionSummary } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { CONNECTION_STATE_LABELS } from "@/features/chat/ui/chat-status";
 import { SettingsSheetTrigger } from "@/features/chat/ui/settings-sheet";
 import { sortSessions } from "@/features/chat/ui/sort-sessions";
@@ -55,35 +66,15 @@ export function Sidebar({
   hideSettingsEntry = false,
 }: SidebarProps): React.ReactElement {
   const { controller, state, ready } = useChat();
-  // Unified list: every persisted conversation, with live-session state
-  // (connection, unread, preview) merged in where a session exists. This
-  // matches the center "Previous conversations" list exactly — live and
-  // left conversations both appear, so the two surfaces stay in sync.
-  const sorted = React.useMemo(() => {
-    const liveByKey = new Map<string, SessionSummary>();
-    for (const s of state.sessions) liveByKey.set(sessionKey(s.id), s);
-    const unified: SessionSummary[] = state.conversations.map((c) => {
-      const live = liveByKey.get(sessionKey(c.id));
-      if (live !== undefined) return live;
-      // Persisted-only (no live session): default to Idle, no unread, no
-      // preview. Sort by createdAt so stale chats don't all sink identically.
-      // SEC-4: no live orchestrator means no negotiated auth mode; the safety-
-      // number baseline matches the pre-PAKE fallback every persisted session
-      // would otherwise display.
-      return {
-        id: c.id,
-        label: deriveSessionLabel(c, null),
-        connectionState: ConnectionState.Idle,
-        unread: 0,
-        lastMessagePreview: null,
-        lastMessageAt: c.createdAt,
-        safetyNumberVerified: false,
-        authFailed: c.authFailed,
-        authMode: AuthMode.SafetyNumberOnly,
-      };
-    });
-    return sortSessions(unified);
-  }, [state.sessions, state.conversations]);
+  // Unified list: the UNION of persisted conversations and live session
+  // summaries (see {@link buildUnifiedSessions}). Live state (connection,
+  // unread, preview) is merged in where a session exists; a live session whose
+  // record was deleted still gets a row, so the sidebar and the center
+  // "Previous conversations" list can never disagree about what is alive.
+  const sorted = React.useMemo(
+    () => buildUnifiedSessions(state.conversations, state.sessions),
+    [state.sessions, state.conversations],
+  );
   const activeId = state.activeConversationId;
 
   function handleStart(): void {
@@ -194,7 +185,7 @@ export function Sidebar({
 /**
  * Clickable row in the sidebar list. Renders peer label, a connection-state
  * dot, last-message preview + relative timestamp, and an unread badge when > 0.
- * A trailing DropdownMenu exposes Rename / Clear / Leave.
+ * A trailing DropdownMenu exposes Rename / Leave / Delete conversation.
  */
 interface SessionRowProps {
   readonly session: SessionSummary;
@@ -204,6 +195,9 @@ interface SessionRowProps {
 
 function SessionRow({ session, active, onSelect }: SessionRowProps): React.ReactElement {
   const { controller } = useChat();
+  // R7/F2: destructive delete is gated behind an explicit confirmation dialog
+  // (DeleteConversationDialog below) — the dropdown item only opens it.
+  const [deleteOpen, setDeleteOpen] = React.useState(false);
   const label = session.label;
   const preview = session.lastMessagePreview;
   const timestamp = session.lastMessageAt;
@@ -231,20 +225,10 @@ function SessionRow({ session, active, onSelect }: SessionRowProps): React.React
     }
   }
 
-  async function handleClear(): Promise<void> {
-    if (controller === null) return;
-    try {
-      await controller.clearConversation(session.id);
-      toast.success("History cleared");
-    } catch (err: unknown) {
-      toast.error("Could not clear", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   function handleLeave(): void {
     if (controller === null) return;
+    // Non-destructive: tears down the live session, keeps the persisted
+    // record (same semantics as the EmptyState row's Leave).
     controller.leaveConversation(session.id);
   }
 
@@ -323,18 +307,96 @@ function SessionRow({ session, active, onSelect }: SessionRowProps): React.React
               <PencilIcon />
               Rename
             </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => void handleClear()}>
-              <TrashIcon />
-              Clear messages
-            </DropdownMenuItem>
-            <DropdownMenuItem variant="destructive" onClick={handleLeave}>
+            {/* Non-destructive: tears down the live session, keeps the record.
+                R7/F2: the destructive styling belongs to Delete below. */}
+            <DropdownMenuItem onClick={handleLeave}>
               <XIcon />
               Leave
+            </DropdownMenuItem>
+            {/* R7/F2: "Delete conversation" is the truthful label — this
+                deletes the record itself, not just messages — and only OPENS
+                the confirmation dialog; clearConversation runs on confirm. */}
+            <DropdownMenuItem variant="destructive" onClick={() => setDeleteOpen(true)}>
+              <TrashIcon />
+              Delete conversation
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      <DeleteConversationDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        conversationId={session.id}
+        label={label}
+      />
     </div>
+  );
+}
+
+export interface DeleteConversationDialogProps {
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+  /** Conversation the confirm will delete (controller.clearConversation). */
+  readonly conversationId: ConversationId;
+  /** Row label, surfaced in the description so the target is unambiguous. */
+  readonly label: string;
+}
+
+/**
+ * R7/F2: confirmation dialog for the sidebar's destructive delete, reusing
+ * {@link WipeDataAlertDialog}'s pattern (controlled AlertDialog + toast on
+ * settle). `controller.clearConversation` deletes the conversation RECORD —
+ * messages, record, AND the identity binding that lets this browser resume
+ * it (in-memory-repo.ts / browser-db-repo.ts); no "clear messages but keep
+ * the conversation" operation exists in the store. The action is therefore
+ * labeled "Delete conversation", confirmed before running, and the toast
+ * states what actually happened. A live session for a deleted record stays
+ * alive (`detached`) — R7F3 keeps it listed so it can still be left.
+ */
+export function DeleteConversationDialog({
+  open,
+  onOpenChange,
+  conversationId,
+  label,
+}: DeleteConversationDialogProps): React.ReactElement {
+  const { controller } = useChat();
+
+  async function handleConfirm(): Promise<void> {
+    if (controller === null) return;
+    try {
+      await controller.clearConversation(conversationId);
+      toast.success("Conversation deleted");
+    } catch (err: unknown) {
+      toast.error("Could not delete", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      // Close on both settle paths: AlertDialogAction is a plain action
+      // button, not an auto-closing primitive.
+      onOpenChange(false);
+    }
+  }
+
+  return (
+    <AlertDialog open={open} onOpenChange={onOpenChange}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {label} will be deleted from this browser, including its message history, its
+            conversation record, and the identity binding that lets this browser resume it. If it is
+            currently connected, the live session stays open until you leave it. The server has no
+            copy. This action cannot be undone.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" onClick={() => void handleConfirm()}>
+            Delete
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -417,6 +479,63 @@ export function formatRelative(timestamp: number): string {
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+/**
+ * Build the sidebar's unified list as a UNION of the persisted conversation
+ * records and the live session summaries — the same merge the controller's
+ * `buildState` exposes (live summary wins where both exist for an id).
+ *
+ * R7/F3: the list must NOT be derived from `state.conversations` alone.
+ * `controller.clearConversation` deletes the record but keeps a live session
+ * alive (`detached`, no teardown — chat-controller.ts), so a record-only list
+ * made such a session vanish from the sidebar while it still held its
+ * signaling socket and peer connection. Every live session therefore gets a
+ * row even when no record exists for it; an active-but-unlisted conversation
+ * cannot occur.
+ *
+ * Pure and non-mutating; sorted with {@link sortSessions}.
+ */
+export function buildUnifiedSessions(
+  conversations: readonly ConversationRecord[],
+  sessions: readonly SessionSummary[],
+): SessionSummary[] {
+  const liveByKey = new Map<string, SessionSummary>();
+  for (const s of sessions) liveByKey.set(sessionKey(s.id), s);
+  const unified: SessionSummary[] = [];
+  const listed = new Set<string>();
+  for (const c of conversations) {
+    const key = sessionKey(c.id);
+    listed.add(key);
+    const live = liveByKey.get(key);
+    if (live !== undefined) {
+      unified.push(live);
+      continue;
+    }
+    // Persisted-only (no live session): default to Idle, no unread, no
+    // preview. Sort by createdAt so stale chats don't all sink identically.
+    // SEC-4: no live orchestrator means no negotiated auth mode; the safety-
+    // number baseline matches the pre-PAKE fallback every persisted session
+    // would otherwise display.
+    unified.push({
+      id: c.id,
+      label: deriveSessionLabel(c, null),
+      connectionState: ConnectionState.Idle,
+      unread: 0,
+      lastMessagePreview: null,
+      lastMessageAt: c.createdAt,
+      safetyNumberVerified: false,
+      authFailed: c.authFailed,
+      authMode: AuthMode.SafetyNumberOnly,
+    });
+  }
+  // R7/F3: live sessions whose record was deleted (Delete conversation on a
+  // live session) still list — the session is alive and selectable, so hiding
+  // it would orphan a connected session behind an invisible row.
+  for (const s of sessions) {
+    if (!listed.has(sessionKey(s.id))) unified.push(s);
+  }
+  return sortSessions(unified);
 }
 
 /** Stable React key derived from the conversation id. */

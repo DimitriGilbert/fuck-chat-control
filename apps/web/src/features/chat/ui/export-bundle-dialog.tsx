@@ -116,5 +116,6 @@ function downloadBundle(bundle: string): void {
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  // Revoke on the next macrotask so the download has started.
+  window.setTimeout((): void => URL.revokeObjectURL(url), 0);
 }

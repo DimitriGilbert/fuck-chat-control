@@ -21,8 +21,35 @@ describe("readInvitationFragment", () => {
     expect(readInvitationFragment("#abc")).toBeNull();
   });
 
-  it("returns null when uppercase hex is present", () => {
-    expect(readInvitationFragment("#ABCDEF0123456789ABCDEF0123456789")).toBeNull();
+  describe("case normalization (LW-8 / R7/F1)", () => {
+    it("accepts uppercase hex and returns the lowercased fragment so the join proceeds", () => {
+      // The runtime's parseInvitation accepts either case; the web gate must
+      // not silently no-op (no join, no toast, no hash cleanup) on uppercase.
+      expect(readInvitationFragment("#ABCDEF0123456789ABCDEF0123456789")).toBe(
+        "abcdef0123456789abcdef0123456789",
+      );
+    });
+
+    it("accepts mixed-case hex and returns the lowercased fragment", () => {
+      expect(readInvitationFragment("#AbCdEf0123456789AbCdEf0123456789")).toBe(
+        "abcdef0123456789abcdef0123456789",
+      );
+      // Bare (no leading #) form normalizes identically.
+      expect(readInvitationFragment("AbCdEf0123456789AbCdEf0123456789")).toBe(
+        "abcdef0123456789abcdef0123456789",
+      );
+    });
+
+    it("accepts uppercase hex with a PAKE code suffix and preserves the code", () => {
+      const fragment = readInvitationFragment("#ABCDEF0123456789ABCDEF0123456789~123456");
+      expect(fragment).toBe("abcdef0123456789abcdef0123456789~123456");
+    });
+
+    it("still rejects non-hex characters after normalization", () => {
+      // Lowercasing must not widen the gate: z/g/! are not hex either way.
+      expect(readInvitationFragment("#zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")).toBeNull();
+      expect(readInvitationFragment("#gbcdef0123456789abcdef0123456789")).toBeNull();
+    });
   });
 
   it("returns null for non-hex characters of the right length", () => {

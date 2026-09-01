@@ -2,11 +2,34 @@ import { defineWebSocketHandler } from "nitro";
 
 import { env } from "@fuck-eu-chat-control/env/server";
 
-import { BrokerConnection } from "../features/chat/broker/connection";
-import type { BrokerSocket } from "../features/chat/broker/room-registry";
-import { RoomRegistry } from "../features/chat/broker/room-registry";
-import { startZombieSweep } from "../features/chat/broker/sweep";
+import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
+import type { BrokerSocket } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
+import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
+import { startZombieSweep } from "@fuck-eu-chat-control/chat-runtime/broker/sweep";
 import { isOriginAllowed } from "./origin-guard";
+
+/**
+ * R3/F2: hard cap on the number of concurrently-open WebSocket connections
+ * the broker admits. The broker is the only unauthenticated network surface,
+ * so without a cap an attacker can open thousands of idle sockets to exhaust
+ * per-process memory and file descriptors. This is a per-process cap (the
+ * single shared registry/sockets maps below), so a multi-instance deployment
+ * must divide this by the instance count or enforce it at the load balancer.
+ * Tunable per-deployment; 2048 is a conservative v1 default well below the
+ * typical Node fd soft limit (1024 soft / 4096 hard on Linux) once you reserve
+ * headroom for the server's own sockets + the runtime.
+ */
+export const MAX_CONNECTIONS = 2048;
+
+/**
+ * R3/F2: pure decision used by the `open` handler to admit or reject a new
+ * WebSocket upgrade. Exported so the cap is unit-testable in isolation
+ * (spinning up 2048 real WS upgrades via the integration harness is
+ * impractical). Returns `true` when the connection must be REJECTED.
+ */
+export function shouldRejectConnection(current: number, max: number): boolean {
+  return current >= max;
+}
 
 // Single shared registry + connection bookkeeping for the lifetime of the
 // process. crossws hands us a `Peer` per event with a stable `id`, so we key
@@ -87,6 +110,17 @@ export default defineWebSocketHandler({
     const requestOrigin = peer.request.headers.get("origin");
     if (!isOriginAllowed(env.CORS_ORIGIN, requestOrigin)) {
       peer.close(1008, "origin not allowed");
+      return;
+    }
+    // R3/F2: reject a new connection once the per-process cap is reached. The
+    // broker is the only unauthenticated network surface, so without this an
+    // attacker can open thousands of idle sockets to exhaust memory + fds. We
+    // check `sockets.size` (the authoritative live-connection set) before
+    // seating this peer. 1013 (Try Again Later) signals a transient overload
+    // condition to a conforming client, matching the existing close-code style
+    // (1008 policy/origin) used by the origin guard above.
+    if (shouldRejectConnection(sockets.size, MAX_CONNECTIONS)) {
+      peer.close(1013, "too many connections");
       return;
     }
     const socket = wrapPeer(peer);

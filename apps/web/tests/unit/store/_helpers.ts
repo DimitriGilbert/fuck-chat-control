@@ -1,11 +1,21 @@
 import { p256 } from "@noble/curves/p256";
 
-import { encodeConversationId, encodePublicKey } from "@/features/chat/protocol/codec";
-import { CONVERSATION_ID_BYTES } from "@/features/chat/protocol/limits";
-import type { ConversationId, PublicKey } from "@/features/chat/protocol/types";
+import {
+  encodeConversationId,
+  encodePublicKey,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { CONVERSATION_ID_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
-export { bytesEqual } from "../crypto/_helpers";
-
+/**
+ * Web-local store test doubles for the tests that stay in apps/web
+ * (`browser-db-repo`).
+ *
+ * The canonical copy of these helpers now lives in the chat-runtime package
+ * (`packages/chat-runtime/tests/unit/store/_helpers.ts`) for the neutral tests
+ * that moved there. This file holds only the surface the web-only tests still
+ * consume — `conversationId`, and a deterministic on-curve P-256 public key.
+ */
 export function conversationId(seed: number): ConversationId {
   const bytes = new Uint8Array(CONVERSATION_ID_BYTES);
   for (let i = 0; i < CONVERSATION_ID_BYTES; i++) bytes[i] = (seed * 31 + i) & 0xff;
@@ -17,77 +27,3 @@ export function deterministicPublicKey(seed: number): PublicKey {
   for (let i = 0; i < 32; i++) sk[i] = (seed * 7 + i + 1) & 0xff;
   return encodePublicKey(p256.getPublicKey(sk, false));
 }
-
-export function fingerprintOf(publicKey: PublicKey, seed: number): string {
-  let hex = "";
-  for (let i = 0; i < publicKey.length; i++) {
-    hex += ((publicKey[i] ^ seed) & 0xff).toString(16).padStart(2, "0");
-  }
-  return hex;
-}
-
-/**
- * Minimal in-memory `Storage` implementation for unit tests that exercise
- * `localStorage`-backed modules. The Node test environment has no `localStorage`
- * global, so tests that need it install an instance on `globalThis` (and remove
- * it for the SSR-absence case). This implements just the `getItem`/`setItem`/
- * `removeItem`/`clear` surface the store touches plus the `key`/`length`
- * members the `Storage` type requires.
- */
-export class MemoryStorage implements Storage {
-  private readonly map = new Map<string, string>();
-
-  get length(): number {
-    return this.map.size;
-  }
-
-  clear(): void {
-    this.map.clear();
-  }
-
-  getItem(key: string): string | null {
-    return this.map.has(key) ? (this.map.get(key) as string) : null;
-  }
-
-  key(index: number): string | null {
-    if (index < 0 || index >= this.map.size) return null;
-    return Array.from(this.map.keys())[index] ?? null;
-  }
-
-  removeItem(key: string): void {
-    this.map.delete(key);
-  }
-
-  setItem(key: string, value: string): void {
-    this.map.set(key, value);
-  }
-}
-
-/**
- * Install a fresh in-memory `localStorage` on `globalThis` and return the
- * instance so the test can read/write it directly. Returns a teardown that
- * restores the prior descriptor (useful for the SSR-absence test which then
- * deletes the global).
- */
-export function installLocalStorage(): {
-  storage: MemoryStorage;
-  teardown: () => void;
-} {
-  const storage = new MemoryStorage();
-  const prior = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    get: () => storage,
-  });
-  return {
-    storage,
-    teardown: () => {
-      if (prior === undefined) {
-        delete (globalThis as { localStorage?: unknown }).localStorage;
-      } else {
-        Object.defineProperty(globalThis, "localStorage", prior);
-      }
-    },
-  };
-}
-

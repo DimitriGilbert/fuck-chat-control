@@ -13,8 +13,8 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { AuthMode } from "@/features/chat/protocol/types";
-import type { ImportResult } from "@/features/chat/store";
+import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { ImportResult } from "@fuck-eu-chat-control/chat-runtime/store";
 import { ExportBundleDialog } from "@/features/chat/ui/export-bundle-dialog";
 import { ImportBundleDialog } from "@/features/chat/ui/import-bundle-dialog";
 import { WipeDataAlertDialog } from "@/features/chat/ui/wipe-data-dialog";
@@ -87,13 +87,22 @@ function SettingsSheetContent({ onClose }: SettingsSheetContentProps): React.Rea
           <div className="space-y-2">
             <h3 className="text-sm font-medium">Danger zone</h3>
             <p className="text-muted-foreground text-xs">
-              Clearing the current conversation deletes its history. Wiping all removes every
-              conversation and message from this browser. The server has no copy. The AES-256
+              Clearing the current conversation deletes it entirely — its history, its conversation
+              record, and the identity binding that lets this browser resume it. Wiping all removes
+              every conversation and message from this browser. The server has no copy. The AES-256
               at-rest key that protects your history is held separately by this browser profile;
               clearing browser site data will destroy it.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button variant="destructive" size="sm" onClick={() => setWipeMode("current")}>
+              {/* R7/F4: clearConversation() with no active conversation is a
+                  controller no-op — disable the entry so it can never surface
+                  a false success toast. */}
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setWipeMode("current")}
+                disabled={state.activeConversationId === null}
+              >
                 Clear current conversation
               </Button>
               <Button variant="destructive" size="sm" onClick={() => setWipeMode("all")}>

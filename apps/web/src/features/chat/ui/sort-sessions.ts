@@ -1,4 +1,4 @@
-import type { SessionSummary } from "@/features/chat/runtime/types";
+import type { SessionSummary } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 
 /**
  * Order sessions for the sidebar: most-recent-first, nulls last.

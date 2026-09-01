@@ -1,0 +1,6 @@
+{
+  "branch": "master",
+  "branches": [],
+  "preserveSymlinks": true,
+  "resolverMainFields": ["react-native", "browser", "main"]
+}
