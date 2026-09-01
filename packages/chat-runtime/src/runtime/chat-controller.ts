@@ -6,7 +6,7 @@ import {
   MAX_MANIFEST_NAME_BYTES,
 } from "../protocol/limits";
 import { randomBytes } from "../crypto/primitives";
-import { ConnectionState } from "../signaling/state-machine";
+import { ConnectionState, deriveResumeGlareRole } from "../signaling/state-machine";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
 import { exportBundle, importBundle, ImportMode } from "../store";
 import { AuthFailedRetryBlocked } from "../store";
@@ -213,7 +213,13 @@ export interface ChatController {
   /** Per-session display name. Single-arg form targets the active session. */
   setDisplayName(id: ConversationId, name: string): Promise<void>;
   setDisplayName(name: string): Promise<void>;
-  /** Retry the active session's handshake/signaling. */
+  /**
+   * Retry the active session's handshake/signaling. For bridge-mode sessions
+   * this re-establishes the whole transport: the orchestrator re-enters
+   * Signaling AND the bridge re-dials its signaling socket with a fresh peer
+   * connection (R3F6), so the retry is not a dead spinner after the broker
+   * socket's post-handshake teardown.
+   */
   retry(id?: ConversationId): void;
   /** Clear persisted messages. No-arg targets the active session. */
   clearConversation(id?: ConversationId): Promise<void>;
@@ -930,6 +936,24 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     if (record === null) {
       throw new Error(`cannot resume unknown conversation ${conversationId}`);
     }
+    // R3F4 (Phase 8): derive the bridge's glare role from the frozen §3 rule
+    // (deriveResumeGlareRole → deriveRole: full lexicographic comparison of
+    // the two 65-byte identity keys; smaller = Initiator = impolite) instead
+    // of hard-coding Role.Initiator for EVERY resuming peer. Two peers
+    // resuming simultaneously used to both be impolite, so their colliding
+    // offers were mutually ignored with no tie-break, timeout, or re-offer —
+    // glare deadlocked by design (with R3F5 fixed, the armed-flag
+    // mutual-ignore is actually reachable). Both resuming sides hold the
+    // SAME two keys (their own + the peer's TOFU-pinned key from the
+    // conversation record), so both compute the same ordering and land on
+    // OPPOSITE roles — exactly one side is polite and answers the other's
+    // offer. Fallback: a record with no pinned peer (the conversation never
+    // completed a handshake) keeps the previous Initiator behavior.
+    const peerKey = record.peer?.publicKey ?? null;
+    const role =
+      peerKey === null
+        ? Role.Initiator
+        : deriveResumeGlareRole(deps.identityManager.get().publicKey, peerKey);
     // Re-enter the conversation by joining with the existing conversation id
     // (idempotent at the repository level for the in-memory store).
     const fragment = `#${resumeKey}`;
@@ -941,7 +965,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     // populated first; the bridge opens only after seeding completes, so
     // any inbound frame is APPENDED to the seeded history, not lost.
     const { session } = await startSession(
-      Role.Initiator,
+      role,
       fragment,
       async (s) => {
         const history = await s.orchestrator.getHistory();
@@ -1273,6 +1297,21 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         emitErrorMessage(err);
         return;
       }
+      // R3F6 (Phase 8): orchestrator.retry() alone is a dead spinner in
+      // bridge mode — connectSignaling no-ops when useInternalSignaling is
+      // false, and after the post-handshake grace teardown the bridge has no
+      // signaling socket at all. Route the retry through the bridge so a
+      // dropped bridge-mode session actually re-establishes its transport:
+      // fresh signaling socket (re-join room), fresh peer connection, and a
+      // re-initiated offer under the corrected glare rules. Ordered AFTER
+      // orchestrator.retry() so a blocked/illegal retry never dials a socket
+      // for a session that will not re-handshake.
+      try {
+        session.bridge.reconnect();
+      } catch (err) {
+        emitErrorMessage(err);
+        return;
+      }
       session.connectionState = session.orchestrator.state;
       emit(null);
     },
@@ -1499,8 +1538,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // app's lifetime; without this the handles leaked on every dispose,
       // including the cancelled-init race in the provider). dispose() stays
       // synchronous to honor the ChatController contract, so this is
-      // fire-and-forget: close() is itself idempotent and swallow-errors.
-      // In-memory and test repos have no close() (optional on the interface).
+      // fire-and-forget: close() drains outstanding persistence, logs and
+      // RETHROWS on failure — the swallow lives HERE, at the call site's
+      // .catch. In-memory and test repos have no close() (optional on the
+      // interface).
       void Promise.resolve(rawRepository.close?.()).catch(() => {});
     },
 

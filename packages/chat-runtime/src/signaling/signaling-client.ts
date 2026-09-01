@@ -65,17 +65,28 @@ export class SignalingClient {
       throw new Error("Signaling client already connected");
     }
     const socket = this.socketFactory(this.brokerUrl);
+    // R3F6 (Phase 8): every handler is bound to the socket instance it
+    // serves. teardown() nulls `this.socket` SYNCHRONOUSLY before initiating
+    // the close, so an event from a deliberately replaced socket (the bridge
+    // reconnecting after a drop, or signalP2pOpen's post-handshake teardown)
+    // fires after `this.socket` already points elsewhere (or is null) and is
+    // skipped here. Without the identity check, a real (async) WebSocket's
+    // late close event would surface as onClose for the NEW connection and
+    // spuriously tear the retried session back down.
+    const isCurrent = (): boolean => this.socket === socket;
     socket.onopen = () => {
-      this.handleOpen();
+      if (isCurrent()) this.handleOpen();
     };
     socket.onmessage = (event) => {
-      this.handleMessage(event.data);
+      if (isCurrent()) this.handleMessage(event.data);
     };
     socket.onclose = () => {
-      this.handleClose();
+      if (isCurrent()) this.handleClose();
     };
     socket.onerror = () => {
-      this.handlers.onError?.(new Error("Signaling socket error"));
+      if (isCurrent()) {
+        this.handlers.onError?.(new Error("Signaling socket error"));
+      }
     };
     this.socket = socket;
     if (socket.readyState === READY_OPEN) {
@@ -84,8 +95,25 @@ export class SignalingClient {
   }
 
   public sendOffer(sdp: unknown): void {
+    // Idempotent re-assertion: the bridge arms the resolver at offer
+    // INITIATION (before its createOffer/setLocalDescription awaits — R3F5),
+    // so by the time the offer reaches the wire the flag is already true.
+    // Keeping the set here means a direct sendOffer caller that did not arm
+    // early still gets the glare protection.
     this.glare.beginOffer();
     this.relay({ kind: "offer", sdp });
+  }
+
+  /**
+   * Arm the glare resolver's in-flight flag at offer INITIATION rather than
+   * at send time (R3F5). The bridge calls this synchronously at the top of
+   * its offer path, before any await, so a remote offer arriving while the
+   * local offer is still being created/set is decided by the
+   * perfect-negotiation policy (impolite ignores) instead of being answered
+   * unconditionally.
+   */
+  public beginOffer(): void {
+    this.glare.beginOffer();
   }
 
   public endOffer(): void {
@@ -112,11 +140,22 @@ export class SignalingClient {
     return this.peerPresent;
   }
 
-  public signalP2pOpen(): void {
+  /**
+   * Relay a `leave` for the current room (when joined) and close the socket.
+   * Shared by the two paths that deliberately take the broker out of the
+   * loop: {@link signalP2pOpen} (the post-handshake teardown) and the
+   * bridge's reconnect (freeing the room slot before a fresh dial re-joins —
+   * room capacity is 2, and a surviving member would reject the new join).
+   */
+  public leaveAndClose(): void {
     if (this.socket !== null && this.joined) {
       this.relay({ kind: "leave", roomId: this.roomId });
     }
     this.teardown();
+  }
+
+  public signalP2pOpen(): void {
+    this.leaveAndClose();
   }
 
   public close(): void {

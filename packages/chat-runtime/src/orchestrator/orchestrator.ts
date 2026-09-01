@@ -31,11 +31,15 @@ import {
   PROTOCOL_VERSION,
 } from "../protocol/limits";
 import { AuthMode, ControlSubtype, Role } from "../protocol/types";
-import type { ConversationId, PublicKey, Signature, Transcript } from "../protocol/types";
+import type { ConversationId, Signature, Transcript } from "../protocol/types";
 import { FrameReceiver } from "../framing";
 import { FrameSender } from "../framing";
 import type { FrameTransport, ReceivedFile } from "../framing";
-import { ConnectionState, ConnectionStateMachine } from "../signaling/state-machine";
+import {
+  ConnectionState,
+  ConnectionStateMachine,
+  deriveGlareRole,
+} from "../signaling/state-machine";
 import { SignalingClient } from "../signaling/signaling-client";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
 import type { ConversationMessage, ConversationRepository } from "../store";
@@ -908,9 +912,9 @@ export class ConversationOrchestrator {
           "fresh invitation — start a new conversation to re-handshake.",
       );
     }
-    // Connect signaling synchronously; role derivation reads the stored peer
-    // identity (already persisted on resume) without awaiting, falling back
-    // to Initiator when there is no stored peer yet.
+    // Connect signaling synchronously; the glare role is derived from the
+    // local identity key alone (deriveGlareRole — the peer's key is not
+    // available at this point), deterministic and stable across reconnects.
     this.connectSignaling();
     this.setState(ConnectionState.Signaling);
   }
@@ -1991,7 +1995,7 @@ export class ConversationOrchestrator {
     const client = new SignalingClient({
       brokerUrl: this.brokerUrl,
       roomId,
-      role: deriveInternalSignalingRole(this.identity.publicKey),
+      role: deriveGlareRole(this.identity.publicKey),
       socketFactory: this.socketFactory,
       handlers: {
         onPeerJoin: () => {
@@ -2077,28 +2081,6 @@ function randomBytes(length: number): Uint8Array {
   const out = new Uint8Array(length);
   globalThis.crypto.getRandomValues(out);
   return out;
-}
-
-/**
- * R7/F5 (Phase 8.1): derive the internal-signaling role from the local
- * identity key. The rule is deterministic and stable across reconnects for
- * the same identity: an even-parity first byte yields Initiator, an odd-parity
- * first byte yields Responder. Both internal-signaling peers apply the same
- * rule, so a pair of peers with different-parity keys (the common case under
- * uniform P-256 public keys) gets one Initiator and one Responder, making
- * glare resolvable via {@link GlareResolver} instead of both sides impolite.
- *
- * The derivation does NOT take the peer's identity key (which is unknown at
- * connectSignaling time) and so is independent of the authoritative TOFU
- * comparison in {@link verifyPeerAndComplete}; it only affects who keeps
- * their SDP offer when both peers offer simultaneously.
- */
-function deriveInternalSignalingRole(localIdentityKey: PublicKey): Role {
-  // SEC1 uncompressed public keys always start with 0x04 (the prefix byte);
-  // use the first key byte (X coordinate) instead so the parity actually
-  // varies across identities.
-  const parityByte = localIdentityKey[1] ?? 0;
-  return (parityByte & 0x01) === 0 ? Role.Initiator : Role.Responder;
 }
 
 /**

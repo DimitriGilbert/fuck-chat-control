@@ -177,13 +177,33 @@ describe("SignalingClient — close after P2P open", () => {
     expect(a.readyState).toBe(3);
   });
 
-  it("emits onClose after P2P-driven teardown", () => {
+  it("does NOT emit onClose for the P2P-driven teardown (R3F6)", () => {
     const a = new MockSignalingSocket();
     const ha = recordingHandlers();
     const client = createClient(Role.Initiator, ha, a);
 
     client.signalP2pOpen();
 
+    // The teardown DELIBERATELY closed the socket (leave + close pinned
+    // above), so its close event must not surface as onClose. Surfacing it
+    // forced every consumer to distinguish "we closed it" from "the broker
+    // dropped us" — the bridge's suppressSignalingClose flag was exactly
+    // that workaround — and with a real (async) WebSocket the late close
+    // event of a deliberately replaced socket would tear down the retried
+    // session racing the fresh dial. The client's socket-identity guard now
+    // makes the distinction structural.
+    expect(ha.events).not.toContain("close");
+  });
+
+  it("emits onClose when the LIVE socket is closed externally (broker drop)", () => {
+    const a = new MockSignalingSocket();
+    const ha = recordingHandlers();
+    createClient(Role.Initiator, ha, a);
+
+    // The socket is still the current one when the network drops it: the
+    // close surfaces, which is what routes the orchestrator to Disconnected.
+    a.serverOpen();
+    a.serverClose();
     expect(ha.events).toContain("close");
   });
 });
