@@ -3,6 +3,7 @@ import type { ConversationId, PublicKey } from "../protocol/types";
 import { getAuthFailedDurable } from "./auth-failed-store";
 import { MessageDirection } from "./types";
 import type {
+  AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
@@ -142,9 +143,10 @@ export class LockableRepository implements ConversationRepository {
     plaintext: string,
     direction: MessageDirection,
     timestamp: number,
+    options?: AppendMessageOptions,
   ): Promise<ConversationMessage> {
     this.assertUnlocked();
-    return await this.inner.appendMessage(id, plaintext, direction, timestamp);
+    return await this.inner.appendMessage(id, plaintext, direction, timestamp, options);
   }
 
   async getMessages(id: ConversationId): Promise<ConversationMessage[]> {

@@ -154,6 +154,24 @@ export interface RawStoredMessage {
   readonly ciphertext: Uint8Array;
 }
 
+/**
+ * R4/F1: optional overrides for {@link ConversationRepository.appendMessage}.
+ * Purely additive — every pre-existing caller omits the whole object and gets
+ * the unchanged default behavior.
+ */
+export interface AppendMessageOptions {
+  /**
+   * Store the message under this id VERBATIM instead of generating a fresh
+   * UUID. Used by the bundle import/merge path so an imported message keeps
+   * its exporting device's id — that is what makes `existingIds.has(id)`
+   * dedup effective and re-importing an overlapping bundle idempotent across
+   * devices. Must be a non-empty string when provided (implementations
+   * reject anything else); when absent, a fresh id is generated exactly as
+   * before this option existed.
+   */
+  readonly id?: string;
+}
+
 export interface ConversationRepository {
   createConversation(id: ConversationId, createdAt: number): Promise<ConversationRecord>;
   getConversation(id: ConversationId): Promise<ConversationRecord | null>;
@@ -163,6 +181,7 @@ export interface ConversationRepository {
     plaintext: string,
     direction: MessageDirection,
     timestamp: number,
+    options?: AppendMessageOptions,
   ): Promise<ConversationMessage>;
   getMessages(id: ConversationId): Promise<ConversationMessage[]>;
   storePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void>;

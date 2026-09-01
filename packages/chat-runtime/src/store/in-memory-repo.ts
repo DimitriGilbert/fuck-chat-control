@@ -9,6 +9,7 @@ import type { ConversationId, PublicKey } from "../protocol/types";
 import { bytesToBase64, bytesToHex, base64ToBytes, hexToBytes } from "./encoding";
 import { MessageDirection, MESSAGE_DIRECTION_VALUES, StoreError, StoreErrorCode } from "./types";
 import type {
+  AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
   PeerIdentityRecord,
@@ -145,6 +146,7 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     plaintext: string,
     direction: MessageDirection,
     timestamp: number,
+    options?: AppendMessageOptions,
   ): Promise<ConversationMessage> {
     const convoKey = idKey(id);
     if (!this.conversations.has(convoKey)) {
@@ -153,10 +155,12 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
         "cannot append a message to a conversation that does not exist",
       );
     }
+    // R4/F1: resolve the stored id BEFORE sealing so an invalid explicit id is
+    // rejected without wasted crypto. Absent option → fresh UUID (unchanged).
+    const messageId = messageIdFromOptions(options);
     const atRestKey = this.requireKey();
     const encoded = new TextEncoder().encode(plaintext);
     const sealed = await encryptAtRest(atRestKey, encoded);
-    const messageId = newMessageId();
     const list = this.messages.get(convoKey) ?? [];
     list.push({
       id: messageId,
@@ -497,4 +501,25 @@ function assertDirection(value: string): MessageDirection {
 
 function newMessageId(): string {
   return globalThis.crypto.randomUUID();
+}
+
+/**
+ * R4/F1: resolve the id a newly appended message is stored under. An explicit
+ * id (the bundle import/merge path passes the exporter's id so re-importing an
+ * overlapping bundle dedups instead of duplicating) is stored verbatim and
+ * must be a non-empty string; when the option is absent a fresh UUID is
+ * generated, exactly as before the parameter existed.
+ */
+function messageIdFromOptions(options: AppendMessageOptions | undefined): string {
+  const explicit = options?.id;
+  if (explicit === undefined) {
+    return newMessageId();
+  }
+  if (typeof explicit !== "string" || explicit.length === 0) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      "explicit message id must be a non-empty string",
+    );
+  }
+  return explicit;
 }

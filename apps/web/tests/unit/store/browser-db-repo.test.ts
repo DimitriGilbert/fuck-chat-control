@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createCollection, localOnlyCollectionOptions } from "@tanstack/db";
+import { createCollection, createTransaction, localOnlyCollectionOptions } from "@tanstack/db";
 import type { Collection } from "@tanstack/db";
 import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
@@ -39,10 +40,12 @@ function makeRepoWithDatabase(
 
 /**
  * Like {@link makeRepoWithDatabase} but also exposes the backing collections
- * so tests can inject corrupt rows directly (R6:F3).
+ * and the at-rest key, so tests can inject corrupt rows directly (R6:F3) or
+ * reload under the exact key the ciphertext was sealed with.
  */
 function makeRepoWithCollections(database: { close?: () => Promise<void> | void } | null = null): {
   repo: BrowserDbConversationRepository;
+  atRestKey: AtRestKey;
   conversations: Collection<ConversationRow, string>;
   messages: Collection<MessageRow, string>;
 } {
@@ -61,7 +64,7 @@ function makeRepoWithCollections(database: { close?: () => Promise<void> | void 
     { databaseName: "fck-chat-test", atRestKey },
     { databaseName: "fck-chat-test", database, conversations, messages },
   );
-  return { repo, conversations, messages };
+  return { repo, atRestKey, conversations, messages };
 }
 
 /** Hex key of a ConversationId, matching the repo's row convention. */
@@ -70,10 +73,13 @@ function idKeyOf(id: Uint8Array): string {
 }
 
 describe("BrowserDbConversationRepository", () => {
-  it("constructs with a database name and at-rest key", () => {
+  it("constructs with a database name and a live at-rest key", () => {
     const repo = makeRepo();
     expect(repo.databaseName).toBe("fck-chat-test");
-    expect(repo.atRestKey).toBeInstanceOf(Uint8Array);
+    // R4/F7: the public `atRestKey` field is gone (it aliased a buffer that
+    // zeroizeAtRestKey fills and went stale after lock/unlock). The live key
+    // is observable only through the CR-7 test seam.
+    expect(repo._atRestKeyIsZeroizedForTest()).toBe(false);
   });
 
   it("creates, lists, and reads back a conversation", async () => {
@@ -136,6 +142,46 @@ describe("BrowserDbConversationRepository", () => {
     await expect(
       repo.appendMessage(conversationId(3), "x", MessageDirection.Sent, 1),
     ).rejects.toMatchObject({ code: "conversation_not_found" });
+  });
+
+  it("appendMessage stores a caller-supplied id verbatim (R4/F1)", async () => {
+    const repo = makeRepo();
+    const id = conversationId(32);
+    await repo.createConversation(id, 1);
+
+    const stored = await repo.appendMessage(id, "imported", MessageDirection.Received, 5, {
+      id: "bundle-message-id",
+    });
+    expect(stored.id).toBe("bundle-message-id");
+    expect((await repo.getMessages(id)).map((m) => m.id)).toEqual(["bundle-message-id"]);
+    // The persisted row key (serialize output) keeps the id — that is what
+    // makes the merge path's existingIds dedup effective across devices.
+    const state = repo.serialize();
+    expect(state.messages[0]?.messages[0]?.id).toBe("bundle-message-id");
+  });
+
+  it("appendMessage without an explicit id still generates fresh UUIDs", async () => {
+    const repo = makeRepo();
+    const id = conversationId(33);
+    await repo.createConversation(id, 1);
+
+    const a = await repo.appendMessage(id, "one", MessageDirection.Sent, 1);
+    const b = await repo.appendMessage(id, "two", MessageDirection.Sent, 2);
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(a.id).toMatch(uuid);
+    expect(b.id).toMatch(uuid);
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it("appendMessage rejects an explicit empty id", async () => {
+    const repo = makeRepo();
+    const id = conversationId(34);
+    await repo.createConversation(id, 1);
+    await expect(
+      repo.appendMessage(id, "x", MessageDirection.Sent, 1, { id: "" }),
+    ).rejects.toMatchObject({ code: "malformed_bundle" });
+    // The rejected write must not have left a row behind.
+    expect(await repo.getMessages(id)).toHaveLength(0);
   });
 
   it("pins a peer identity and rejects a different key (TOFU)", async () => {
@@ -215,7 +261,7 @@ describe("BrowserDbConversationRepository", () => {
   });
 
   it("serialize/reload round-trips conversations, messages, and peer pins", async () => {
-    const repo = makeRepo();
+    const { repo, atRestKey } = makeRepoWithCollections();
     const id = conversationId(12);
     await repo.createConversation(id, 5000);
     await repo.setDisplayName(id, "Bob");
@@ -228,7 +274,7 @@ describe("BrowserDbConversationRepository", () => {
     // ciphertext was sealed under it, so a different key would (correctly)
     // fail to decrypt.
     const fresh = makeRepo();
-    await fresh.reload(repo.atRestKey, state);
+    await fresh.reload(atRestKey, state);
 
     const convo = await fresh.getConversation(id);
     expect(convo?.displayName).toBe("Bob");
@@ -298,7 +344,7 @@ describe("BrowserDbConversationRepository", () => {
   });
 
   it("reload REPLACES content on surviving keys and drops removed keys (R6:F2 diff)", async () => {
-    const repo = makeRepo();
+    const { repo, atRestKey } = makeRepoWithCollections();
     const survivor = conversationId(26);
     const removed = conversationId(27);
     const added = conversationId(28);
@@ -324,7 +370,7 @@ describe("BrowserDbConversationRepository", () => {
       ],
       messages: [],
     };
-    await repo.reload(repo.atRestKey, state);
+    await repo.reload(atRestKey, state);
 
     const listed = await repo.listConversations();
     expect(listed).toHaveLength(2);
@@ -422,7 +468,7 @@ describe("BrowserDbConversationRepository", () => {
   });
 });
 
-describe("BrowserDbConversationRepository.close (OPFS handle release, R5:F3 / R6:F1)", () => {
+describe("BrowserDbConversationRepository.close (OPFS handle release, R5:F3 / R6:F1 / R4:F6)", () => {
   it("invokes the database close() exactly once and is idempotent", async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     const repo = makeRepoWithDatabase({ close });
@@ -443,11 +489,69 @@ describe("BrowserDbConversationRepository.close (OPFS handle release, R5:F3 / R6
     await expect(repo.close()).resolves.toBeUndefined();
   });
 
-  it("still resolves (swallows) when the driver close rejects", async () => {
-    const close = vi.fn().mockRejectedValue(new Error("worker gone"));
+  it("surfaces a driver close failure: logs and rejects (R4:F6)", async () => {
+    const failure = new Error("worker gone");
+    const close = vi.fn().mockRejectedValue(failure);
     const repo = makeRepoWithDatabase({ close });
-    // dispose() must never throw on a failed close.
-    await expect(repo.close()).resolves.toBeUndefined();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // R4/F6: close failures must not be swallowed inside the repo. The
+      // production caller (the controller's fire-and-forget dispose()) swallows
+      // at its own call site, so the log is what keeps the failure visible
+      // there; awaiting callers get the original error.
+      await expect(repo.close()).rejects.toBe(failure);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(error).toHaveBeenCalledTimes(1);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("drains in-flight write persistence before closing the database (R4:F6)", async () => {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const { repo, messages } = makeRepoWithCollections({ close });
+    const id = conversationId(35);
+    await repo.createConversation(id, 1);
+
+    // Gate the message insert's persistence: the repo awaits the returned
+    // transaction's isPersisted promise, and this manually-committed
+    // transaction settles ONLY when the test commits it.
+    const gate = createTransaction({ autoCommit: false, mutationFn: async () => {} });
+    const realInsert = messages.insert.bind(messages);
+    let signalInsert: () => void = () => {};
+    const inserted = new Promise<void>((resolve) => {
+      signalInsert = resolve;
+    });
+    const insertSpy = vi.spyOn(messages, "insert").mockImplementation((data, config) => {
+      // Land the row in local state exactly as the real insert would...
+      void realInsert(data, config);
+      // ...then hand the repo a persistence signal we control.
+      signalInsert();
+      return gate;
+    });
+
+    let appended = false;
+    const appending = repo
+      .appendMessage(id, "in flight", MessageDirection.Sent, 10)
+      .then((message) => {
+        appended = true;
+        return message;
+      });
+    // The write registers its persistence synchronously right after insert()
+    // returns, so once insert has been observed the drain set is populated.
+    await inserted;
+
+    const closing = repo.close();
+    // While the commit is still in flight: the DB/Worker must not be released
+    // yet, and the write method must not have resolved.
+    expect(close).not.toHaveBeenCalled();
+    expect(appended).toBe(false);
+
+    await gate.commit(); // release the persistence signal
+    await expect(appending).resolves.toBeDefined();
+    expect(appended).toBe(true);
+    await closing;
     expect(close).toHaveBeenCalledTimes(1);
+    insertSpy.mockRestore();
   });
 });

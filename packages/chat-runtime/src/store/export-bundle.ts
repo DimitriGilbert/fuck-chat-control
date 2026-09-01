@@ -3,10 +3,10 @@ import type { KdfParams } from "../crypto/at-rest";
 import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
-import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION } from "../protocol/limits";
+import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION, PUBLIC_KEY_BYTES } from "../protocol/limits";
 import type { ConversationId } from "../protocol/types";
 
-import { clearAllAuthFailedDurable } from "./auth-failed-store";
+import { clearAllAuthFailedDurable, markAuthFailedDurable } from "./auth-failed-store";
 import { base64ToBytes, bytesToBase64, bytesToHex, hexToBytes } from "./encoding";
 import {
   ARGON2_ITERATIONS_MAX,
@@ -100,6 +100,15 @@ interface ValidatedConversation {
   readonly displayName: string | null;
   readonly peer: PeerIdentityRecord | null;
   readonly messages: readonly ConversationMessage[];
+  /**
+   * R4/F2: rollback-only fields. Populated by {@link snapshotRepoState} (the
+   * repo's `listConversations()` records carry both) and re-applied by
+   * {@link restoreRepoState}. Undefined on conversations validated from an
+   * import payload — the bundle format deliberately does not carry auth-failed
+   * state (R6/F4), so the import loop never sets them.
+   */
+  readonly authFailed?: boolean;
+  readonly authFailedAt?: number | null;
 }
 
 export async function exportBundle(
@@ -240,6 +249,20 @@ export async function importBundle(
   let conversationsAdded = 0;
   let conversationsMerged = 0;
   let messagesImported = 0;
+  // Durable repos key message rows by id GLOBALLY (the browser repo's
+  // `messages` collection is keyed by id alone), so a bundle message whose id
+  // is already stored under a DIFFERENT conversation must be skipped as an
+  // already-imported duplicate — appendMessage would otherwise insert against
+  // the existing key and the browser repo throws a raw DuplicateKeyError
+  // there, breaching the typed StoreError contract (the in-memory repo
+  // instead silently stored the row twice). The snapshot is taken once,
+  // BEFORE any append: validateConversations guarantees the payload's ids are
+  // unique across all conversations and this loop only appends ids the
+  // snapshot lacks, so it cannot go stale mid-import. Message-less payloads
+  // skip the scan entirely — no append can collide, so the store is not read.
+  const storedMessageIds = validated.some((convo) => convo.messages.length > 0)
+    ? await collectStoredMessageIds(repo)
+    : new Set<string>();
   for (const convo of validated) {
     const existing = await repo.getConversation(convo.id);
     if (existing === null) {
@@ -251,7 +274,17 @@ export async function importBundle(
         await repo.setDisplayName(convo.id, convo.displayName);
       }
       for (const message of convo.messages) {
-        await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp);
+        // R4/F1: preserve the bundle's message id verbatim. Without it the
+        // stored row gets a fresh UUID, so a later overlapping merge import
+        // from the same source device could never match `existingIds` and
+        // would re-append every message as a duplicate.
+        // A stored row with this id necessarily belongs to a DIFFERENT
+        // conversation (this one was just created): skip it as a duplicate
+        // rather than insert against the globally-keyed row.
+        if (storedMessageIds.has(message.id)) continue;
+        await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp, {
+          id: message.id,
+        });
         messagesImported++;
       }
       conversationsAdded++;
@@ -284,7 +317,17 @@ export async function importBundle(
     const existingIds = new Set(existingMessages.map((m) => m.id));
     for (const message of convo.messages) {
       if (existingIds.has(message.id)) continue;
-      await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp);
+      // Any REMAINING snapshot hit is a row stored under a different
+      // conversation (this conversation's own ids were just skipped via
+      // `existingIds`): skip it as a duplicate rather than insert against the
+      // globally-keyed row.
+      if (storedMessageIds.has(message.id)) continue;
+      // R4/F1: store the bundle's id so this dedup check can actually hit on
+      // the NEXT overlapping import — a fresh UUID here would make
+      // `existingIds.has(message.id)` dead code for cross-device bundles.
+      await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp, {
+        id: message.id,
+      });
       messagesImported++;
     }
   }
@@ -330,11 +373,26 @@ function parseEnvelope(bundle: string): ExportBundle {
       `unsupported bundle version ${String(version)}, expected ${EXPORT_BUNDLE_VERSION}`,
     );
   }
-  const kdf = obj["kdf"] as Record<string, unknown> | undefined;
-  const aead = obj["aead"] as Record<string, unknown> | undefined;
-  if (kdf === undefined || aead === undefined) {
-    throw new StoreError(StoreErrorCode.MalformedBundle, "bundle missing kdf or aead field");
+  // R4/F4: a `kdf === undefined`-only guard lets JSON `null` (and other
+  // non-objects) through, and the next dereference then threw a raw TypeError
+  // on attacker-controlled input instead of a typed StoreError. Reject null,
+  // undefined, and every non-object here so the "import path never produces an
+  // opaque Error" contract holds.
+  const kdfRaw: unknown = obj["kdf"];
+  const aeadRaw: unknown = obj["aead"];
+  if (
+    kdfRaw == null ||
+    typeof kdfRaw !== "object" ||
+    aeadRaw == null ||
+    typeof aeadRaw !== "object"
+  ) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      "bundle kdf and aead fields must be objects",
+    );
   }
+  const kdf = kdfRaw as Record<string, unknown>;
+  const aead = aeadRaw as Record<string, unknown>;
   if (kdf["algorithm"] !== KDF_ALGORITHM) {
     throw new StoreError(
       StoreErrorCode.MalformedBundle,
@@ -490,6 +548,35 @@ function validateConversations(payload: ParsedPayload): ValidatedConversation[] 
   }
   const byHex = new Map<string, MutableConversation>();
   for (const raw of payload.conversations) {
+    // R4/F5: a JSON `null` (or other non-object) element reached
+    // `raw.createdAt` below and threw a raw TypeError on attacker-controlled
+    // input — reject it before any property dereference so the import path
+    // only ever throws typed StoreErrors. This also covers displayName/peer
+    // access on null elements.
+    if (raw === null || typeof raw !== "object") {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        "payload conversation must be an object",
+      );
+    }
+    // R4/F5: post-auth type validation. The AEAD tag only proves the bundle
+    // author knew the passphrase — a well-formed-but-mistyped (or hostile
+    // passphrase-holder) payload must not persist garbage types: a
+    // non-finite createdAt poisons the sort below, a non-string displayName
+    // is stored verbatim, and downstream TextEncoder coercion would turn a
+    // non-string text into "[object Object]".
+    if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        `conversation ${raw.id} createdAt must be a finite number`,
+      );
+    }
+    if (raw.displayName !== null && typeof raw.displayName !== "string") {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        `conversation ${raw.id} displayName must be a string or null`,
+      );
+    }
     const id = decodeConversationIdHex(raw.id);
     const peer = raw.peer === null ? null : decodePeerIdentity(raw.peer);
     byHex.set(raw.id, {
@@ -500,7 +587,20 @@ function validateConversations(payload: ParsedPayload): ValidatedConversation[] 
       messages: [],
     });
   }
+  // Durable repos key message rows by id GLOBALLY (the browser repo's
+  // `messages` collection is keyed by id alone), so two payload messages
+  // sharing an id — within one conversation or across two — would drive two
+  // appendMessage calls with the same preserved id and the second insert
+  // throws a raw DuplicateKeyError from the collection layer. Track ids
+  // payload-wide so the import path only ever throws typed StoreErrors.
+  const seenMessageIds = new Set<string>();
   for (const raw of payload.messages) {
+    // R4/F5: same guard as the conversations loop — a JSON `null` (or other
+    // non-object) element reached `raw.conversationId` below and threw a raw
+    // TypeError on attacker-controlled input.
+    if (raw === null || typeof raw !== "object") {
+      throw new StoreError(StoreErrorCode.MalformedBundle, "payload message must be an object");
+    }
     const owner = byHex.get(raw.conversationId);
     if (owner === undefined) {
       throw new StoreError(
@@ -513,6 +613,34 @@ function validateConversations(payload: ParsedPayload): ValidatedConversation[] 
       throw new StoreError(
         StoreErrorCode.SizeLimitExceeded,
         `conversation ${raw.conversationId} exceeds ${MAX_MESSAGES_PER_CONVERSATION} messages`,
+      );
+    }
+    // R4/F5: reject non-string ids and non-finite timestamps BEFORE the sort
+    // at the bottom of this function — `id.localeCompare` throws a raw
+    // TypeError on a non-string and a non-finite timestamp degrades the sort
+    // comparator to NaN (implementation-defined order persisted as history).
+    // A non-string text is likewise rejected before TextEncoder's silent
+    // WebIDL coercion can persist it.
+    if (typeof raw.id !== "string") {
+      throw new StoreError(StoreErrorCode.MalformedBundle, "payload message id must be a string");
+    }
+    if (seenMessageIds.has(raw.id)) {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        `payload message id ${raw.id} appears more than once`,
+      );
+    }
+    seenMessageIds.add(raw.id);
+    if (typeof raw.timestamp !== "number" || !Number.isFinite(raw.timestamp)) {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        `payload message ${raw.id} timestamp must be a finite number`,
+      );
+    }
+    if (typeof raw.text !== "string") {
+      throw new StoreError(
+        StoreErrorCode.MalformedBundle,
+        `payload message ${raw.id} text must be a string`,
       );
     }
     owner.messages.push({
@@ -553,6 +681,26 @@ interface MutableConversation {
 type RepoSnapshot = ValidatedConversation[];
 
 /**
+ * Read the ids of every message row currently stored in the repo, across ALL
+ * conversations. The Merge path uses this to treat a bundle message id that
+ * is already stored under a different conversation as an already-imported
+ * duplicate (skip) — appending it instead would insert against the
+ * globally-keyed row in durable repos (the browser repo's `messages`
+ * collection throws a raw DuplicateKeyError there). Same read surface as the
+ * merge loop itself (listConversations + getMessages), so it adds no error
+ * types the import path does not already surface.
+ */
+async function collectStoredMessageIds(repo: ConversationRepository): Promise<Set<string>> {
+  const ids = new Set<string>();
+  for (const convo of await repo.listConversations()) {
+    for (const message of await repo.getMessages(convo.id)) {
+      ids.add(message.id);
+    }
+  }
+  return ids;
+}
+
+/**
  * Read the repo's current conversations + messages into an in-memory snapshot.
  * Used ONLY by the atomic-Replace path to capture pre-clearAll state.
  */
@@ -572,6 +720,12 @@ async function snapshotRepoState(repo: ConversationRepository): Promise<RepoSnap
               fingerprint: convo.peer.fingerprint,
               publicKey: encodePublicKey(convo.peer.publicKey),
             },
+      // R4/F2: capture the auth-failed flag so the rollback path can re-apply
+      // it — without this the restored record loses the flag AND the durable
+      // auth-failed record cleared before the import loop is never rebuilt,
+      // silently lifting the TOFU retry block for hostile-peer conversations.
+      authFailed: convo.authFailed,
+      authFailedAt: convo.authFailedAt,
       messages: messages.map((m) => ({
         id: m.id,
         conversationId: cloneConversationId(m.conversationId),
@@ -596,6 +750,21 @@ async function restoreRepoState(
   await repo.clearAll();
   for (const convo of snapshot) {
     await populateConversation(repo, convo);
+    // R4/F2: re-apply the auth-failed flag that this path's clearAll (via the
+    // populate-after-clear restore) dropped. The TOFU retry gate hydrates from
+    // `repo.getAuthFailed(id) || getAuthFailedDurable(id)` (orchestrator
+    // start/join), so BOTH sources must come back: markAuthFailed restores the
+    // repo flag, and markAuthFailedDurable rebuilds the durable record that
+    // clearAllAuthFailedDurable() wiped on the import path. The repo's
+    // markAuthFailed refreshes authFailedAt to the restore time (documented
+    // idempotent semantics — no public repo API restores a historical
+    // timestamp); the gate reads only the boolean. The snapshot's captured
+    // authFailedAt is kept for fidelity so a future repo API can restore it
+    // exactly.
+    if (convo.authFailed === true) {
+      await repo.markAuthFailed(convo.id);
+      await markAuthFailedDurable(convo.id);
+    }
   }
 }
 
@@ -622,7 +791,13 @@ async function populateConversation(
   }
   let count = 0;
   for (const message of convo.messages) {
-    await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp);
+    // R4/F1: preserve the message id. On the Replace-import loop this keeps
+    // ids stable across a bundle round-trip (so a follow-up Merge of the same
+    // bundle dedups); on the rollback restore path it keeps the pre-import
+    // repo's ids exactly as the snapshot captured them.
+    await repo.appendMessage(convo.id, message.text, message.direction, message.timestamp, {
+      id: message.id,
+    });
     count++;
   }
   return count;
@@ -639,15 +814,40 @@ function toValidated(convo: MutableConversation): ValidatedConversation {
 }
 
 function decodePeerIdentity(peer: PayloadPeer): PeerIdentityRecord {
+  // R4/F5: the JSON field may be missing entirely (undefined) or a primitive —
+  // reject both before any property dereference, and reject a non-string
+  // publicKey BEFORE the base64 decode, whose opening `.replace` on a
+  // non-string throws a raw TypeError that would escape the import path's
+  // StoreError contract. (`identity` needs no equivalent guard: parsePayload
+  // already type-checks it.)
+  if (typeof peer !== "object") {
+    throw new StoreError(StoreErrorCode.MalformedBundle, "conversation peer must be an object");
+  }
+  if (typeof peer.publicKey !== "string") {
+    throw new StoreError(StoreErrorCode.MalformedBundle, "peer publicKey must be a string");
+  }
+  // R4/F5: a valid-string-but-invalid-base64 publicKey must surface as a typed
+  // StoreError, not escape as a raw Error from base64ToBytes — route it
+  // through the bounded decoder. Key-shape failures (exact length, SEC1
+  // prefix, on-curve) still surface as typed ProtocolError from
+  // encodePublicKey below.
   return {
     fingerprint: peer.fingerprint,
-    publicKey: encodePublicKey(base64ToBytes(peer.publicKey)),
+    publicKey: encodePublicKey(
+      decodeBoundedBase64(peer.publicKey, PUBLIC_KEY_BYTES, "peer.publicKey"),
+    ),
   };
 }
 
 function decodeIdentity(identity: string | null): Uint8Array | null {
   if (identity === null) return null;
-  return base64ToBytes(identity);
+  // R4/F5: the identity is post-auth payload data — a valid-string-but-
+  // invalid-base64 value must surface as a typed StoreError, not escape as a
+  // raw Error from base64ToBytes. The outer bundle cap is the bound (the
+  // payload cannot carry a larger identity than the bundle itself); key-shape
+  // failures stay with the codec (typed ProtocolError) when the caller adopts
+  // the key.
+  return decodeBoundedBase64(identity, MAX_BUNDLE_BYTES, "payload identity");
 }
 
 function decodeConversationIdHex(hex: string): ConversationId {

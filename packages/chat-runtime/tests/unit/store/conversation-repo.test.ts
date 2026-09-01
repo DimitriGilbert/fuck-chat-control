@@ -143,6 +143,43 @@ describe("InMemoryConversationRepository — slice 1 (conversation + encrypted t
     ).rejects.toMatchObject({ code: StoreErrorCode.ConversationNotFound });
   });
 
+  it("appendMessage stores a caller-supplied id verbatim (R4/F1)", async () => {
+    const repo = newRepo();
+    const id = conversationId(5);
+    await repo.createConversation(id, 1000);
+    const stored = await repo.appendMessage(id, PLAINTEXT_A, MessageDirection.Sent, 1100, {
+      id: "bundle-message-id",
+    });
+    expect(stored.id).toBe("bundle-message-id");
+    expect((await repo.getMessages(id)).map((m) => m.id)).toEqual(["bundle-message-id"]);
+    // The serialized state keeps the id too — that is what makes the merge
+    // path's existingIds dedup effective across devices.
+    expect(repo.serialize().messages[0]?.messages[0]?.id).toBe("bundle-message-id");
+  });
+
+  it("appendMessage without an explicit id still generates fresh UUIDs", async () => {
+    const repo = newRepo();
+    const id = conversationId(6);
+    await repo.createConversation(id, 1000);
+    const m1 = await repo.appendMessage(id, PLAINTEXT_A, MessageDirection.Sent, 1100);
+    const m2 = await repo.appendMessage(id, PLAINTEXT_B, MessageDirection.Received, 1200);
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(m1.id).toMatch(uuid);
+    expect(m2.id).toMatch(uuid);
+    expect(m1.id).not.toBe(m2.id);
+  });
+
+  it("appendMessage rejects an explicit empty id", async () => {
+    const repo = newRepo();
+    const id = conversationId(7);
+    await repo.createConversation(id, 1000);
+    await expect(
+      repo.appendMessage(id, PLAINTEXT_A, MessageDirection.Sent, 1100, { id: "" }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+    // The rejected write must not have stored anything.
+    expect(await repo.getMessages(id)).toHaveLength(0);
+  });
+
   it("reading messages of an unknown conversation fails", async () => {
     const repo = newRepo();
     await expect(repo.getMessages(conversationId(9))).rejects.toMatchObject({

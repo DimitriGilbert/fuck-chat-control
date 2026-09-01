@@ -31,6 +31,7 @@ import {
   StoreErrorCode,
 } from "@fuck-eu-chat-control/chat-runtime/store/types";
 import type {
+  AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
   PeerIdentityRecord,
@@ -119,6 +120,17 @@ export interface BrowserDbRepositoryConfig {
 type CloseableDatabase = { close?: () => Promise<void> | void };
 
 /**
+ * The subset of a @tanstack/db Transaction the repo needs from a write's
+ * return value: the persistence signal only. Kept structural (instead of the
+ * concrete `Transaction<...>` generics, which differ per collection and per
+ * operation) so one helper covers the insert/update/delete transactions of
+ * BOTH collections.
+ */
+interface PersistableTransaction {
+  readonly isPersisted: { readonly promise: Promise<unknown> };
+}
+
+/**
  * The opened persistence + collections, shared between the repo and any
  * rebuild. {@link databaseName} is retained so error messages can name it.
  * {@link database} is the wa-sqlite handle (with an optional `close()`) so the
@@ -137,7 +149,6 @@ export class BrowserDbConversationRepository
   implements ReloadableConversationRepository, PersistableConversationRepository
 {
   readonly databaseName: string;
-  readonly atRestKey: AtRestKey;
   private readonly conversations: Collection<ConversationRow, string>;
   private readonly messages: Collection<MessageRow, string>;
   private atRestKeyField: AtRestKey | null;
@@ -148,10 +159,17 @@ export class BrowserDbConversationRepository
    */
   private readonly database: CloseableDatabase | null;
   private closed = false;
+  /**
+   * R4/F6: persistence signals for writes this repo has started but whose
+   * OPFS/SQLite commit has not settled yet. Every write method awaits its own
+   * entry (durable-write contract); {@link close} drains the set before
+   * releasing the DB/Worker so a concurrent write cannot be torn down
+   * mid-commit.
+   */
+  private readonly pendingPersistence = new Set<Promise<unknown>>();
 
   constructor(config: BrowserDbRepositoryConfig, handles: BrowserDbHandles) {
     this.databaseName = handles.databaseName;
-    this.atRestKey = config.atRestKey;
     this.atRestKeyField = config.atRestKey;
     this.conversations = handles.conversations;
     this.messages = handles.messages;
@@ -208,6 +226,14 @@ export class BrowserDbConversationRepository
    * re-invoking the driver's close. Safe to call even when this repo was built
    * from local-only collections (no `database`): it is a no-op then.
    *
+   * R4/F6: before touching the DB/Worker, DRAINS every outstanding write's
+   * persistence signal ({@link pendingPersistence}) so in-flight commits land
+   * instead of being torn down mid-flight; the drained writes' own methods
+   * surface their failures. A failing driver close is surfaced, not swallowed:
+   * it is logged AND rethrown (the production caller — the ChatController's
+   * fire-and-forget dispose() — swallows at its own call site, so without the
+   * log the failure would vanish; awaiting callers get the original error).
+   *
    * This is the single seam the {@link ChatController}'s dispose() reaches for;
    * providers should NOT call it directly. Repository methods must not be used
    * after close() — the collections will reject once the backing store is gone.
@@ -215,13 +241,23 @@ export class BrowserDbConversationRepository
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    // R4/F6: drain before releasing the DB/Worker. allSettled, not all: a
+    // failed concurrent write must not abort the teardown — that write's own
+    // method (which awaits the same promise) reports the failure.
+    const outstanding = Array.from(this.pendingPersistence);
+    if (outstanding.length > 0) {
+      await Promise.allSettled(outstanding);
+    }
     const db = this.database;
     if (db === null) return;
     // The driver declares `close` optional; guard for forward-compat.
-    await Promise.resolve(db.close?.()).catch(() => {
-      // Swallow: dispose must never throw. A failed close (e.g. the Worker is
-      // already gone) leaves the OPFS file to the browser's normal teardown.
-    });
+    try {
+      await db.close?.();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error(`failed to close OPFS database ${this.databaseName}`, err);
+      throw err;
+    }
   }
 
   private requireKey(): AtRestKey {
@@ -232,6 +268,23 @@ export class BrowserDbConversationRepository
       );
     }
     return this.atRestKeyField;
+  }
+
+  /**
+   * R4/F6: await a write's OPFS/SQLite persistence signal and register it in
+   * {@link pendingPersistence} for {@link close} to drain. This is the same
+   * durability contract `reload()` already established (R6/F2): a write method
+   * resolves only once the commit landed in the backing store, not on
+   * optimistic in-memory collection state.
+   */
+  private async awaitPersistence(tx: PersistableTransaction): Promise<void> {
+    const promise = tx.isPersisted.promise;
+    this.pendingPersistence.add(promise);
+    try {
+      await promise;
+    } finally {
+      this.pendingPersistence.delete(promise);
+    }
   }
 
   async createConversation(id: ConversationId, createdAt: number): Promise<ConversationRecord> {
@@ -246,7 +299,8 @@ export class BrowserDbConversationRepository
         authFailed: false,
         authFailedAt: null,
       };
-      this.conversations.insert(row);
+      // R4/F6: await the SQLite commit, not just the optimistic local insert.
+      await this.awaitPersistence(this.conversations.insert(row));
     }
     return this.toRecord(id, this.conversations.get(key) as ConversationRow);
   }
@@ -282,6 +336,7 @@ export class BrowserDbConversationRepository
     plaintext: string,
     direction: MessageDirection,
     timestamp: number,
+    options?: AppendMessageOptions,
   ): Promise<ConversationMessage> {
     const convoKey = idKey(id);
     if (!this.conversations.has(convoKey)) {
@@ -290,10 +345,13 @@ export class BrowserDbConversationRepository
         "cannot append a message to a conversation that does not exist",
       );
     }
+    // R4/F1: resolve the stored row id BEFORE sealing so an invalid explicit
+    // id is rejected without wasted crypto. Absent option → fresh UUID
+    // (unchanged default; the row id is the messages collection key).
+    const messageId = messageIdFromOptions(options);
     const atRestKey = this.requireKey();
     const encoded = new TextEncoder().encode(plaintext);
     const sealed = await encryptAtRest(atRestKey, encoded);
-    const messageId = newMessageId();
     const row: MessageRow = {
       id: messageId,
       conversationId: convoKey,
@@ -302,7 +360,8 @@ export class BrowserDbConversationRepository
       nonce: bytesToBase64(sealed.nonce),
       ciphertext: bytesToBase64(sealed.ciphertext),
     };
-    this.messages.insert(row);
+    // R4/F6: await the SQLite commit, not just the optimistic local insert.
+    await this.awaitPersistence(this.messages.insert(row));
     return {
       id: messageId,
       conversationId: cloneConversationId(id),
@@ -380,16 +439,21 @@ export class BrowserDbConversationRepository
         );
       }
       // Same key re-pinned: refresh the fingerprint and no-op otherwise.
+      // R4/F6: await the SQLite commit, not just the optimistic local update.
+      await this.awaitPersistence(
+        this.conversations.update(convoKey, (draft) => {
+          draft.peerFingerprint = fingerprint;
+          draft.peerPublicKey = pubB64;
+        }),
+      );
+      return;
+    }
+    await this.awaitPersistence(
       this.conversations.update(convoKey, (draft) => {
         draft.peerFingerprint = fingerprint;
         draft.peerPublicKey = pubB64;
-      });
-      return;
-    }
-    this.conversations.update(convoKey, (draft) => {
-      draft.peerFingerprint = fingerprint;
-      draft.peerPublicKey = pubB64;
-    });
+      }),
+    );
   }
 
   async replacePeerIdentity(
@@ -405,10 +469,13 @@ export class BrowserDbConversationRepository
       );
     }
     const pubB64 = bytesToBase64(publicKey);
-    this.conversations.update(convoKey, (draft) => {
-      draft.peerFingerprint = fingerprint;
-      draft.peerPublicKey = pubB64;
-    });
+    // R4/F6: await the SQLite commit, not just the optimistic local update.
+    await this.awaitPersistence(
+      this.conversations.update(convoKey, (draft) => {
+        draft.peerFingerprint = fingerprint;
+        draft.peerPublicKey = pubB64;
+      }),
+    );
   }
 
   async getPeerIdentity(id: ConversationId): Promise<PeerIdentityRecord | null> {
@@ -431,9 +498,12 @@ export class BrowserDbConversationRepository
         "cannot set a display name for a conversation that does not exist",
       );
     }
-    this.conversations.update(convoKey, (draft) => {
-      draft.displayName = name;
-    });
+    // R4/F6: await the SQLite commit, not just the optimistic local update.
+    await this.awaitPersistence(
+      this.conversations.update(convoKey, (draft) => {
+        draft.displayName = name;
+      }),
+    );
   }
 
   async getDisplayName(id: ConversationId): Promise<string | null> {
@@ -452,10 +522,13 @@ export class BrowserDbConversationRepository
       );
     }
     // Idempotent: refresh the timestamp so the most recent failure is recorded.
-    this.conversations.update(convoKey, (draft) => {
-      draft.authFailed = true;
-      draft.authFailedAt = epochMillis();
-    });
+    // R4/F6: await the SQLite commit, not just the optimistic local update.
+    await this.awaitPersistence(
+      this.conversations.update(convoKey, (draft) => {
+        draft.authFailed = true;
+        draft.authFailedAt = epochMillis();
+      }),
+    );
   }
 
   async getAuthFailed(id: ConversationId): Promise<boolean> {
@@ -469,16 +542,20 @@ export class BrowserDbConversationRepository
     const convoKey = idKey(id);
     const messageRows = this.messages.toArray.filter((m) => m.conversationId === convoKey);
     if (messageRows.length > 0) {
-      this.messages.delete(messageRows.map((m) => m.id));
+      // R4/F6: await the SQLite commit, not just the optimistic local delete.
+      await this.awaitPersistence(this.messages.delete(messageRows.map((m) => m.id)));
     }
-    this.conversations.delete(convoKey);
+    await this.awaitPersistence(this.conversations.delete(convoKey));
   }
 
   async clearAll(): Promise<void> {
     const messageKeys = this.messages.toArray.map((m) => m.id);
     const conversationKeys = this.conversations.toArray.map((c) => c.id);
-    if (messageKeys.length > 0) this.messages.delete(messageKeys);
-    if (conversationKeys.length > 0) this.conversations.delete(conversationKeys);
+    // R4/F6: await the SQLite commit, not just the optimistic local delete.
+    if (messageKeys.length > 0) await this.awaitPersistence(this.messages.delete(messageKeys));
+    if (conversationKeys.length > 0) {
+      await this.awaitPersistence(this.conversations.delete(conversationKeys));
+    }
   }
 
   serialize(): SerializedState {
@@ -633,7 +710,9 @@ export class BrowserDbConversationRepository
         }
       }
     });
-    await tx.isPersisted.promise;
+    // R4/F6: route through awaitPersistence so a close() racing the reload's
+    // commit also drains it.
+    await this.awaitPersistence(tx);
   }
 
   /** CR-7: zeroize the live at-rest key when the {@link LockableRepository} observes a lock. */
@@ -750,6 +829,28 @@ function assertDirection(value: string): MessageDirection {
 
 function newMessageId(): string {
   return globalThis.crypto.randomUUID();
+}
+
+/**
+ * R4/F1: resolve the id a newly appended message row is stored under (the
+ * `messages` collection key). An explicit id (the bundle import/merge path
+ * passes the exporter's id so re-importing an overlapping bundle dedups
+ * instead of duplicating) is stored verbatim and must be a non-empty string;
+ * when the option is absent a fresh UUID is generated, exactly as before the
+ * parameter existed.
+ */
+function messageIdFromOptions(options: AppendMessageOptions | undefined): string {
+  const explicit = options?.id;
+  if (explicit === undefined) {
+    return newMessageId();
+  }
+  if (typeof explicit !== "string" || explicit.length === 0) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      "explicit message id must be a non-empty string",
+    );
+  }
+  return explicit;
 }
 
 // epochMillis is isolated so tests/reload can stub the clock without touching

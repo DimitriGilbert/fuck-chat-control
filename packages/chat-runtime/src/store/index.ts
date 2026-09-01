@@ -6,6 +6,7 @@ export {
   StoreErrorCode,
 } from "./types";
 export type {
+  AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
