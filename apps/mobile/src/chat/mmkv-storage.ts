@@ -166,11 +166,21 @@ let storageInstance: MMKV | null = null;
 /**
  * Memoized in-flight {@link ensureStorageReady} promise. Module-level mutable
  * so two concurrent first-launch calls share the same generation/construct
- * pass: the promise is assigned on the first call and reused thereafter. Once
- * it resolves successfully it stays cached for the process lifetime (never
- * reset to null), so subsequent calls no-op without re-entering the body.
+ * pass: the promise is assigned on the first call and reused thereafter.
+ * {@link closeStorage} clears it (on every path, R8/F3) so a later
+ * `ensureStorageReady()` re-initializes lazily instead of reusing the
+ * pre-teardown promise.
  */
 let readyPromise: Promise<void> | null = null;
+
+/**
+ * Monotonic teardown epoch (R8/F3). Bumped by EVERY {@link closeStorage}
+ * call — including the `storageInstance === null` early-return path — so a
+ * continuation of an in-flight `ensureStorageReady()` that resumes after a
+ * teardown can detect it lost the race and discard its keychain result
+ * instead of assigning a post-teardown `storageInstance`.
+ */
+let closedEpoch = 0;
 
 /**
  * Initializes the MMKV instance with the OS-keychain-bound encryption key.
@@ -182,6 +192,7 @@ let readyPromise: Promise<void> | null = null;
  */
 export function ensureStorageReady(): Promise<void> {
   if (readyPromise !== null) return readyPromise;
+  const epoch = closedEpoch;
   readyPromise = (async () => {
     // Re-check inside the in-flight promise: a resolved prior call leaves
     // storageInstance set and readyPromise cached, but the outer null check
@@ -204,6 +215,12 @@ export function ensureStorageReady(): Promise<void> {
     // launch, and a fresh ensureStorageReady() attempt will re-run because
     // readyPromise is per-process and a new process gets a fresh module.
     const encryptionKey = await loadOrCreateMmkvEncryptionKey();
+    // R8/F3: if a closeStorage() ran while the keychain round-trip above was
+    // pending, the epoch moved on — discard the result. Constructing MMKV
+    // here would install a post-teardown instance nobody tore down, and
+    // closeStorage's readyPromise reset means a fresh ensureStorageReady()
+    // builds its own; assigning here would shadow that contract.
+    if (epoch !== closedEpoch) return;
     storageInstance = createMMKV({
       id: MMKV_ID,
       encryptionKey,
@@ -236,6 +253,15 @@ export function ensureStorageReady(): Promise<void> {
  * at-rest key manager and evicting the identity manager.
  */
 export function closeStorage(): void {
+  // R8/F3: bump the epoch and clear readyPromise on EVERY path — including
+  // the storageInstance === null early return below. Without this, a
+  // closeStorage() landing while the first-launch keychain round-trip is
+  // still in flight would leave readyPromise set, and the continuation would
+  // assign storageInstance AFTER teardown; a subsequent ensureStorageReady()
+  // would then hit the memo and transparently reuse that leaked instance,
+  // breaking the documented re-initialize-lazily contract.
+  closedEpoch += 1;
+  readyPromise = null;
   if (storageInstance === null) {
     return;
   }
@@ -246,7 +272,6 @@ export function closeStorage(): void {
     // through to dropping the JS references below.
   }
   storageInstance = null;
-  readyPromise = null;
 }
 
 /**

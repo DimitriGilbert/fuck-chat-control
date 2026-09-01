@@ -31,12 +31,14 @@ import { installCryptoPolyfill } from "./src/chat/rn-crypto-polyfill";
 
 installCryptoPolyfill();
 
+import { conversationIdToHex } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import { decodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import * as React from "react";
 import { StatusBar, StyleSheet, Text, View } from "react-native";
 
 import { ChatProvider, useChat } from "./src/chat/mobile-chat-provider";
+import { AppErrorBoundary } from "./src/error-boundary";
 import { ChatScreen } from "./src/screens/chat-screen";
 import { HomeScreen } from "./src/screens/home-screen";
 import { JoinConversationScreen } from "./src/screens/join-conversation-screen";
@@ -71,18 +73,46 @@ function Router(): React.ReactElement {
   const [error, setError] = React.useState<string | null>(null);
   // `useChat()` (not `useChatController()`) because the provider has not turned
   // `ready` yet on the first render — `useChatController()` throws in that
-  // window (mobile-chat-provider.tsx:186-189), which would crash Router before
-  // the user ever sees the home screen. `controller` is null only until the
+  // window (mobile-chat-provider.tsx), which would crash Router before the
+  // user ever sees the home screen. `controller` is null only until the
   // provider's async construction resolves; by the time `state.conversations`
   // populates enough to render a tappable row, it is non-null. The handler
   // below guards for the early window.
-  const { controller, state } = useChat();
+  const { controller, state, ready } = useChat();
+
+  // R8/F2 (b): fail-closed navigation. The start/join/chat screens call
+  // `useChatController()` during render, which throws while the provider is
+  // still constructing (`!ready`) or after its fail-closed catch set
+  // `state.error` with no controller. "home" must stay reachable in every
+  // state so Back and Leave keep working.
+  const canEnterChatSurfaces = ready && state.error === null;
+  const navigate = React.useCallback(
+    (next: Route) => {
+      if (next !== "home" && !canEnterChatSurfaces) return;
+      setRoute(next);
+    },
+    [canEnterChatSurfaces],
+  );
+
   // Auto-switch to the chat screen once an active conversation exists and the
   // handshake begins producing messages or an invitation. resumeConversation's
   // emit(null) calls flip state.active non-null, so a successful resume routes
   // here even without an explicit setRoute('chat') in the handler.
+  //
+  // R8/F1: only force the route on a TRANSITION into a (different) active
+  // session, tracked by the last-seen active conversation id. Re-forcing
+  // whenever `state.active` is non-null bounced the user straight back into a
+  // chat they just left: Leave calls controller.leave() (clears the active
+  // session) + setRoute("home"), but any render where a stale non-null
+  // `state.active` snapshot coexists with route "home" re-forced "chat".
+  // ConversationId is a branded Uint8Array, so ids are compared by hex value
+  // (the runtime's conversationIdToHex), never by reference.
+  const lastActiveHexRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    if (state.active !== null && route !== "chat") {
+    const activeHex = state.active === null ? null : conversationIdToHex(state.active.id);
+    const lastActiveHex = lastActiveHexRef.current;
+    lastActiveHexRef.current = activeHex;
+    if (activeHex !== null && activeHex !== lastActiveHex && route !== "chat") {
       setRoute("chat");
     }
   }, [state.active, route]);
@@ -121,8 +151,8 @@ function Router(): React.ReactElement {
     case "home":
       screen = (
         <HomeScreen
-          onStart={() => setRoute("start")}
-          onJoin={() => setRoute("join")}
+          onStart={() => navigate("start")}
+          onJoin={() => navigate("join")}
           onOpen={handleOpen}
         />
       );
@@ -130,27 +160,32 @@ function Router(): React.ReactElement {
     case "start":
       screen = (
         <StartConversationScreen
-          onStarted={() => setRoute("chat")}
-          onBack={() => setRoute("home")}
+          onStarted={() => navigate("chat")}
+          onBack={() => navigate("home")}
         />
       );
       break;
     case "join":
       screen = (
-        <JoinConversationScreen onJoined={() => setRoute("chat")} onBack={() => setRoute("home")} />
+        <JoinConversationScreen onJoined={() => navigate("chat")} onBack={() => navigate("home")} />
       );
       break;
     case "chat":
-      screen = <ChatScreen onLeave={() => setRoute("home")} />;
+      screen = <ChatScreen onLeave={() => navigate("home")} />;
       break;
   }
+
+  // R8/F2: the bar surfaces BOTH Router-local errors (handleOpen failures)
+  // and the provider/controller state error. The local message wins when both
+  // exist; both strings are already redacted at their source.
+  const banner = error ?? state.error;
 
   return (
     <View style={styles.root}>
       {screen}
-      {error !== null ? (
+      {banner !== null ? (
         <View style={styles.errorBar}>
-          <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>{banner}</Text>
         </View>
       ) : null}
     </View>
@@ -159,10 +194,12 @@ function Router(): React.ReactElement {
 
 export default function App(): React.ReactElement {
   return (
-    <ChatProvider>
-      <StatusBar barStyle="light-content" />
-      <Router />
-    </ChatProvider>
+    <AppErrorBoundary>
+      <ChatProvider>
+        <StatusBar barStyle="light-content" />
+        <Router />
+      </ChatProvider>
+    </AppErrorBoundary>
   );
 }
 

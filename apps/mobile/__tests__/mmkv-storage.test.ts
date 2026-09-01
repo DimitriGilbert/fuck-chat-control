@@ -173,6 +173,75 @@ describe("ensureStorageReady fail-closed posture (H2)", () => {
   });
 });
 
+describe("closeStorage during in-flight ensureStorageReady (R8/F3)", () => {
+  const trimCalls = (globalThis as unknown as { __MMKV_TRIM_CALLS__: string[] })
+    .__MMKV_TRIM_CALLS__;
+
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it("discards the late result; a later ensureStorageReady builds a fresh instance", async () => {
+    // Gate the FIRST keychain read so closeStorage() can land while the
+    // SecureStore round-trip is still pending; later reads resolve at once.
+    // Out-of-scope names must carry the `mock` prefix for the hoisted
+    // jest.doMock factory to reference them. The releaser lives on a holder
+    // object so control-flow analysis cannot narrow it back to null across
+    // the closure assignment.
+    const mockKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let mockKeychainReads = 0;
+    const mockFirstRead: { release: ((key: string) => void) | null } = { release: null };
+    jest.doMock("expo-secure-store", () => ({
+      getItemAsync: (): Promise<string | null> => {
+        mockKeychainReads += 1;
+        if (mockKeychainReads > 1) return Promise.resolve(mockKey);
+        return new Promise<string | null>((resolve) => {
+          mockFirstRead.release = (key: string) => resolve(key);
+        });
+      },
+      setItemAsync: (): Promise<void> => Promise.resolve(),
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
+    }));
+
+    let isolated: typeof import("../src/chat/mmkv-storage") | undefined;
+    jest.isolateModules(() => {
+      isolated = require("../src/chat/mmkv-storage");
+    });
+    const storage = isolated!;
+
+    const createsBefore = createCalls.length;
+    const trimsBefore = trimCalls.length;
+
+    const firstAttempt = storage.ensureStorageReady();
+    expect(mockKeychainReads).toBe(1);
+
+    // Teardown during the in-flight keychain read: storageInstance is still
+    // null, so this exercises the EARLY-RETURN path that previously left
+    // readyPromise set.
+    storage.closeStorage();
+    expect(trimCalls.length).toBe(trimsBefore);
+
+    // The keychain read now resolves; the continuation must DISCARD its
+    // result instead of assigning a post-teardown storageInstance.
+    const release = mockFirstRead.release;
+    if (release === null) {
+      throw new Error("first keychain read was not pending");
+    }
+    release(mockKey);
+    await firstAttempt;
+    expect(createCalls.length).toBe(createsBefore);
+    expect(() => storage.chatStorage.getItem("leak-probe")).toThrow(/before ensureStorageReady/);
+
+    // readyPromise was cleared on the early-return path, so the next call
+    // re-initializes lazily with a FRESH instance (the R8/F7 contract).
+    await storage.ensureStorageReady();
+    expect(mockKeychainReads).toBe(2);
+    expect(createCalls.length).toBe(createsBefore + 1);
+    storage.chatStorage.setItem("fresh-probe", "ok");
+    expect(storage.chatStorage.getItem("fresh-probe")).toBe("ok");
+  });
+});
+
 describe("closeStorage (R8:F7 teardown)", () => {
   const trimCalls = (globalThis as unknown as { __MMKV_TRIM_CALLS__: string[] })
     .__MMKV_TRIM_CALLS__;

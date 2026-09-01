@@ -174,6 +174,16 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
     controller.markSafetyNumberVerified(conversationId);
   }, [controller, conversationId]);
 
+  // R8/F1: Leave must tear down the live session (controller.leave() clears
+  // activeConversationId and closes the signaling WebSocket + peer
+  // connection) BEFORE the route change — matching the web handleLeave in
+  // apps/web/src/features/chat/ui/chat-view.tsx. Routing home first would
+  // strand a live data channel with no UI path back to it.
+  const handleLeave = React.useCallback(() => {
+    controller.leave();
+    onLeave();
+  }, [controller, onLeave]);
+
   if (active === null) {
     return (
       <View style={styles.screen}>
@@ -198,7 +208,7 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.header}>
-        <Pressable onPress={onLeave}>
+        <Pressable onPress={handleLeave}>
           <Text style={styles.backText}>Leave</Text>
         </Pressable>
         <Text style={styles.title}>{active.id.slice(0, 8)}…</Text>

@@ -2,6 +2,12 @@
  * Home / empty state. Shows the two entry points the v1 UI exposes: start a
  * fresh conversation (initiator) or join an existing one (responder). Lists
  * persisted conversations below.
+ *
+ * R8/F2 fail-closed gating: both entry points target screens that call
+ * `useChatController()` during render, which throws while the provider is
+ * still constructing (`!ready`) or after its fail-closed catch set
+ * `state.error` with no controller. The buttons are therefore disabled (and
+ * the error surfaced) until the provider is ready and error-free.
  */
 import * as React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -25,8 +31,12 @@ function toHex(id: Uint8Array): string {
 }
 
 export function HomeScreen({ onStart, onJoin, onOpen }: HomeScreenProps): React.ReactElement {
-  const { state } = useChat();
+  const { state, ready } = useChat();
   const conversations = state.conversations;
+  // R8/F2: gate the chat-surface entry points while the provider is not
+  // usable. `state.error` is rendered below instead of the silent dead-end
+  // the fail-closed path used to leave.
+  const entryBlocked = !ready || state.error !== null;
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={styles.title}>fck-chat-control</Text>
@@ -34,12 +44,24 @@ export function HomeScreen({ onStart, onJoin, onOpen }: HomeScreenProps): React.
         Peer-to-peer, at-rest-encrypted chat. Safety-number-only auth for v1.
       </Text>
 
-      <Pressable style={styles.primaryButton} onPress={onStart}>
+      <Pressable
+        style={[styles.primaryButton, entryBlocked ? styles.entryDisabled : null]}
+        onPress={onStart}
+        disabled={entryBlocked}
+      >
         <Text style={styles.primaryButtonText}>Start a conversation</Text>
       </Pressable>
-      <Pressable style={styles.secondaryButton} onPress={onJoin}>
+      <Pressable
+        style={[styles.secondaryButton, entryBlocked ? styles.entryDisabled : null]}
+        onPress={onJoin}
+        disabled={entryBlocked}
+      >
         <Text style={styles.secondaryButtonText}>Join with invitation</Text>
       </Pressable>
+      {state.error !== null ? <Text style={styles.error}>{state.error}</Text> : null}
+      {!ready && state.error === null ? (
+        <Text style={styles.startingUp}>Preparing secure storage…</Text>
+      ) : null}
 
       {conversations.length > 0 ? (
         <View style={styles.section}>
@@ -101,4 +123,7 @@ const styles = StyleSheet.create({
   },
   rowTitle: { color: colors.text, fontSize: 15, fontWeight: "600" },
   rowSub: { color: colors.textMuted, fontSize: 12 },
+  entryDisabled: { opacity: 0.5 },
+  error: { color: colors.danger, fontSize: 13 },
+  startingUp: { color: colors.textMuted, fontSize: 13 },
 });

@@ -113,7 +113,12 @@ const mockSecureStoreSetCalls: SecureStoreSetCall[] =
 jest.mock("expo-secure-store", () => {
   const store = new Map<string, string>();
   return {
-    getItemAsync: (key: string): Promise<string | null> => Promise.resolve(store.get(key) ?? null),
+    // jest.fn so a test can override individual calls (e.g. reject the
+    // keychain read to drive the provider's fail-closed error path in
+    // app-shell.test.tsx); the default implementation is unchanged.
+    getItemAsync: jest.fn(
+      (key: string): Promise<string | null> => Promise.resolve(store.get(key) ?? null),
+    ),
     setItemAsync: (
       key: string,
       value: string,
