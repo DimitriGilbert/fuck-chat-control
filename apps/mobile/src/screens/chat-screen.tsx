@@ -28,6 +28,7 @@ import {
 } from "react-native";
 import * as DocumentPicker from "expo-document-picker";
 import { getInfoAsync } from "expo-file-system/legacy";
+import { conversationIdToHex } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import { MAX_INCOMPLETE_TRANSFER_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import type { ConversationMessage } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ChatFileInput } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
@@ -152,7 +153,10 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
     try {
       await controller.sendText(conversationId, text);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      // R13F6: upstream throws can embed broker/TURN URLs, SDP, and
+      // conversation ids — log the real error, show a generic message.
+      console.warn("sendText failed", err);
+      setError("The message could not be sent.");
     }
   }, [controller, conversationId, draft]);
 
@@ -165,7 +169,10 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
       if (input === null) return;
       await controller.sendFile(conversationId, input);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      // R13F6: upstream throws can embed broker/TURN URLs, SDP, and
+      // conversation ids — log the real error, show a generic message.
+      console.warn("sendFile failed", err);
+      setError("The file could not be sent.");
     }
   }, [controller, conversationId]);
 
@@ -211,21 +218,24 @@ export function ChatScreen({ onLeave }: ChatScreenProps): React.ReactElement {
         <Pressable onPress={handleLeave}>
           <Text style={styles.backText}>Leave</Text>
         </Pressable>
-        <Text style={styles.title}>{active.id.slice(0, 8)}…</Text>
+        <Text style={styles.title}>{conversationIdToHex(active.id).slice(0, 8)}…</Text>
         <View style={styles.headerSpacer} />
       </View>
 
       <View style={styles.safetyRow}>
-        <Text style={styles.safetyNumber} numberOfLines={1}>
-          {active.safetyNumber ?? "handshaking…"}
-        </Text>
+        {/* R13F4: no numberOfLines cap — the safety number must wrap rather
+            than ellipsize under font scaling or narrow viewports, since a
+            truncated number cannot be compared against the peer's. */}
+        <Text style={styles.safetyNumber}>{active.safetyNumber ?? "handshaking…"}</Text>
         <Pressable
           style={[
             styles.verifyButton,
             active.safetyNumberVerified ? styles.verifyButtonDone : null,
           ]}
           onPress={handleVerify}
-          disabled={active.safetyNumberVerified}
+          // R13F5: disabled until a safety number exists — a mid-handshake
+          // tap must not be able to produce a false "Verified" state.
+          disabled={active.safetyNumberVerified || active.safetyNumber === null}
         >
           <Text style={styles.verifyText}>
             {active.safetyNumberVerified ? "Verified" : "Mark verified"}

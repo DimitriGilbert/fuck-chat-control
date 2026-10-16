@@ -81,36 +81,60 @@ export function resolveRuntimeConfig(): RuntimeConfig {
 }
 
 /**
- * Fetch the ICE server list from the broker's `/ice-config` endpoint. Returns
- * `[]` on any failure so loopback/LAN/CI deployments (where the endpoint may
- * be unconfigured) keep working with host-candidate-only WebRTC. A failed
- * fetch MUST NOT break controller construction — mirrors the web provider's
- * posture.
+ * Fetch the ICE server list (plus the deployment's public base URL) from the
+ * broker's `/ice-config` endpoint. Returns empty values on any failure so
+ * loopback/LAN/CI deployments (where the endpoint may be unconfigured) keep
+ * working with host-candidate-only WebRTC. A failed fetch MUST NOT break
+ * controller construction — mirrors the web provider's posture.
+ *
+ * `publicBaseUrl` is the origin invitation links are formatted with
+ * (MEDIUM-E; the controller falls back to `baseUrl` when unset). Only a
+ * non-empty string is accepted — matching the web provider's guard — so the
+ * configured base URL wins in both the absent AND empty cases.
  */
-export async function fetchIceServers(): Promise<
-  readonly {
+export async function fetchIceConfig(): Promise<{
+  readonly iceServers: readonly {
     readonly urls: string | readonly string[];
     readonly username?: string;
     readonly credential?: string;
-  }[]
-> {
+  }[];
+  readonly publicBaseUrl: string | undefined;
+}> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
+  const fallback: {
+    readonly iceServers: readonly {
+      readonly urls: string | readonly string[];
+      readonly username?: string;
+      readonly credential?: string;
+    }[];
+    readonly publicBaseUrl: string | undefined;
+  } = { iceServers: [], publicBaseUrl: undefined };
   try {
     const { baseUrl } = resolveRuntimeConfig();
     const response = await fetch(`${baseUrl}/ice-config`, {
       signal: controller.signal,
     });
-    if (!response.ok) return [];
-    const body = (await response.json()) as { readonly iceServers?: unknown };
-    if (!Array.isArray(body.iceServers)) return [];
-    return body.iceServers as readonly {
-      readonly urls: string | readonly string[];
-      readonly username?: string;
-      readonly credential?: string;
-    }[];
+    if (!response.ok) return fallback;
+    const body = (await response.json()) as {
+      readonly iceServers?: unknown;
+      readonly publicBaseUrl?: unknown;
+    };
+    if (!Array.isArray(body.iceServers)) return fallback;
+    const publicBaseUrl =
+      typeof body.publicBaseUrl === "string" && body.publicBaseUrl.length > 0
+        ? body.publicBaseUrl
+        : undefined;
+    return {
+      iceServers: body.iceServers as readonly {
+        readonly urls: string | readonly string[];
+        readonly username?: string;
+        readonly credential?: string;
+      }[],
+      publicBaseUrl,
+    };
   } catch {
-    return [];
+    return fallback;
   } finally {
     clearTimeout(timeout);
   }

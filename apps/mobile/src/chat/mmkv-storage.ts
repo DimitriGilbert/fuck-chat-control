@@ -88,11 +88,36 @@ function generateMmkvEncryptionKey(): string {
 }
 
 /**
+ * Process-wide memo for the OS-keychain encryption-key load (R12F2).
+ * Deliberately INDEPENDENT of the {@link closedEpoch} storage epoch — see
+ * {@link loadOrCreateMmkvEncryptionKey} for why clearing this on teardown
+ * would reopen the divergent-key race it exists to close.
+ */
+let encryptionKeyPromise: Promise<string> | null = null;
+
+/**
  * Loads the MMKV encryption key from the OS keychain, generating and
  * persisting it on first launch. The key is generated EXACTLY ONCE: a missing
  * SecureStore entry is the only path that calls `generateMmkvEncryptionKey` +
  * `SecureStore.setItemAsync`; every subsequent launch reads the persisted
- * value back. Returns the base64 string to pass as MMKV's `encryptionKey`.
+ * value back. Returns a promise for the base64 string to pass as MMKV's
+ * `encryptionKey`.
+ *
+ * R12F2 (concurrency fix): the whole read+generate+write round-trip is
+ * memoized process-wide. Without the memo, a `closeStorage()` landing while
+ * the FIRST launch's keychain read was still in flight let a second
+ * `ensureStorageReady()` run a SECOND load — both could observe a missing
+ * keychain entry, generate DIFFERENT keys, and race `setItemAsync`, leaving
+ * the keychain holding a key that does not match the one the MMKV file was
+ * actually encrypted with (permanent unrecoverable brick). Sharing one
+ * promise means every caller — including epoch-discarded ones — observes the
+ * SAME key. For that reason {@link closeStorage} must NOT clear this memo:
+ * resetting it on teardown re-arms exactly that race.
+ *
+ * R12F3 (retry): a REJECTED load is evicted so the next caller retries the
+ * keychain round-trip — a transient SecureStore/Keystore failure (locked
+ * keystore, dismissed keychain prompt, RN bridge hiccup) recovers instead of
+ * pinning a permanent rejection.
  *
  * ACCESSIBILITY CHOICE: the key is persisted with
  * `keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY`. The
@@ -104,16 +129,30 @@ function generateMmkvEncryptionKey(): string {
  * remediation — without it, the default `WHEN_UNLOCKED` (migratable) class
  * would let the MMKV encryption key ride a backup onto a different device.
  */
-async function loadOrCreateMmkvEncryptionKey(): Promise<string> {
-  const existing = await SecureStore.getItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY);
-  if (existing !== null) {
-    return existing;
-  }
-  const generated = generateMmkvEncryptionKey();
-  await SecureStore.setItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY, generated, {
-    keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+function loadOrCreateMmkvEncryptionKey(): Promise<string> {
+  if (encryptionKeyPromise !== null) return encryptionKeyPromise;
+  const attempt = (async (): Promise<string> => {
+    const existing = await SecureStore.getItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY);
+    if (existing !== null) {
+      return existing;
+    }
+    const generated = generateMmkvEncryptionKey();
+    await SecureStore.setItemAsync(MMKV_ENCRYPTION_KEY_SECURE_STORE_KEY, generated, {
+      keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+    });
+    return generated;
+  })();
+  encryptionKeyPromise = attempt;
+  // R12F3: evict a rejected load so the next ensureStorageReady() retries.
+  // The identity check keeps a stale rejection from clearing a NEWER
+  // attempt's slot (e.g. one started after closeStorage dropped a prior
+  // readyPromise but before this rejection propagated).
+  attempt.catch(() => {
+    if (encryptionKeyPromise === attempt) {
+      encryptionKeyPromise = null;
+    }
   });
-  return generated;
+  return attempt;
 }
 
 /**
@@ -169,7 +208,9 @@ let storageInstance: MMKV | null = null;
  * pass: the promise is assigned on the first call and reused thereafter.
  * {@link closeStorage} clears it (on every path, R8/F3) so a later
  * `ensureStorageReady()` re-initializes lazily instead of reusing the
- * pre-teardown promise.
+ * pre-teardown promise. A REJECTED attempt also clears itself (R12F3) so a
+ * transient keychain failure is retriable in-process rather than disabling
+ * chat until restart.
  */
 let readyPromise: Promise<void> | null = null;
 
@@ -193,7 +234,7 @@ let closedEpoch = 0;
 export function ensureStorageReady(): Promise<void> {
   if (readyPromise !== null) return readyPromise;
   const epoch = closedEpoch;
-  readyPromise = (async () => {
+  const attempt = (async (): Promise<void> => {
     // Re-check inside the in-flight promise: a resolved prior call leaves
     // storageInstance set and readyPromise cached, but the outer null check
     // on readyPromise is the primary gate.
@@ -211,9 +252,10 @@ export function ensureStorageReady(): Promise<void> {
     // "used before ready" error rather than touching plaintext. The chat
     // provider surfaces this to the user as a "secure storage unavailable —
     // cannot start chat" error state (see mobile-chat-provider.tsx). The
-    // user can retry: the keychain may become available again on the next
-    // launch, and a fresh ensureStorageReady() attempt will re-run because
-    // readyPromise is per-process and a new process gets a fresh module.
+    // failure is RETRIABLE: the rejection-eviction below clears the cached
+    // attempt so a later ensureStorageReady() re-runs the whole path (the
+    // keychain may have become available again — a transient Keystore lock
+    // is exactly the kind of failure that resolves on its own).
     const encryptionKey = await loadOrCreateMmkvEncryptionKey();
     // R8/F3: if a closeStorage() ran while the keychain round-trip above was
     // pending, the epoch moved on — discard the result. Constructing MMKV
@@ -231,7 +273,19 @@ export function ensureStorageReady(): Promise<void> {
       encryptionType: "AES-256",
     });
   })();
-  return readyPromise;
+  readyPromise = attempt;
+  // R12F3: a rejected attempt must not be cached forever — evict it so a
+  // transient SecureStore/Keystore failure can be retried by a later
+  // ensureStorageReady() call. The identity check keeps a stale rejection
+  // (one that propagated AFTER closeStorage already cleared the slot, or
+  // after a newer attempt claimed it) from clearing a promise that is not
+  // its own.
+  attempt.catch(() => {
+    if (readyPromise === attempt) {
+      readyPromise = null;
+    }
+  });
+  return attempt;
 }
 
 /**

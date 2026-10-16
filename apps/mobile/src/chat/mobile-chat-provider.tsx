@@ -33,6 +33,7 @@ import type {
 import { createIdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 import type { IdentityManager } from "@fuck-eu-chat-control/chat-runtime/runtime/identity-manager";
 import {
+  clearDurableStorage,
   InMemoryConversationRepository,
   setDurableStorage,
 } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -45,7 +46,7 @@ import * as React from "react";
 import { chatStorage, closeStorage, ensureStorageReady } from "./mmkv-storage";
 import { rnPeerConnectionFactory } from "./rn-peer-connection-factory";
 import { rnSocketFactory } from "./rn-socket-factory";
-import { fetchIceServers, resolveRuntimeConfig } from "./config";
+import { fetchIceConfig, resolveRuntimeConfig } from "./config";
 
 /**
  * Sentinel thrown when `ensureStorageReady()` rejects — i.e. the OS
@@ -143,8 +144,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           return Promise.all([
             identityManager.ensureLoaded(),
             atRestKeyManager.ensureLoaded(),
-            fetchIceServers(),
-          ]).then(([, , iceServers]) => {
+            fetchIceConfig(),
+          ]).then(([, , iceConfig]) => {
             if (cancelled) return;
             // React Native has no OPFS/Web Worker, so the browser SQLite
             // persistence package is not usable here. History is in-memory for
@@ -156,12 +157,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
             const instance = createChatController({
               brokerUrl,
               baseUrl,
+              // R12F5: honor the deployment's public base URL so generated
+              // invitation links point at the publicly reachable origin
+              // rather than the (possibly internal) asset/config base. The
+              // controller falls back to baseUrl when this is undefined.
+              publicBaseUrl: iceConfig.publicBaseUrl,
               identityManager,
               atRestKeyManager,
               repositoryFactory,
               socketFactory: rnSocketFactory,
               peerConnectionFactory: rnPeerConnectionFactory,
-              iceServers: iceServers as readonly IceServer[],
+              iceServers: iceConfig.iceServers as readonly IceServer[],
               // R8/F1 (Phase 6): gate PAKE-coded invitations OFF in logic. v1
               // mobile is safety-number-only; the SPAKE2 wasm pkg is Metro-
               // blockListed, so a `~code` deep link would otherwise reach
@@ -221,6 +227,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
       // material does not stay resident after the provider is gone.
       disposedAtRestKeyManager?.lock();
       disposedIdentityManager?.evict();
+      // R12F4: unregister the durable store BEFORE tearing down MMKV — the
+      // registered instance is chatStorage, whose getItem/setItem throw once
+      // closeStorage() drops the singleton. The runtime fires durable
+      // read/writes (getAuthFailedDurable / markAuthFailedDurable) without
+      // awaiting them, so a call racing this teardown must hit the
+      // null-degradation path ("absent" / no-op) rather than a stale
+      // registration pointing at a dead store. Done AFTER the controller
+      // dispose above so teardown-time flag writes still land on the
+      // still-open MMKV.
+      clearDurableStorage();
       // R8:F7: tear down the MMKV instance too — trim() clears its plaintext
       // in-memory page cache and the nulled singletons drop the JS handles,
       // so nothing beyond the keychain-held key survives the provider.

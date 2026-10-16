@@ -17,7 +17,18 @@ export const AUTH_FAILED_STORAGE_KEY = "fck-chat-v1:auth-failed";
 function readRecord(): Record<string, true> {
   const store = getDurableStorage();
   if (store === null) return {};
-  const raw = store.getItem(AUTH_FAILED_STORAGE_KEY);
+  let raw: string | null;
+  try {
+    raw = store.getItem(AUTH_FAILED_STORAGE_KEY);
+  } catch {
+    // A throwing store must not propagate: e.g. the mobile chatStorage
+    // adapter throws "used before ready" once its MMKV instance has been
+    // torn down, and a durable read racing that teardown would otherwise
+    // reject the fire-and-forget getAuthFailedDurable/markAuthFailedDurable
+    // calls the orchestrator makes during session shutdown. Mirrors
+    // writeRecord's swallowed setItem — reads degrade to "flag absent".
+    return {};
+  }
   if (raw === null) return {};
   try {
     const parsed: unknown = JSON.parse(raw);

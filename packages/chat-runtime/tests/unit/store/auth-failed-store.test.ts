@@ -10,7 +10,10 @@ import {
   getAuthFailedDurable,
   markAuthFailedDurable,
 } from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
-import { setDurableStorage } from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
+import {
+  clearDurableStorage,
+  setDurableStorage,
+} from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
 import { MemoryStorage } from "./_helpers";
 
 function conversationIdFromHex(hex: string): ConversationId {
@@ -159,6 +162,45 @@ describe("auth-failed-store (SEC-1)", () => {
       // null for an absent key, so the flag reads as false after the swallowed
       // write. (writeRecord's swallowed throw prevented any payload landing.)
       await expect(getAuthFailedDurable(ID_A)).resolves.toBe(false);
+    } finally {
+      setDurableStorage(storage);
+    }
+  });
+
+  it("swallows a throwing getItem (post-teardown store): reads degrade to false, writes still resolve", async () => {
+    // R12F4 regression: mobile's chatStorage adapter throws "used before
+    // ready" once closeStorage() has torn down its MMKV instance. A durable
+    // read racing that teardown used to propagate the throw out of
+    // getAuthFailedDurable/markAuthFailedDurable — both of which the
+    // orchestrator fires-and-forgets — rejecting on an unhandled path. The
+    // try/catch in readRecord now mirrors writeRecord's swallowed setItem.
+    const throwingStore: MemoryStorage = new MemoryStorage();
+    spyOnStorage(throwingStore, "getItem", () => {
+      throw new Error("chatStorage used before ensureStorageReady() resolved");
+    });
+    setDurableStorage(throwingStore);
+    try {
+      await expect(getAuthFailedDurable(ID_A)).resolves.toBe(false);
+      // markAuthFailedDurable reads the record before writing — the
+      // swallowed read must not turn the write path into a rejection either.
+      await expect(markAuthFailedDurable(ID_A)).resolves.toBeUndefined();
+      await expect(clearAuthFailedDurable(ID_A)).resolves.toBeUndefined();
+    } finally {
+      setDurableStorage(storage);
+    }
+  });
+
+  it("clearDurableStorage unregisters the store (R12F4): subsequent calls hit the null-degradation path", async () => {
+    const probe: MemoryStorage = new MemoryStorage();
+    setDurableStorage(probe);
+    clearDurableStorage();
+    // With no store registered: reads return "absent", writes no-op — the
+    // same degradation an unconfigured platform gets. The probe MUST NOT
+    // have been written to.
+    try {
+      await expect(getAuthFailedDurable(ID_A)).resolves.toBe(false);
+      await expect(markAuthFailedDurable(ID_A)).resolves.toBeUndefined();
+      expect(probe.getItem(AUTH_FAILED_STORAGE_KEY)).toBeNull();
     } finally {
       setDurableStorage(storage);
     }

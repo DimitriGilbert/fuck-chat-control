@@ -40,6 +40,18 @@ export function setDurableStorage(store: DurableStorage): void {
 }
 
 /**
+ * Unregister the platform's durable KV store (R12F4). Platform teardown calls
+ * this when the registered store is about to become unusable — the mobile
+ * provider's cleanup runs it just before `closeStorage()` drops the MMKV
+ * instance backing the registration — so post-teardown durable reads/writes
+ * take the runtime's null-degradation path (reads "absent", writes no-op)
+ * instead of throwing against a dead store. Idempotent.
+ */
+export function clearDurableStorage(): void {
+  durableStorage = null;
+}
+
+/**
  * Access the registered durable store. Returns `null` when no store has been
  * registered — callers must handle that case (the auth-failed store treats a
  * null store as "persist nothing, read everything as absent").

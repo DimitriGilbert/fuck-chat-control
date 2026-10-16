@@ -1,10 +1,17 @@
 /**
- * App registration entry. Metro loads `package.json` `main` → this file. The
- * polyfill import is re-exported through App.tsx so it runs first; importing
- * App here preserves that ordering under Metro's module graph.
+ * App registration entry — the TRUE first module: Metro loads
+ * `package.json` `main` → this file. The bare polyfill import MUST be the
+ * first import HERE, not only in App.tsx: module evaluation is depth-first
+ * in import order, so this edge must resolve before `./App` pulls in the
+ * chat-runtime → @noble graph that snapshots `globalThis.crypto` at
+ * module-eval time. Keeping it first also guards the ordering if App.tsx's
+ * import order ever regresses. See src/chat/rn-crypto-polyfill.ts for the
+ * full invariant (this deliberately precedes the external `expo` import).
  */
-import App from "./App";
+import "./src/chat/rn-crypto-polyfill";
 
 import { registerRootComponent } from "expo";
+
+import App from "./App";
 
 registerRootComponent(App);

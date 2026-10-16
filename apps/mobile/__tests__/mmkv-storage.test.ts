@@ -10,6 +10,16 @@
  * keychainAccessible: WHEN_UNLOCKED_THIS_DEVICE_ONLY (non-migratable, excluded
  * from iCloud/iTunes backups).
  */
+import { encodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  getAuthFailedDurable,
+  markAuthFailedDurable,
+} from "@fuck-eu-chat-control/chat-runtime/store/auth-failed-store";
+import {
+  clearDurableStorage,
+  setDurableStorage,
+} from "@fuck-eu-chat-control/chat-runtime/store/durable-storage";
+
 import {
   chatStorage,
   closeStorage,
@@ -233,9 +243,14 @@ describe("closeStorage during in-flight ensureStorageReady (R8/F3)", () => {
     expect(() => storage.chatStorage.getItem("leak-probe")).toThrow(/before ensureStorageReady/);
 
     // readyPromise was cleared on the early-return path, so the next call
-    // re-initializes lazily with a FRESH instance (the R8/F7 contract).
+    // re-initializes lazily with a FRESH instance (the R8/F7 contract). The
+    // keychain read is NOT re-run: the R12F2 process-wide memo shares the
+    // resolved key with the epoch-discarded first attempt — re-reading the
+    // keychain would return the same persisted value anyway, and a second
+    // concurrent load is exactly the divergent-generation race the memo
+    // prevents.
     await storage.ensureStorageReady();
-    expect(mockKeychainReads).toBe(2);
+    expect(mockKeychainReads).toBe(1);
     expect(createCalls.length).toBe(createsBefore + 1);
     storage.chatStorage.setItem("fresh-probe", "ok");
     expect(storage.chatStorage.getItem("fresh-probe")).toBe("ok");
@@ -273,5 +288,156 @@ describe("closeStorage (R8:F7 teardown)", () => {
 
   it("lockStorage is an alias of closeStorage", () => {
     expect(lockStorage).toBe(closeStorage);
+  });
+});
+
+describe("ensureStorageReady retry after rejection (R12F3)", () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it("evicts a rejected attempt so a transient keychain failure is retriable", async () => {
+    // The first keychain read fails (transient: locked keystore, dismissed
+    // prompt); the second returns a persisted key. Without the eviction the
+    // rejecting promise stayed cached forever — chat disabled until the
+    // process restarted.
+    let mockReads = 0;
+    jest.doMock("expo-secure-store", () => ({
+      getItemAsync: (): Promise<string | null> => {
+        mockReads += 1;
+        if (mockReads === 1) {
+          return Promise.reject(new Error("keychain unavailable"));
+        }
+        return Promise.resolve("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+      },
+      setItemAsync: (): Promise<void> => Promise.resolve(),
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
+    }));
+
+    let isolated: typeof import("../src/chat/mmkv-storage") | undefined;
+    jest.isolateModules(() => {
+      isolated = require("../src/chat/mmkv-storage");
+    });
+    const storage = isolated!;
+
+    await expect(storage.ensureStorageReady()).rejects.toThrow("keychain unavailable");
+
+    // The rejection evicted BOTH caches: this call re-runs the keychain read
+    // (the memoized key-load was cleared too) instead of replaying the
+    // cached rejection.
+    await expect(storage.ensureStorageReady()).resolves.toBeUndefined();
+    expect(mockReads).toBe(2);
+    storage.chatStorage.setItem("retry-probe", "ok");
+    expect(storage.chatStorage.getItem("retry-probe")).toBe("ok");
+  });
+});
+
+describe("shared keychain load across a closeStorage epoch boundary (R12F2)", () => {
+  beforeEach(() => {
+    jest.resetModules();
+  });
+
+  it("runs ONE generation+write even when a teardown splits two ensureStorageReady calls", async () => {
+    // Regression for the divergent-key brick: a closeStorage() landing while
+    // the first launch's keychain read was pending used to let a second
+    // ensureStorageReady run a SECOND loadOrCreateMmkvEncryptionKey — both
+    // reads observe a missing key, both generate DIFFERENT keys, and the
+    // setItemAsync race leaves the keychain holding a key that does not
+    // match the MMKV file's encryption key. The process-wide key-load memo
+    // funnels both attempts through one generation+write.
+    let mockReads = 0;
+    let mockWrites = 0;
+    let mockWrittenKey: string | null = null;
+    const mockFirstRead: { release: ((key: string | null) => void) | null } = {
+      release: null,
+    };
+    jest.doMock("expo-secure-store", () => ({
+      getItemAsync: (): Promise<string | null> => {
+        mockReads += 1;
+        // Only the FIRST read is gated so closeStorage() can land while it
+        // is pending; a (buggy) second read resolves immediately so the
+        // regression fails the read/write count assertions below instead of
+        // hanging on a second never-released gate.
+        if (mockReads > 1) return Promise.resolve(null);
+        return new Promise<string | null>((resolve) => {
+          mockFirstRead.release = resolve;
+        });
+      },
+      setItemAsync: (_key: string, value: string): Promise<void> => {
+        mockWrites += 1;
+        mockWrittenKey = value;
+        return Promise.resolve();
+      },
+      WHEN_UNLOCKED_THIS_DEVICE_ONLY: "WHEN_UNLOCKED_THIS_DEVICE_ONLY",
+    }));
+
+    let isolated: typeof import("../src/chat/mmkv-storage") | undefined;
+    jest.isolateModules(() => {
+      isolated = require("../src/chat/mmkv-storage");
+    });
+    const storage = isolated!;
+
+    const createsBefore = createCalls.length;
+
+    const first = storage.ensureStorageReady();
+    expect(mockReads).toBe(1);
+
+    // Teardown mid-read: the epoch bumps and readyPromise clears, so the
+    // second call builds its OWN attempt — but must await the SAME keychain
+    // load (the memo is independent of the storage epoch).
+    storage.closeStorage();
+    const second = storage.ensureStorageReady();
+
+    const release = mockFirstRead.release;
+    if (release === null) {
+      throw new Error("first keychain read was not pending");
+    }
+    // First launch: the read returns no persisted key → generate + persist.
+    release(null);
+    // The epoch-discarded first attempt resolves without constructing MMKV;
+    // the second attempt constructs it with the shared key.
+    await first;
+    await second;
+
+    expect(mockReads).toBe(1);
+    expect(mockWrites).toBe(1);
+    expect(createCalls.length).toBe(createsBefore + 1);
+    // The constructed MMKV carries the SAME key that was persisted — no
+    // divergent generation between the two attempts.
+    expect(createCalls[createCalls.length - 1]?.encryptionKey).toBe(mockWrittenKey);
+    storage.chatStorage.setItem("shared-key-probe", "ok");
+    expect(storage.chatStorage.getItem("shared-key-probe")).toBe("ok");
+  });
+});
+
+describe("post-teardown durable reads (R12F4)", () => {
+  const probeId = encodeConversationId(new Uint8Array(16).fill(7));
+
+  afterEach(() => {
+    // Leave the runtime's durable-store registration unconfigured so this
+    // file's other suites are unaffected by it.
+    clearDurableStorage();
+  });
+
+  it("the runtime's durable read swallows the torn-down adapter's throw", async () => {
+    await ensureStorageReady();
+    // The provider registers chatStorage as the runtime's DurableStorage at
+    // boot; teardown calls clearDurableStorage() before closeStorage().
+    setDurableStorage(chatStorage);
+    closeStorage();
+
+    // The adapter itself still throws post-teardown — that is the deliberate
+    // sync-contract guard — but the auth-failed store's readRecord catches
+    // it, so a durable read routed through the stale registration degrades
+    // to "absent" instead of rejecting a fire-and-forget call.
+    expect(() => chatStorage.getItem("probe")).toThrow(/before ensureStorageReady/);
+    await expect(getAuthFailedDurable(probeId)).resolves.toBe(false);
+    await expect(markAuthFailedDurable(probeId)).resolves.toBeUndefined();
+
+    // And once the provider's cleanup unregisters the store entirely, the
+    // same calls take the null-degradation path.
+    clearDurableStorage();
+    await expect(getAuthFailedDurable(probeId)).resolves.toBe(false);
+    await expect(markAuthFailedDurable(probeId)).resolves.toBeUndefined();
   });
 });

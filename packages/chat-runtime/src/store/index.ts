@@ -38,5 +38,5 @@ export {
   getAuthFailedDurable,
   markAuthFailedDurable,
 } from "./auth-failed-store";
-export { setDurableStorage } from "./durable-storage";
+export { clearDurableStorage, setDurableStorage } from "./durable-storage";
 export type { DurableStorage } from "./durable-storage";

@@ -27,32 +27,41 @@ import { useChatController, useChatState } from "../chat/mobile-chat-provider";
 import { colors } from "../ui/colors";
 
 export interface StartConversationScreenProps {
-  readonly onStarted: () => void;
   readonly onBack: () => void;
 }
 
 export function StartConversationScreen({
-  onStarted,
   onBack,
 }: StartConversationScreenProps): React.ReactElement {
   const controller = useChatController();
   const state = useChatState();
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const invitation = state.invitation;
+  // The active session's invitation (null before generation and for
+  // responder/resumed sessions). It survives activeConversationId being set,
+  // so this view keeps rendering the link while the session waits for its
+  // peer.
+  const invitation = state.active?.invitation ?? null;
 
   const handleStart = React.useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
+      // R13F1: stay on this screen after startConversation resolves. The
+      // session registers (state.active flips non-null, still Waiting for the
+      // responder) inside the call, so the invitation view below picks the
+      // link up from state. The Router's auto-route moves to the chat screen
+      // only when the handshake reaches Connected (see App.tsx).
       await controller.startConversation();
-      onStarted();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      // R13F6: upstream throws can embed broker/TURN URLs, SDP, and
+      // conversation ids — log the real error, show a generic message.
+      console.warn("startConversation failed", err);
+      setError("Could not generate the invitation.");
     } finally {
       setBusy(false);
     }
-  }, [controller, onStarted]);
+  }, [controller]);
 
   const handleShare = React.useCallback(async () => {
     if (invitation === null) return;
@@ -76,11 +85,10 @@ export function StartConversationScreen({
         { dialogTitle: "Share invitation" },
       );
     } catch (err: unknown) {
-      setError(
-        err instanceof Error
-          ? `Could not open the share sheet: ${err.message}`
-          : "Could not open the share sheet.",
-      );
+      // R13F6: redact the platform error detail (it can embed file paths or
+      // the shared payload) — log the real error, show a generic message.
+      console.warn("Share.share failed", err);
+      setError("Could not open the share sheet.");
     }
   }, [invitation]);
 

@@ -18,18 +18,24 @@
  * disabled while !ready/errored, the Router refuses to navigate to the
  * useChatController()-rendering screens in that state, and a render-phase
  * throw is caught by the boundary instead of crashing.
+ *
+ * R13F1 pins: an initiator session that registers while still Waiting for
+ * its peer keeps the start screen (invitation link + Share) mounted instead
+ * of auto-routing to chat, the route flips to chat only on Connected, and a
+ * pending invitation re-opened from the home conversation list re-enters
+ * the start screen so the link stays reachable.
  */
 import { hexToConversationId } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ChatControllerState } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
-import * as SecureStore from "expo-secure-store";
 import * as React from "react";
+import { Share } from "react-native";
 import { act, create } from "react-test-renderer";
 
 import App from "../App";
-import { closeStorage } from "../src/chat/mmkv-storage";
+import * as mmkvStorage from "../src/chat/mmkv-storage";
 import { AppErrorBoundary } from "../src/error-boundary";
 
 type StateListener = (state: ChatControllerState) => void;
@@ -79,6 +85,9 @@ jest.mock("@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager", () =
 jest.mock("@fuck-eu-chat-control/chat-runtime/store", () => ({
   InMemoryConversationRepository: class InMemoryConversationRepository {},
   setDurableStorage: jest.fn(),
+  // R12F4: the provider's unmount cleanup unregisters the durable store —
+  // the mock must expose the export or the teardown throws.
+  clearDurableStorage: jest.fn(),
 }));
 
 jest.mock("../src/chat/config", () => ({
@@ -86,7 +95,10 @@ jest.mock("../src/chat/config", () => ({
     brokerUrl: "wss://broker.test/ws",
     baseUrl: "https://base.test",
   }),
-  fetchIceServers: async (): Promise<readonly never[]> => [],
+  fetchIceConfig: async (): Promise<{
+    iceServers: readonly never[];
+    publicBaseUrl: undefined;
+  }> => ({ iceServers: [], publicBaseUrl: undefined }),
 }));
 
 jest.mock("expo-document-picker", () => ({
@@ -193,20 +205,32 @@ const mockChat = jest.requireMock<MockChatControllerModule>(
 );
 
 const ACTIVE_HEX = "ab".repeat(16);
+const INVITATION_URL = `https://base.test/#${ACTIVE_HEX}`;
 
-function stateWithActive(id: ConversationId): ChatControllerState {
+interface ActiveOptions {
+  readonly connectionState?: ConnectionState;
+  readonly invitation?: string | null;
+}
+
+function stateWithActive(id: ConversationId, options?: ActiveOptions): ChatControllerState {
+  const connectionState = options?.connectionState ?? ConnectionState.Connected;
+  const invitation = options?.invitation ?? null;
   return {
     ...mockChat.initialChatControllerState,
     activeConversationId: id,
     conversationId: id,
-    connectionState: ConnectionState.Connected,
+    connectionState,
+    // Mirror chat-controller's buildState: the flat invitation field mirrors
+    // active.invitation.
+    invitation,
     active: {
       id,
-      connectionState: ConnectionState.Connected,
+      connectionState,
       messages: [],
-      safetyNumber: "111111111111111111111111111111111",
+      safetyNumber:
+        connectionState === ConnectionState.Connected ? "111111111111111111111111111111111" : null,
       safetyNumberVerified: false,
-      invitation: null,
+      invitation,
       unread: 0,
       draft: "",
       lastMessagePreview: null,
@@ -343,7 +367,7 @@ describe("app shell navigation and leave flow (R8/F1)", () => {
     });
   });
 
-  it("Start flow navigates through the gated route and back", async () => {
+  it("Start flow keeps the invitation visible until the handshake connects (R13F1)", async () => {
     const renderer = await renderApp();
     pressText(renderer.root, "Start a conversation");
     expect(findAllByText(renderer.root, "Generate invitation").length).toBe(1);
@@ -360,9 +384,95 @@ describe("app shell navigation and leave flow (R8/F1)", () => {
       });
     });
     expect(mockChat.createChatController().startConversation).toHaveBeenCalledTimes(1);
-    // onStarted navigated to chat; with no active session yet ChatScreen
-    // renders its empty state (no Leave header until a session is active).
-    expect(findAllByText(renderer.root, "No active conversation.").length).toBe(1);
+
+    // R13F1: the session registers inside startConversation — state.active
+    // flips non-null while still Waiting for the responder — but the shell
+    // must keep the start screen (invitation link + Share) mounted instead
+    // of auto-routing to chat. The original bug routed to chat at this
+    // instant, leaving Leave (session teardown) as the only way back.
+    const id = hexToConversationId(ACTIVE_HEX);
+    act(() => {
+      mockChat.__emitState(
+        stateWithActive(id, {
+          connectionState: ConnectionState.Waiting,
+          invitation: INVITATION_URL,
+        }),
+      );
+    });
+    expect(findAllByText(renderer.root, "Invitation link").length).toBe(1);
+    expect(findAllByText(renderer.root, "Share link").length).toBe(1);
+    expect(findAllByText(renderer.root, "Leave").length).toBe(0);
+    expect(findAllByText(renderer.root, "No active conversation.").length).toBe(0);
+
+    // The Share sheet hands out the `#<id>` link (any `~code` tail stripped
+    // by the start screen's slice).
+    const shareSpy = jest.spyOn(Share, "share").mockResolvedValue({ action: Share.sharedAction });
+    await act(async () => {
+      pressText(renderer.root, "Share link");
+      await Promise.resolve();
+    });
+    expect(shareSpy).toHaveBeenCalledWith(
+      { message: INVITATION_URL, title: "Share invitation" },
+      { dialogTitle: "Share invitation" },
+    );
+    shareSpy.mockRestore();
+
+    // Handshake completion auto-routes to the chat screen even though the
+    // session snapshot still carries the (now spent) invitation.
+    act(() => {
+      mockChat.__emitState(
+        stateWithActive(id, {
+          connectionState: ConnectionState.Connected,
+          invitation: INVITATION_URL,
+        }),
+      );
+    });
+    expect(findAllByText(renderer.root, "Leave").length).toBe(1);
+    expect(findAllByText(renderer.root, "Share link").length).toBe(0);
+
+    await act(async () => {
+      renderer.unmount();
+    });
+  });
+
+  it("re-opens a pending invitation from the conversation list (R13F1)", async () => {
+    const renderer = await renderApp();
+    const id = hexToConversationId(ACTIVE_HEX);
+    // A live initiator session still waiting for its peer, listed on home:
+    // the auto-route must not pull the route to chat while the invitation is
+    // pending (that would strand the link behind Leave again).
+    act(() => {
+      mockChat.__emitState({
+        ...stateWithActive(id, {
+          connectionState: ConnectionState.Waiting,
+          invitation: INVITATION_URL,
+        }),
+        conversations: [
+          {
+            id,
+            createdAt: 0,
+            displayName: null,
+            peer: null,
+            authFailed: false,
+            authFailedAt: null,
+          },
+        ],
+      });
+    });
+    expect(findAllByText(renderer.root, "Leave").length).toBe(0);
+    expect(findAllByText(renderer.root, "Start a conversation").length).toBeGreaterThan(0);
+
+    // Tapping the conversation re-enters the start screen so the link can be
+    // viewed/copied again while the session keeps waiting.
+    await act(async () => {
+      pressText(renderer.root, ACTIVE_HEX.slice(0, 8));
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
+    expect(mockChat.createChatController().resumeConversation).toHaveBeenCalledTimes(1);
+    expect(findAllByText(renderer.root, "Invitation link").length).toBe(1);
+    expect(findAllByText(renderer.root, "Share link").length).toBe(1);
 
     await act(async () => {
       renderer.unmount();
@@ -374,18 +484,24 @@ describe("provider fail-closed error path (R8/F2)", () => {
   beforeEach(() => {
     mockChat.__reset();
     // Tear down any instance a prior test left behind so this test's
-    // ensureStorageReady() actually re-runs the (mocked) keychain read.
-    closeStorage();
+    // ensureStorageReady() actually re-runs.
+    mmkvStorage.closeStorage();
   });
 
   it("renders the error, disables Start/Join, and refuses to enter the chat screens", async () => {
-    const getItemAsyncMock = SecureStore.getItemAsync as unknown as jest.Mock<
-      Promise<string | null>,
-      [string]
-    >;
-    getItemAsyncMock.mockRejectedValueOnce(new Error("keychain unavailable"));
+    // R12F2: the keychain read inside ensureStorageReady() is memoized
+    // process-wide, and an earlier renderApp() already consumed it — so
+    // stubbing SecureStore.getItemAsync can no longer reach the provider.
+    // Reject the boundary the provider actually awaits instead: a rejected
+    // ensureStorageReady() is wrapped in SecureStorageUnavailableError and
+    // surfaces the fail-closed error state regardless of which layer
+    // produced the rejection.
+    const readySpy = jest
+      .spyOn(mmkvStorage, "ensureStorageReady")
+      .mockRejectedValueOnce(new Error("keychain unavailable"));
 
     const renderer = await renderApp();
+    readySpy.mockRestore();
 
     // The provider's redacted fail-closed message is rendered (HomeScreen
     // shows it below the disabled entries; the Router banner shows it too).

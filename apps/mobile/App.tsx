@@ -1,39 +1,36 @@
 /**
- * App entry. ORDERING IS LOAD-BEARING (see
- * packages/chat-runtime/src/crypto/webcrypto-env.d.ts):
+ * App entry. IMPORT ORDER IS LOAD-BEARING (see
+ * packages/chat-runtime/src/crypto/webcrypto-env.d.ts and the header of
+ * src/chat/rn-crypto-polyfill.ts):
  *
- *  1. `installCryptoPolyfill()` runs BEFORE any chat-runtime import is
- *     evaluated. It patches `globalThis.crypto.subtle` with the JSI-backed
- *     implementation from react-native-quick-crypto. chat-runtime's crypto
- *     modules (`primitives.ts`, `export-bundle.ts`, `in-memory-repo.ts`,
- *     `orchestrator.ts`) call `globalThis.crypto.subtle` directly at ~9 sites,
- *     and Hermes does NOT ship WebCrypto — without this call first, the first
- *     crypto operation throws `TypeError: Cannot read property 'subtle' of
- *     undefined`.
+ * The bare `./src/chat/rn-crypto-polyfill` import MUST be this file's first
+ * import. Its module body runs react-native-quick-crypto's `install()` and
+ * pins `globalThis.crypto` (subtle + getRandomValues) — Hermes ships no
+ * WebCrypto, and chat-runtime's crypto modules (`primitives.ts`,
+ * `export-bundle.ts`, `in-memory-repo.ts`, `orchestrator.ts`) call
+ * `globalThis.crypto.subtle` directly at ~9 sites.
  *
- *  2. Only AFTER the polyfill do we import the chat provider (which transitively
- *     imports chat-runtime). The static `import` at the top of this file is
- *     hoisted by Metro/Babel, but the polyfill module ALSO imports only its own
- *     native binding (not chat-runtime), so its `install()` runs at module
- *     evaluation — before the chat-runtime imports deeper in the graph are
- *     reached. This is the same ordering the web app relies on (the browser's
- *     `globalThis.crypto` exists before any module loads); here we reproduce it
- *     by making `installCryptoPolyfill` the first import the bundler sees.
- *
- *     To prove the ordering holds under bundler hoisting: `rn-crypto-polyfill`
- *     imports only `react-native-quick-crypto` (a native module that does NOT
- *     transitively import chat-runtime). The chat-runtime import path starts at
- *     `mobile-chat-provider` (below). Module evaluation is depth-first in
- *     dependency order, so `rn-crypto-polyfill`'s body runs before
- *     `mobile-chat-provider`'s transitive chat-runtime graph is reached.
+ * The invariant is at MODULE-EVALUATION granularity, not call granularity:
+ * `import` edges evaluate depth-first in source order, BEFORE the importing
+ * module's own body. `@noble/hashes/crypto.js` — reached through
+ * `mobile-chat-provider` → chat-runtime → `@noble/curves` — snapshots
+ * `globalThis.crypto` into a module-scoped const when it first evaluates; a
+ * snapshot taken before the polyfill runs stays `undefined` for the process
+ * lifetime, and every `p256.utils.randomSecretKey()` then throws
+ * `crypto.getRandomValues must be defined`. That is why the install lives
+ * INSIDE the polyfill module's top-level statements and this file uses a
+ * side-effect import: calling an installer from THIS module's body could
+ * never run early enough, because every import below (including the whole
+ * chat-runtime → noble graph) has already evaluated by then.
  */
-import { installCryptoPolyfill } from "./src/chat/rn-crypto-polyfill";
+import "./src/chat/rn-crypto-polyfill";
 
-installCryptoPolyfill();
-
-import { conversationIdToHex } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
-import { decodeConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import {
+  conversationIdToHex,
+  hexToConversationId,
+} from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import * as React from "react";
 import { StatusBar, StyleSheet, Text, View } from "react-native";
 
@@ -46,27 +43,6 @@ import { StartConversationScreen } from "./src/screens/start-conversation-screen
 import { colors } from "./src/ui/colors";
 
 type Route = "home" | "start" | "join" | "chat";
-
-/**
- * Parse a hex-encoded ConversationId (as produced by HomeScreen's `toHex`)
- * back into a branded `ConversationId`. Delegates length + brand validation to
- * the runtime's canonical `decodeConversationId`; the hex→bytes step is local
- * because codec.ts exposes no hex-string helper.
- */
-function hexToConversationId(hex: string): ConversationId {
-  if (hex.length % 2 !== 0) {
-    throw new Error(`conversation id hex must have even length, got ${hex.length}`);
-  }
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < bytes.length; i++) {
-    const byte = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
-      throw new Error(`conversation id hex has a non-hex character at offset ${i * 2}`);
-    }
-    bytes[i] = byte;
-  }
-  return decodeConversationId(bytes);
-}
 
 function Router(): React.ReactElement {
   const [route, setRoute] = React.useState<Route>("home");
@@ -94,27 +70,46 @@ function Router(): React.ReactElement {
     [canEnterChatSurfaces],
   );
 
-  // Auto-switch to the chat screen once an active conversation exists and the
-  // handshake begins producing messages or an invitation. resumeConversation's
-  // emit(null) calls flip state.active non-null, so a successful resume routes
-  // here even without an explicit setRoute('chat') in the handler.
+  // Auto-switch to the chat screen once an active session is ready for it.
+  // resumeConversation's emit(null) calls flip state.active non-null, so a
+  // successful resume routes here even without an explicit setRoute('chat')
+  // in the handler.
   //
-  // R8/F1: only force the route on a TRANSITION into a (different) active
-  // session, tracked by the last-seen active conversation id. Re-forcing
-  // whenever `state.active` is non-null bounced the user straight back into a
-  // chat they just left: Leave calls controller.leave() (clears the active
-  // session) + setRoute("home"), but any render where a stale non-null
-  // `state.active` snapshot coexists with route "home" re-forced "chat".
-  // ConversationId is a branded Uint8Array, so ids are compared by hex value
-  // (the runtime's conversationIdToHex), never by reference.
-  const lastActiveHexRef = React.useRef<string | null>(null);
+  // R13F1: a freshly STARTED initiator session also flips state.active
+  // non-null the moment it registers — while still Waiting for the
+  // responder. Auto-routing to "chat" at that instant pulled the start
+  // screen's invitation link + Share button out from under the initiator,
+  // and the chat screen's only way back (Leave) tears the session down, so
+  // the link was unreachable and the peer could never join. A session whose
+  // invitation is still pending (invitation set, handshake not yet
+  // Connected) therefore suppresses the auto-route entirely: the initiator
+  // stays on the start screen and this effect routes to "chat" only when
+  // the Connected snapshot lands — matching the screen's copy ("the chat
+  // screen opens automatically once the handshake completes"). Responder
+  // and resumed sessions carry no invitation and route on activation as
+  // before.
+  //
+  // R8/F1: routing is tracked per conversation id (by hex value —
+  // ConversationId is a branded Uint8Array, never compared by reference) so
+  // a stale non-null `state.active` snapshot coexisting with route "home"
+  // after Leave cannot force the route back into a chat the user just left.
+  const routedActiveHexRef = React.useRef<string | null>(null);
   React.useEffect(() => {
-    const activeHex = state.active === null ? null : conversationIdToHex(state.active.id);
-    const lastActiveHex = lastActiveHexRef.current;
-    lastActiveHexRef.current = activeHex;
-    if (activeHex !== null && activeHex !== lastActiveHex && route !== "chat") {
-      setRoute("chat");
+    const active = state.active;
+    if (active === null) {
+      routedActiveHexRef.current = null;
+      return;
     }
+    if (active.invitation !== null && active.connectionState !== ConnectionState.Connected) {
+      return;
+    }
+    const activeHex = conversationIdToHex(active.id);
+    if (route === "chat" || routedActiveHexRef.current === activeHex) {
+      routedActiveHexRef.current = activeHex;
+      return;
+    }
+    routedActiveHexRef.current = activeHex;
+    setRoute("chat");
   }, [state.active, route]);
 
   const handleOpen = React.useCallback(
@@ -125,8 +120,9 @@ function Router(): React.ReactElement {
       try {
         id = hexToConversationId(hex);
       } catch (err: unknown) {
-        // Redact internal detail (hex length / offset / decode internals) from
-        // the user-visible error bar. The original is kept for diagnostics.
+        // Redact internal detail (the OrchestratorError message embeds the
+        // expected fragment shape) from the user-visible error bar. The
+        // original is kept for diagnostics.
         console.warn("hexToConversationId failed", err);
         setError("That conversation link could not be read.");
         return;
@@ -135,15 +131,33 @@ function Router(): React.ReactElement {
       // no re-handshake) and the persisted-only case (re-enter via startSession
       // with history seeding). Do NOT call selectConversation first — it throws
       // for non-live ids.
-      void controller.resumeConversation(id).catch((err: unknown) => {
-        // Upstream throws leak internal identifiers (e.g. unknown conversation
-        // id, broker/turn URLs, SDP from transport errors). Surface a generic
-        // message; keep the original for diagnostics only.
-        console.warn("resumeConversation failed", err);
-        setError("Could not resume the conversation.");
-      });
+      void controller
+        .resumeConversation(id)
+        .then(() => {
+          // R13F1: re-selecting a still-LIVE initiator session that is waiting
+          // for its peer keeps that session's pending invitation. The
+          // auto-route effect deliberately does not move such a session to
+          // "chat" (that would strand the link behind Leave), so re-enter the
+          // start screen — its invitation view renders the pending link +
+          // Share button from state.active.
+          const active = controller.getState().active;
+          if (
+            active !== null &&
+            active.invitation !== null &&
+            active.connectionState !== ConnectionState.Connected
+          ) {
+            navigate("start");
+          }
+        })
+        .catch((err: unknown) => {
+          // Upstream throws leak internal identifiers (e.g. unknown conversation
+          // id, broker/turn URLs, SDP from transport errors). Surface a generic
+          // message; keep the original for diagnostics only.
+          console.warn("resumeConversation failed", err);
+          setError("Could not resume the conversation.");
+        });
     },
-    [controller],
+    [controller, navigate],
   );
 
   let screen: React.ReactElement;
@@ -158,12 +172,7 @@ function Router(): React.ReactElement {
       );
       break;
     case "start":
-      screen = (
-        <StartConversationScreen
-          onStarted={() => navigate("chat")}
-          onBack={() => navigate("home")}
-        />
-      );
+      screen = <StartConversationScreen onBack={() => navigate("home")} />;
       break;
     case "join":
       screen = (

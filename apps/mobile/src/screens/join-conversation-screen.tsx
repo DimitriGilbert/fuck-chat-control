@@ -35,7 +35,10 @@ export function JoinConversationScreen({
       await controller.joinConversation(trimmed);
       onJoined();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err));
+      // R13F6: upstream throws can embed broker/TURN URLs, SDP, and
+      // conversation ids — log the real error, show a generic message.
+      console.warn("joinConversation failed", err);
+      setError("Could not join the conversation. Check the invitation link and try again.");
     } finally {
       setBusy(false);
     }
