@@ -92,6 +92,7 @@ function makeSession(overrides: {
     detached: false,
     authFailed: false,
     authMode: overrides.authMode,
+    tornDown: false,
   };
   return { session, setMode: fake.setMode };
 }

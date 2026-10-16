@@ -232,6 +232,128 @@ describe("LockableRepository pending auth-failed (SEC-2)", () => {
     expect((sinkErr as Error).message).toBe("simulated storage failure");
   });
 
+  it("R8F1: a value-equal ConversationId from a DIFFERENT instance hits the pending set (hex-keyed)", async () => {
+    const manager = makeManager(true);
+    const repo = newRepo(manager);
+    // conversationId(10) twice produces two value-equal Uint8Array-backed
+    // ids — distinct references. A Set<ConversationId> keyed on reference
+    // identity would miss the second instance; the hex-keyed map must not.
+    const idA = conversationId(10);
+    const idB = conversationId(10);
+    expect(idA === idB).toBe(false);
+
+    await repo.markAuthFailed(idA);
+    await expect(repo.getAuthFailed(idB)).resolves.toBe(true);
+  });
+
+  it("R8F1: value-equal ids queued while locked dedupe to a single replay on unlock", async () => {
+    const manager = makeManager(true);
+    const inner = new InMemoryConversationRepository(generateAtRestKey());
+    let innerCalls = 0;
+    const spyingInner: typeof inner = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "markAuthFailed") {
+          return async (id: ConversationId): Promise<void> => {
+            innerCalls += 1;
+            await target.markAuthFailed(id);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const repo = new LockableRepository(spyingInner, manager);
+    const idA = conversationId(11);
+    const idB = conversationId(11);
+    await inner.createConversation(idA, 0);
+
+    await repo.markAuthFailed(idA);
+    await repo.markAuthFailed(idB);
+
+    await manager.unlock("any");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+
+    expect(innerCalls).toBe(1);
+    expect(await inner.getAuthFailed(idA)).toBe(true);
+  });
+
+  it("R8F1: an in-flight flush write keeps the id pending — unlocked getAuthFailed still reads true", async () => {
+    const manager = makeManager(true);
+    const inner = new InMemoryConversationRepository(generateAtRestKey());
+    // Gate the inner write so the flush stays in-flight while we read.
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const gatingInner: typeof inner = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "markAuthFailed") {
+          return async (id: ConversationId): Promise<void> => {
+            await writeGate;
+            await target.markAuthFailed(id);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const repo = new LockableRepository(gatingInner, manager);
+    const id = conversationId(12);
+    await inner.createConversation(id, 0);
+
+    await repo.markAuthFailed(id);
+    // Unlock → flush dispatches; the inner write parks on the gate. This is
+    // the R8F1 window: the flag is queued-but-not-yet-landed.
+    await manager.unlock("any");
+    expect(await inner.getAuthFailed(id)).toBe(false);
+    // The wrapper must observe the pending flag on the UNLOCKED path, not
+    // only after AtRestLockedError — the old code reported a stale false here.
+    await expect(repo.getAuthFailed(id)).resolves.toBe(true);
+
+    releaseWrite();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(await inner.getAuthFailed(id)).toBe(true);
+    // Once the write has settled the pending entry is gone and the read
+    // comes from the inner repo — still true.
+    await expect(repo.getAuthFailed(id)).resolves.toBe(true);
+  });
+
+  it("R8F1: a flush write failing with AtRestLockedError stays queued for the next unlock", async () => {
+    const manager = makeManager(true);
+    const inner = new InMemoryConversationRepository(generateAtRestKey());
+    let rejectWithLock = true;
+    const flakyInner: typeof inner = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "markAuthFailed") {
+          return async (id: ConversationId): Promise<void> => {
+            if (rejectWithLock) throw new AtRestLockedError();
+            await target.markAuthFailed(id);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const repo = new LockableRepository(flakyInner, manager);
+    const id = conversationId(13);
+    await inner.createConversation(id, 0);
+
+    await repo.markAuthFailed(id);
+    // Unlock → flush dispatches → the write rejects with AtRestLockedError
+    // (a concurrent re-lock). The entry must REMAIN pending: the read still
+    // reports the flag and the next unlock retries the write.
+    await manager.unlock("any");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(await inner.getAuthFailed(id)).toBe(false);
+    await expect(repo.getAuthFailed(id)).resolves.toBe(true);
+
+    rejectWithLock = false;
+    manager.lock();
+    await manager.unlock("any");
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    expect(await inner.getAuthFailed(id)).toBe(true);
+  });
+
   it("ciphertext-touching methods still throw AtRestLockedError while locked (unchanged behavior)", async () => {
     const manager = makeManager(true);
     const repo = newRepo(manager);

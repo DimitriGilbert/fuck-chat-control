@@ -288,6 +288,10 @@ export function wireBridge(params: {
     // summarizeSession/activeSessionView read the orchestrator's live getter,
     // but the session field is the source of truth for direct construction.
     authMode: AuthMode.SafetyNumberOnly,
+    // R7F2 (Phase 5.1): teardown idempotency latch — armed by the first
+    // teardownSession run, never reset (a torn-down session is evicted from
+    // the controller's map; resume/retry build or reconnect a live one).
+    tornDown: false,
   };
 
   // Populate the holder BEFORE the caller starts the bridge so any synchronous
@@ -347,17 +351,26 @@ export function seedSessionFromHistory(
 export function teardownSession(session: ChatSession, holder: SessionHolder | null): void {
   // R3F3: null the holder BEFORE the idempotency guard and BEFORE releasing
   // resources, so the invariant "after teardownSession returns, holder.session
-  // is null" holds even for an already-Disconnected session.
+  // is null" holds even for an already-torn-down session.
   if (holder !== null) {
     holder.session = null;
   }
-  // R5/F5: idempotency guard. All current callers remove the session from the
-  // controller's map before any re-entrant path, but a second teardown (e.g.
-  // leaveConversation racing leaveAll) must not re-enter orchestrator.leave()
-  // / bridge.close() on an already-torn-down session.
-  if (session.connectionState === ConnectionState.Disconnected) {
+  // R5/F5 + R7F2 (Phase 5.1): idempotency guard on the tornDown LATCH, not
+  // connectionState. The previous Disconnected guard conflated "torn down by
+  // us" with "went Disconnected via the orchestrator" — notifyPeerLeft /
+  // notifySignalingClosed / failHandshake set Disconnected without
+  // teardownSession ever running, so the FIRST real teardown early-returned
+  // here and skipped receivedFiles zeroization, orchestrator.leave(), and
+  // bridge.close(). That leaked the signaling socket (a held broker room
+  // slot), the RTCPeerConnection + adapter listeners + teardown timer, and
+  // left received-file plaintext resident. The latch still guarantees the
+  // second call (leaveConversation racing leaveAll/dispose) is a no-op;
+  // orchestrator.leave() and bridge.close() are themselves idempotent, so
+  // arming it before releasing resources keeps release exactly-once.
+  if (session.tornDown) {
     return;
   }
+  session.tornDown = true;
   // R9/F7: zero each received-file byte buffer BEFORE releasing the WebRTC +
   // signaling resources. Files are transient (PRD: nothing is persisted on
   // disk); teardown is the last chance to clear the plaintext bytes held in

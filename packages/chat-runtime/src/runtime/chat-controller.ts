@@ -21,6 +21,7 @@ import type {
 import type { ReceivedFile } from "../framing";
 import type { PeerTransport } from "../transport/peer-transport";
 import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
+import { parseInvitation } from "../orchestrator/invitation";
 import type { IceServer, PeerConnectionFactory } from "../transport/types";
 
 import type { AtRestKeyManager } from "./at-rest-key-manager";
@@ -345,6 +346,13 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   // R5/F4: in-flight resumeConversation attempts keyed by hex id, so a
   // concurrent resume of the same conversation dedupes onto one startSession.
   const resuming = new Map<string, Promise<void>>();
+  // R7F3 (Phase 5.2): in-flight joinConversation attempts keyed by the hex
+  // conversation id extracted from the fragment up front (the orchestrator
+  // resolves the same id inside join(), but only after an await — too late
+  // to dedupe a second caller). joinConversation and resumeConversation
+  // cross-check each other's map so a join and a resume for the same id can
+  // never both reach startSession.
+  const joining = new Map<string, Promise<void>>();
   // R3F1 (Phase 3): per-conversation lifecycle epochs, bumped by
   // leaveConversation/leaveAll. An in-flight startSession snapshots the epochs
   // at entry (the resume path captures its target's epoch in performResume
@@ -397,8 +405,22 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     // subscribers of a torn-down controller.
     if (disposed) return;
     const state = buildState(error);
-    for (const listener of listeners) {
-      listener(state);
+    // R7F10 (Phase 5.2): per-listener snapshot-and-swallow, matching the
+    // at-rest-key-manager notify convention. An unguarded loop lets a
+    // throwing subscriber starve the remaining listeners AND propagate into
+    // whatever called emit — orchestrator handler chains (where the throw is
+    // misreported as DurableStoreWriteFailed) or drainSendQueue's catch (an
+    // unhandled rejection). The snapshot also keeps iteration stable if a
+    // listener (un)subscribes during dispatch.
+    const snapshot = Array.from(listeners);
+    for (const listener of snapshot) {
+      try {
+        listener(state);
+      } catch (err: unknown) {
+        // The listener owns its own error handling; a controller subscriber
+        // throwing must not break the emit path or block other listeners.
+        console.warn("chat-controller: a state subscriber threw during emit", err);
+      }
     }
   }
 
@@ -681,6 +703,29 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       assertNotDisposed(disposed);
       return { session: null, invitation };
     }
+    const prior = sessions.get(conversationKey);
+    if (prior !== undefined) {
+      // R7F3 (Phase 5.2): a session for this conversation is already live —
+      // the caller raced past the join/resume single-flight guards (or two
+      // fresh starts collided on an id). Letting registerSession run here
+      // would silently overwrite sessions/holders and orphan the live
+      // session's bridge, which then holds a broker room slot forever
+      // (capacity is 2 — the orphan squats a seat and locks the peer out).
+      // Release the just-built orchestrator and hand back the live session.
+      try {
+        orchestrator.leave();
+      } catch {
+        // best-effort
+      }
+      // Select the live session like the entry-point "already live" branches
+      // do — the caller asked for THIS conversation, and returning it
+      // unselected left the UI pointing at whatever was active before (plus
+      // a stale read marker and a stuck detached gate after a clear).
+      activeConversationId = prior.id;
+      syncActiveReadMarker(prior);
+      prior.detached = false;
+      return { session: prior, invitation };
+    }
     holders.set(conversationKey, holder);
     const presence = bridgePresenceCallbacks(orchestrator);
     const session = wireBridge({
@@ -704,7 +749,20 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     // unaffected; it is invoked between registerSession and bridge.start().
     registerSession(session);
     if (seed !== undefined) {
-      await seed(session);
+      try {
+        await seed(session);
+      } catch (err: unknown) {
+        // R7F5 (Phase 5.2): a throwing seed (e.g. AtRestLockedError from
+        // getHistory racing lock()) must not leave a phantom registered
+        // session — retry()/resumeConversation cannot recover a session whose
+        // bridge never started. Tear down + unregister everything
+        // registerSession installed (idempotent; a concurrent leave/dispose
+        // may have already run parts of it), surface the eviction, and
+        // rethrow so the caller sees the seed's failure.
+        abortRegisteredStart(session, holder, conversationKey);
+        emit(err instanceof Error ? err.message : String(err));
+        throw err;
+      }
       if (startAborted(entryEpochs, conversationKey)) {
         // R3F1: a leave/dispose landed while the seed read was in flight. The
         // session registered itself, so mirror leaveConversation's eviction:
@@ -918,20 +976,45 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   });
 
   /**
+   * The single-flight body of joinConversation (R7F3 / Phase 5.2): only ever
+   * runs once per conversation at a time; concurrent joiners await the stored
+   * promise. `lifecycle` is the caller-captured epoch snapshot (see
+   * performResume) — captured in joinConversation BEFORE any await so a
+   * leave landing while we waited on an in-flight resume still aborts the
+   * completing start.
+   */
+  async function performJoin(fragment: string, lifecycle: ConversationLifecycle): Promise<void> {
+    const { session } = await startSession(
+      Role.Responder,
+      fragment,
+      undefined,
+      undefined,
+      lifecycle,
+    );
+    if (session === null) {
+      // R3F1: leave/dispose won the race; startSession already tore the
+      // half-built orchestrator/bridge down and registered nothing. Resolve
+      // quietly — the leave was the user's latest intent.
+      return;
+    }
+    await refreshConversations();
+    emit(null);
+  }
+
+  /**
    * The single-flight body of resumeConversation (R5/F4): only ever runs once
    * per conversation at a time; concurrent callers await the stored promise.
+   *
+   * R7F3 (Phase 5.2): `lifecycle` is now captured by resumeConversation at
+   * ENTRY — before its join-dedup await — rather than here. A
+   * leaveConversation landing while we awaited an in-flight join bumps the
+   * epoch past the entry snapshot, so the completing resume still aborts.
    */
-  async function performResume(conversationId: ConversationId, resumeKey: string): Promise<void> {
-    // R3F1 (Phase 3): capture the target's lifecycle epoch BEFORE the first
-    // await. A leaveConversation(id) landing anywhere between here and
-    // startSession's own re-checks (the getConversation read,
-    // orchestrator.join, the seed hook) bumps the epoch past this snapshot,
-    // so the completing resume tears its half-built session down instead of
-    // installing a conversation the user already left.
-    const lifecycle: ConversationLifecycle = {
-      key: resumeKey,
-      epoch: conversationEpochs.get(resumeKey) ?? 0,
-    };
+  async function performResume(
+    conversationId: ConversationId,
+    lifecycle: ConversationLifecycle,
+  ): Promise<void> {
+    const resumeKey = lifecycle.key;
     const record = await repository.getConversation(conversationId);
     if (record === null) {
       throw new Error(`cannot resume unknown conversation ${conversationId}`);
@@ -1013,14 +1096,102 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
 
     async joinConversation(fragment: string): Promise<void> {
       assertNotDisposed(disposed);
-      await startSession(Role.Responder, fragment);
-      await refreshConversations();
-      emit(null);
+      // R7F3 (Phase 5.2): resolve the conversation id up front so the dedup
+      // checks below key on the SAME id the orchestrator will bind inside
+      // join(). conversationKeyFromFragment mirrors the orchestrator's own
+      // normalization (last `#` split + parseInvitation, which lowercases and
+      // strips the `~code` tail), so a malformed fragment throws the same
+      // MalformedInvitation error join() would have surfaced.
+      const joinKey = conversationKeyFromFragment(fragment);
+      const existing = sessions.get(joinKey);
+      if (existing !== undefined) {
+        // Already live; just select it (same contract as resumeConversation's
+        // live branch — R3F2: store the SESSION's own id reference).
+        activeConversationId = existing.id;
+        syncActiveReadMarker(existing);
+        // Re-arm inbound handlers: re-joining a cleared conversation
+        // re-opens it for live frames.
+        existing.detached = false;
+        emit(null);
+        return;
+      }
+      // R3F1 (Phase 3): capture the lifecycle epoch BEFORE any await. A leave
+      // landing while we wait on an in-flight resume below bumps the epoch
+      // past this snapshot, so the completing startSession still aborts.
+      const lifecycle: ConversationLifecycle = {
+        key: joinKey,
+        epoch: conversationEpochs.get(joinKey) ?? 0,
+      };
+      // R7F3: a resume for the same conversation may be in flight. Await it
+      // and select the session it installed instead of double-starting — two
+      // startSessions for one id used to orphan the first session's bridge,
+      // which keeps its broker room slot forever (capacity is 2). A
+      // failed/aborted resume installs nothing, so fall through to our own
+      // join in that case.
+      const inFlightResume = resuming.get(joinKey);
+      if (inFlightResume !== undefined) {
+        try {
+          await inFlightResume;
+        } catch {
+          // The resume failed; the join below is the caller's next-best intent.
+        }
+        const landed = sessions.get(joinKey);
+        if (landed !== undefined) {
+          activeConversationId = landed.id;
+          syncActiveReadMarker(landed);
+          landed.detached = false;
+          emit(null);
+          return;
+        }
+      }
+      // R7F3: single-flight guard mirroring `resuming`. Two concurrent
+      // joinConversation(sameFragment) calls (e.g. a double-tap on an invite
+      // link) both used to pass the sessions check above before either
+      // reached registerSession inside startSession.
+      const inFlightJoin = joining.get(joinKey);
+      if (inFlightJoin !== undefined) {
+        try {
+          await inFlightJoin;
+        } catch {
+          // The prior join failed; our own attempt below is the caller's
+          // next-best intent.
+        }
+        // A same-map dedupe can silently resolve an ABORTED attempt: a leave
+        // landing while it was in flight bumps the epoch past its snapshot,
+        // so it resolves quietly having installed nothing. Re-check that it
+        // actually installed a session — select it if so, otherwise fall
+        // through to a fresh start under OUR (post-leave) lifecycle epoch,
+        // mirroring the cross-map await → re-check → fall-through above.
+        const landed = sessions.get(joinKey);
+        if (landed !== undefined) {
+          activeConversationId = landed.id;
+          syncActiveReadMarker(landed);
+          landed.detached = false;
+          emit(null);
+          return;
+        }
+      }
+      const attempt = performJoin(fragment, lifecycle).finally(() => {
+        joining.delete(joinKey);
+      });
+      joining.set(joinKey, attempt);
+      return attempt;
     },
 
     async resumeConversation(conversationId: ConversationId): Promise<void> {
       assertNotDisposed(disposed);
       const resumeKey = keyOf(conversationId);
+      // R3F1 (Phase 3): capture the target's lifecycle epoch BEFORE the first
+      // await — including the join-dedup await R7F3 added below. A
+      // leaveConversation(id) landing anywhere between here and
+      // startSession's own re-checks (the getConversation read,
+      // orchestrator.join, the seed hook) bumps the epoch past this snapshot,
+      // so the completing resume tears its half-built session down instead of
+      // installing a conversation the user already left.
+      const lifecycle: ConversationLifecycle = {
+        key: resumeKey,
+        epoch: conversationEpochs.get(resumeKey) ?? 0,
+      };
       const existing = sessions.get(resumeKey);
       if (existing !== undefined) {
         // Already live; just select it.
@@ -1036,6 +1207,54 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         emit(null);
         return;
       }
+      // R7F3 (Phase 5.2): a join for the same conversation may be in flight.
+      // Await it and select the session it installed instead of
+      // double-starting — two startSessions for one id used to orphan the
+      // first session's bridge, which keeps its broker room slot forever
+      // (capacity is 2). A failed/aborted join installs nothing, so fall
+      // through to our own resume in that case.
+      const inFlightJoin = joining.get(resumeKey);
+      if (inFlightJoin !== undefined) {
+        try {
+          await inFlightJoin;
+        } catch {
+          // The join failed; the resume below is the caller's next-best intent.
+        }
+        const landed = sessions.get(resumeKey);
+        if (landed !== undefined) {
+          // A join-installed session never ran a seed hook (performJoin passes
+          // none), so its snapshot is empty even when the repository holds
+          // history for this conversation. Seed it the same way performResume
+          // seeds a fresh session — record + history — before adopting it.
+          let record: ConversationRecord | null;
+          let history: ConversationMessage[];
+          try {
+            record = await repository.getConversation(landed.id);
+            history = await landed.orchestrator.getHistory();
+          } catch (err: unknown) {
+            // Same surfacing contract as a throwing startSession seed hook
+            // (R7F5): the resume rejects loudly rather than selecting an
+            // unseeded session. The live session itself stays — the join owns
+            // it; we only failed to decorate it.
+            emit(err instanceof Error ? err.message : String(err));
+            throw err;
+          }
+          // Guard like the seed hook inside startSession: the reads above can
+          // straddle a leave/dispose/clear, so re-check the session is still
+          // registered and not detached before overwriting its snapshot. If it
+          // was evicted, fall through to our own resume — it either aborts on
+          // the epoch mismatch or adopts whatever landed in the meantime.
+          if (sessions.get(resumeKey) === landed && !landed.detached) {
+            seedSessionFromHistory(landed, record, history);
+            recomputeUnread(landed);
+            activeConversationId = landed.id;
+            syncActiveReadMarker(landed);
+            landed.detached = false;
+            emit(null);
+            return;
+          }
+        }
+      }
       // R5/F4: single-flight guard. Two concurrent resumeConversation(sameId)
       // calls (e.g. a double-tap) both used to pass the synchronous
       // sessions.has check above before either reached registerSession inside
@@ -1045,9 +1264,28 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // one.
       const inFlight = resuming.get(resumeKey);
       if (inFlight !== undefined) {
-        return inFlight;
+        try {
+          await inFlight;
+        } catch {
+          // The prior resume failed; our own attempt below is the caller's
+          // next-best intent.
+        }
+        // A same-map dedupe can silently resolve an ABORTED attempt: a leave
+        // landing while it was in flight bumps the epoch past its snapshot,
+        // so it resolves quietly having installed nothing. Re-check that it
+        // actually installed a session — select it if so, otherwise fall
+        // through to a fresh resume under OUR (post-leave) lifecycle epoch,
+        // mirroring the cross-map await → re-check → fall-through above.
+        const landed = sessions.get(resumeKey);
+        if (landed !== undefined) {
+          activeConversationId = landed.id;
+          syncActiveReadMarker(landed);
+          landed.detached = false;
+          emit(null);
+          return;
+        }
       }
-      const attempt = performResume(conversationId, resumeKey).finally(() => {
+      const attempt = performResume(conversationId, lifecycle).finally(() => {
         resuming.delete(resumeKey);
       });
       resuming.set(resumeKey, attempt);
@@ -1149,6 +1387,13 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     async sendFile(id: ConversationId, file: ChatFileInput): Promise<number> {
       assertNotDisposed(disposed);
       const session = findSessionOrThrow(id);
+      // R7F4 (Phase 5.2): re-arm inbound handlers on a file send, mirroring
+      // sendText. Without this, a clearConversation-detached session drops
+      // every transfer event at the chat-session gate (onTransferStart/
+      // Progress/Complete/fileReceived all no-op on `detached`), so the
+      // snapshot never shows the send and countInFlightTransfers /
+      // drainSendQueue under-count the queue.
+      session.detached = false;
       if (session.connectionState !== ConnectionState.Connected) {
         throw new Error("cannot sendFile before the session is connected");
       }
@@ -1259,7 +1504,16 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       const session = sessions.get(keyOf(target));
       if (session === undefined) return;
       session.orchestrator.markSafetyNumberVerified();
-      session.safetyNumberVerified = true;
+      // R13F5 (Phase 5.2): mirror the mark ONLY when the orchestrator
+      // actually recorded it. markSafetyNumberVerified no-ops while its
+      // safetyNumberValue is null (no handshake has computed one yet), so the
+      // previous unconditional `true` reported verified for a session with
+      // nothing to verify. isSafetyNumberVerified() is the orchestrator's
+      // authoritative post-call state; when it did mark, its onSafetyNumber
+      // handler also flips this flag — the explicit sync here keeps the
+      // snapshot correct even if that handler is dropped (detached/torn
+      // down).
+      session.safetyNumberVerified = session.orchestrator.isSafetyNumberVerified();
       emit(null);
     },
 
@@ -1703,6 +1957,22 @@ function keyOf(id: ConversationId): string {
     hex += id[i].toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+/**
+ * R7F3 (Phase 5.2): extract the session-map key for an invitation fragment
+ * WITHOUT constructing an orchestrator. Mirrors the normalization inside
+ * `ConversationOrchestrator.join()`: everything before the last `#` is the
+ * initiator's URL prefix, and parseInvitation strips the optional leading
+ * `#`, lowercases the hex (LW-8: uppercase pastes still parse), and extracts
+ * the `~<code>` PAKE tail — so the key deduped on is exactly the
+ * conversation id join() will bind. Malformed fragments throw the same
+ * OrchestratorError(MalformedInvitation) join() would surface.
+ */
+function conversationKeyFromFragment(fragment: string): string {
+  const hashIndex = fragment.lastIndexOf("#");
+  const bare = hashIndex >= 0 ? fragment.slice(hashIndex + 1) : fragment;
+  return keyOf(parseInvitation(bare).conversationId);
 }
 
 /** UTF-8 byte length of a string (mirrors how the manifest encoder measures). */

@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import { unwrapKey, wrapKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { WrappedKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   AT_REST_STORAGE_KEY,
   createAtRestKeyManager,
 } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
+import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import { base64ToBytes } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
+import { LockableRepository } from "@fuck-eu-chat-control/chat-runtime/store/lockable-repo";
 
 import { bytesEqual, fakeStorage } from "./_helpers";
 
@@ -117,5 +121,87 @@ describe("createAtRestKeyManager", () => {
     const wrapped = await wrapKey("hunter2", autoKey);
     const restored = await unwrapKey("hunter2", wrapped);
     expect(bytesEqual(restored, autoKey)).toBe(true);
+  });
+
+  it("R7F6: a lock() landing mid-unlock() supersedes it — stays locked, fires no onUnlock", async () => {
+    const storage = fakeStorage();
+    const manager = createAtRestKeyManager(storage);
+    await manager.ensureLoaded();
+    const autoKey = manager.get();
+    await manager.setPassphrase("correct horse battery staple");
+    manager.lock();
+
+    let unlockNotifications = 0;
+    manager.onUnlock(() => {
+      unlockNotifications += 1;
+    });
+
+    // unlock() parks on the Argon2 KDF await; the synchronous lock() lands
+    // before the continuation resumes (the real-world race: an auto-lock
+    // firing while the user's passphrase is being verified).
+    const pending = manager.unlock("correct horse battery staple");
+    manager.lock();
+    const ok = await pending;
+
+    expect(ok).toBe(false);
+    expect(manager.isLocked()).toBe(true);
+    expect(() => manager.get()).toThrowError(/locked/i);
+    expect(unlockNotifications).toBe(0);
+
+    // The superseded unlock left the manager coherent: a fresh unlock with
+    // the right passphrase still restores the key and notifies once.
+    const ok2 = await manager.unlock("correct horse battery staple");
+    expect(ok2).toBe(true);
+    expect(bytesEqual(manager.get(), autoKey)).toBe(true);
+    expect(unlockNotifications).toBe(1);
+  });
+
+  it("R7F6: a lock() landing mid-setPassphrase() keeps the manager locked but persists the wrap", async () => {
+    const storage = fakeStorage();
+    const manager = createAtRestKeyManager(storage);
+    await manager.ensureLoaded();
+    const autoKey = manager.get();
+    // Snapshot the original bytes BEFORE the lock: the CR-7 onLock listener
+    // zeroizes this exact buffer in place, so `autoKey` reads zeros
+    // afterwards and cannot serve as the comparison reference.
+    const originalKeyBytes = autoKey.slice();
+    // Wire the real CR-7 pair: LockableRepository's constructor registers the
+    // onLock listener that calls repo.zeroizeAtRestKey() → atRestKey.fill(0)
+    // on the SAME Uint8Array instance setPassphrase passes into wrapKey. This
+    // is what makes the wrap-of-zeros regression actually reachable: without
+    // wrapKey's entry-time snapshot, the KDF await resumes over the zeroed
+    // buffer and persists a wrap of 32 zero bytes.
+    const inner = new InMemoryConversationRepository(autoKey);
+    void new LockableRepository(inner, manager);
+
+    // setPassphrase() parks on the wrapKey KDF await; lock() lands
+    // mid-await, zeroizing the shared key buffer in place.
+    const pending = manager.setPassphrase("hunter2");
+    manager.lock();
+    await pending;
+
+    // The lock wins: the manager stays locked, get() keeps throwing, and the
+    // inner repo's key was zeroized (proves the fill(0) path ran).
+    expect(manager.isLocked()).toBe(true);
+    expect(() => manager.get()).toThrowError(/locked/i);
+    expect(inner._atRestKeyIsZeroizedForTest()).toBe(true);
+
+    // The wrapped form WAS persisted (the caller's protection intent is not
+    // silently dropped) — and it must seal the ORIGINAL key bytes, not the
+    // zeros the lock listener wrote mid-KDF.
+    const stored = storage.store.get(AT_REST_STORAGE_KEY);
+    expect(typeof stored).toBe("string");
+    const parsed = JSON.parse(stored as string) as { mode: string; wrappedBase64: string };
+    expect(parsed.mode).toBe("passphrase");
+    const unwrappedRecord = await unwrapKey(
+      "hunter2",
+      base64ToBytes(parsed.wrappedBase64) as unknown as WrappedKey,
+    );
+    expect(bytesEqual(unwrappedRecord, originalKeyBytes)).toBe(true);
+    expect(bytesEqual(unwrappedRecord, new Uint8Array(AES_KEY_BYTES))).toBe(false);
+
+    const ok = await manager.unlock("hunter2");
+    expect(ok).toBe(true);
+    expect(bytesEqual(manager.get(), originalKeyBytes)).toBe(true);
   });
 });

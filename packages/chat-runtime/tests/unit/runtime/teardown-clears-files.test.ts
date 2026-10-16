@@ -56,6 +56,7 @@ function makeSession(files: ReceivedFile[]): ChatSession {
     detached: false,
     authFailed: false,
     authMode: AuthMode.SafetyNumberOnly,
+    tornDown: false,
   };
 }
 
@@ -142,6 +143,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
       detached: false,
       authFailed: false,
       authMode: AuthMode.SafetyNumberOnly,
+      tornDown: false,
     };
 
     teardownSession(session, null);
@@ -179,6 +181,7 @@ describe("teardownSession clears receivedFiles + zeroes byte buffers (R9/F7)", (
       detached: false,
       authFailed: false,
       authMode: AuthMode.SafetyNumberOnly,
+      tornDown: false,
     };
 
     // teardownSession swallows orchestrator/bridge errors; the buffer-zeroing
@@ -210,14 +213,18 @@ function fakeStorage() {
   };
 }
 
-async function makeController(): Promise<ChatController> {
+/**
+ * Build a controller whose bridge dials the supplied mock signaling socket.
+ * Returning the socket lets a test drive broker-side frames (join/leave
+ * relays, socket close) into the session — the R7F2 path.
+ */
+async function makeControllerWithSocket(socket: MockSignalingSocket): Promise<ChatController> {
   const identityStorage = fakeStorage();
   const atRestStorage = fakeStorage();
   const identityManager = createIdentityManager(identityStorage);
   await identityManager.ensureLoaded();
   const atRestKeyManager = createAtRestKeyManager(atRestStorage);
   await atRestKeyManager.ensureLoaded();
-  const socket = new MockSignalingSocket();
   return createChatController({
     brokerUrl: BROKER_URL,
     baseUrl: BASE_URL,
@@ -228,6 +235,10 @@ async function makeController(): Promise<ChatController> {
     peerConnectionFactory: stubPeerConnectionFactory(),
     iceServers: [],
   });
+}
+
+async function makeController(): Promise<ChatController> {
+  return makeControllerWithSocket(new MockSignalingSocket());
 }
 
 function tick(ms = 50): Promise<void> {
@@ -659,6 +670,86 @@ describe("CR-9: clearAll reaches parity with clearConversation", () => {
         tick(2000).then((): boolean => false),
       ]);
       expect(parkedSettled).toBe(true);
+    } finally {
+      a.dispose();
+      b.dispose();
+    }
+  });
+});
+
+describe("R7F2: leaveConversation tears down a session the orchestrator already dropped", () => {
+  it("still zeroizes receivedFiles and closes the bridge after notifyPeerLeft drove the session to Disconnected", async (): Promise<void> => {
+    // The bug: teardownSession's idempotency guard keyed on
+    // connectionState === Disconnected. A peer-left relay routes through
+    // orchestrator.notifyPeerLeft, which sets Disconnected WITHOUT
+    // teardownSession running — so the first real teardown early-returned
+    // and skipped the file zeroization, orchestrator.leave(), and
+    // bridge.close() (which alone releases the signaling socket +
+    // RTCPeerConnection). This test drives exactly that sequence.
+    const socketA = new MockSignalingSocket();
+    const a = await makeControllerWithSocket(socketA);
+    const b = await makeController();
+    try {
+      const { idA, idB } = await linkControllers(a, b);
+
+      // Seed a received file on A so the session holds plaintext bytes that
+      // only teardownSession's zeroization pass can reach.
+      await b.sendFile(idB, makeTextFile("payload", "seed.txt"));
+      let receivedTransferId: number | null = null;
+      const recvDeadline = Date.now() + 3000;
+      while (Date.now() < recvDeadline) {
+        const transfers = a.getState().active?.transfers ?? [];
+        const done = transfers.find((t) => t.direction === "received" && t.status === "complete");
+        if (done !== undefined) {
+          receivedTransferId = done.id;
+          break;
+        }
+        await tick(5);
+      }
+      expect(receivedTransferId).not.toBeNull();
+      const receivedFile = a.getReceivedFile(idA, receivedTransferId as number);
+      expect(receivedFile).not.toBeNull();
+      const receivedBuf = receivedFile!.data;
+      expect(Array.from(receivedBuf).some((x) => x !== 0)).toBe(true);
+
+      // Drive the session to Disconnected via the ORCHESTRATOR, not the
+      // session teardown: a broker `leave` relay reaches
+      // orchestrator.notifyPeerLeft through the bridge's onPeerLeave
+      // callback. The signaling client only forwards a leave for a peer it
+      // believes present, so arm peerPresent with a join relay first. The
+      // room id only needs to parse — the mock socket bypasses the broker's
+      // room validation.
+      const roomId = "0".repeat(32);
+      socketA.serverOpen();
+      socketA.deliver(JSON.stringify({ t: "join", roomId }));
+      socketA.deliver(JSON.stringify({ t: "leave", roomId }));
+
+      // The state mutation is synchronous through onStateChange. Before the
+      // fix this Disconnected made teardownSession's guard early-return.
+      expect(a.getState().active?.connectionState).toBe(ConnectionState.Disconnected);
+      // The peer-left path does NOT close the bridge: the signaling socket
+      // is still open, proving the leak this test guards against.
+      expect(socketA.closed).toBe(false);
+
+      // Act: the user's leave must STILL release the session's resources —
+      // the tornDown latch, not the Disconnected state, decides whether
+      // teardown already ran.
+      a.leaveConversation(idA);
+
+      // bridge.close() ran: it is the only path that closes the signaling
+      // socket (releasing the broker room slot).
+      expect(socketA.closed).toBe(true);
+      // The retained plaintext buffer was zeroized in place.
+      let allZero = true;
+      for (let i = 0; i < receivedBuf.length; i++) {
+        if (receivedBuf[i] !== 0) {
+          allZero = false;
+          break;
+        }
+      }
+      expect(allZero).toBe(true);
+      // The session was evicted as before.
+      expect(a.getState().active).toBeNull();
     } finally {
       a.dispose();
       b.dispose();

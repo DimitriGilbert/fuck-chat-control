@@ -50,7 +50,11 @@ export interface AtRestKeyManager {
    * additionally requires the passphrase to repopulate the key on unlock.
    */
   lock(): void;
-  /** Unlock a passphrase-wrapped key; returns false on wrong passphrase. */
+  /**
+   * Unlock a passphrase-wrapped key; returns false on wrong passphrase.
+   * R7F6: also returns false when a {@link lock} landed while the KDF was
+   * in flight — the lock supersedes the unlock and the manager stays locked.
+   */
   unlock(passphrase: string): Promise<boolean>;
   /** Wrap the auto key under a passphrase and persist the wrapped form. */
   setPassphrase(passphrase: string): Promise<void>;
@@ -116,6 +120,16 @@ type StoredAtRest = StoredAutoKey | StoredWrappedKey;
 export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager {
   let autoKey: AtRestKey | null = null;
   let locked = false;
+  /**
+   * R7F6: mutation epoch, bumped by {@link lock}. The async mutators
+   * ({@link unlock}, {@link setPassphrase}) park on KDF awaits; a `lock()`
+   * landing mid-await must supersede the parked continuation, so each
+   * captures the epoch before its first await and re-checks afterwards. A
+   * mismatch means the resumed coroutine bails instead of re-applying the
+   * unlocked state (reassigning `autoKey` / clearing `locked` / firing
+   * `notifyUnlocked`), which would silently reverse the lock.
+   */
+  let mutationEpoch = 0;
   const unlockListeners = new Set<() => void>();
   const lockListeners = new Set<() => void>();
 
@@ -189,6 +203,11 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
       // access lives in the LockableRepository wrapper, but nulling autoKey
       // here makes the manager's own lock() honest rather than cosmetic.
       autoKey = null;
+      // R7F6: bump the epoch so any unlock()/setPassphrase() coroutine
+      // parked on a KDF await bails when it resumes instead of reversing
+      // this lock. Bumped unconditionally: even a no-op re-lock must
+      // supersede a continuation that captured the epoch before parking.
+      mutationEpoch += 1;
       const wasLocked = locked;
       locked = true;
       // CR-7: fire onLock listeners only on the unlocked → locked transition,
@@ -201,6 +220,9 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
     },
 
     async unlock(passphrase: string): Promise<boolean> {
+      // R7F6: capture the mutation epoch before the KDF await below; a
+      // lock() landing mid-await supersedes this unlock.
+      const epoch = mutationEpoch;
       const raw = storage.getItem(AT_REST_STORAGE_KEY);
       if (raw === null) {
         // Nothing to unlock.
@@ -216,17 +238,30 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
         return true;
       }
       const wrapped = base64ToBytes(parsed.wrappedBase64) as unknown as WrappedKey;
+      let unwrapped: AtRestKey;
       try {
-        autoKey = await unwrapKey(passphrase, wrapped);
-        locked = false;
-        notifyUnlocked();
-        return true;
+        // R7F6: unwrap into a LOCAL. The old code assigned `autoKey` directly
+        // inside the try, so a lock() landing mid-await left the resumed
+        // continuation free to repopulate the key the lock just dropped.
+        unwrapped = await unwrapKey(passphrase, wrapped);
       } catch (err) {
         if (err instanceof CryptoError && err.code === CryptoErrorCode.WrongPassphrase) {
           return false;
         }
         throw err;
       }
+      if (epoch !== mutationEpoch) {
+        // A lock() landed while the KDF awaited and supersedes this unlock.
+        // Bail WITHOUT repopulating the in-memory key (the key bytes must
+        // not return to the heap while locked — CR-7 posture), without
+        // clearing `locked`, and without firing onUnlock. Returns false:
+        // the manager was not left unlocked.
+        return false;
+      }
+      autoKey = unwrapped;
+      locked = false;
+      notifyUnlocked();
+      return true;
     },
 
     async setPassphrase(passphrase: string): Promise<void> {
@@ -235,12 +270,30 @@ export function createAtRestKeyManager(storage: AtRestStorage): AtRestKeyManager
           "AtRestKeyManager.setPassphrase() called before ensureLoaded(); call ensureLoaded() first",
         );
       }
+      // R7F6: capture the epoch before the KDF await. wrapKey snapshots the
+      // plaintext bytes synchronously on entry (see crypto/at-rest.ts), so
+      // the wrap still seals the REAL key bytes even when a lock() landing
+      // mid-await nulls `autoKey` here AND a CR-7 onLock listener zeroizes
+      // the shared buffer in place.
+      const epoch = mutationEpoch;
       const wrapped = await wrapKey(passphrase, autoKey);
       const stored: StoredWrappedKey = {
         mode: MODE_PASSPHRASE,
         wrappedBase64: bytesToBase64(wrapped),
       };
+      // Persist the wrapped form even when superseded: the caller asked for
+      // the at-rest key to be passphrase-protected, and writing it does not
+      // weaken the lock — the manager stays locked and this passphrase is
+      // now required to unlock. Dropping the write would silently leave the
+      // raw auto key on disk while the caller believes it is wrapped.
       storage.setItem(AT_REST_STORAGE_KEY, JSON.stringify(stored));
+      if (epoch !== mutationEpoch) {
+        // A lock() landed mid-await: bail WITHOUT clearing `locked`. The old
+        // code resumed into `locked = false` while `autoKey` was nulled,
+        // leaving isLocked() false and get() throwing — a corrupt
+        // unlocked-without-key state.
+        return;
+      }
       // The key is now backed by a wrapped form; the in-memory key remains
       // available (we just wrapped it, we did not forget it).
       locked = false;

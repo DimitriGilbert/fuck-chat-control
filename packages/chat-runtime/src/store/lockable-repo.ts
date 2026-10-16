@@ -1,6 +1,7 @@
 import type { ConversationId, PublicKey } from "../protocol/types";
 
 import { getAuthFailedDurable } from "./auth-failed-store";
+import { bytesToHex } from "./encoding";
 import { MessageDirection } from "./types";
 import type {
   AppendMessageOptions,
@@ -62,8 +63,23 @@ export class LockableRepository implements ConversationRepository {
    * locked. Flushed by {@link flushPendingAuthFailed} on the locked→unlocked
    * transition. Plain metadata only — the durable localStorage store is the
    * cross-session source of truth.
+   *
+   * R8F1: keyed by the lowercase HEX STRING of the id, not the branded
+   * Uint8Array reference. `ConversationId` is `Brand<Uint8Array>`; a Set of
+   * references uses SameValueZero identity, so a fresh value-equal instance
+   * (re-parsed via parseInvitation/hexToConversationId) would miss `.has()`
+   * and double-queued ids would replay twice. The hex key — the same
+   * convention as `auth-failed-store.ts`'s `keyOf`, the inner repo's
+   * `idKey`, and the controller's session maps — gives value-equality dedup.
+   * The stored value is one id instance to replay into the inner repo.
+   *
+   * Entries are held until their flush write SETTLES (success or non-lock
+   * failure), not dropped when the flush dispatches: a fire-and-forget write
+   * can still be in-flight when an unlocked {@link getAuthFailed} runs, and
+   * consulting the pending map on that path closes the read window where the
+   * flag was queued-but-not-yet-landed.
    */
-  private readonly pendingAuthFailedWrites = new Set<ConversationId>();
+  private readonly pendingAuthFailedWrites = new Map<string, ConversationId>();
   /**
    * Optional sink for unexpected (non-lock) errors encountered while flushing
    * pending auth-failed writes. Wired by the controller/orchestrator to
@@ -194,7 +210,7 @@ export class LockableRepository implements ConversationRepository {
       // the durable store from auth-failed-store.ts already carries the
       // cross-session truth, and {@link flushPendingAuthFailed} will land the
       // in-repo flag on unlock.
-      this.pendingAuthFailedWrites.add(id);
+      this.pendingAuthFailedWrites.set(bytesToHex(id), id);
       return;
     }
     try {
@@ -203,7 +219,7 @@ export class LockableRepository implements ConversationRepository {
       if (err instanceof AtRestLockedError) {
         // The manager re-locked between our isLocked() check and the inner
         // write (concurrent lock()). Queue and let the next unlock flush it.
-        this.pendingAuthFailedWrites.add(id);
+        this.pendingAuthFailedWrites.set(bytesToHex(id), id);
         return;
       }
       throw err;
@@ -211,28 +227,27 @@ export class LockableRepository implements ConversationRepository {
   }
 
   async getAuthFailed(id: ConversationId): Promise<boolean> {
+    const key = bytesToHex(id);
     if (this.manager.isLocked()) {
       // SEC-2: hydration must not throw while locked. Fall back to the durable
       // store (the cross-session truth) plus any write queued in this session.
-      return this.pendingAuthFailedWrites.has(id) || (await getAuthFailedDurable(id));
+      return this.pendingAuthFailedWrites.has(key) || (await getAuthFailedDurable(id));
     }
+    // R8F1: consult the pending map on the UNLOCKED path too. Flush writes
+    // are fire-and-forget and entries stay pending until they settle, so the
+    // flag may be queued-but-not-yet-landed in the inner repo when this read
+    // runs — without this check the read would report a stale false.
+    if (this.pendingAuthFailedWrites.has(key)) return true;
     try {
       return await this.inner.getAuthFailed(id);
     } catch (err) {
       if (err instanceof AtRestLockedError) {
-        return this.pendingAuthFailedWrites.has(id) || (await getAuthFailedDurable(id));
+        return this.pendingAuthFailedWrites.has(key) || (await getAuthFailedDurable(id));
       }
       throw err;
     }
   }
 
-  /**
-   * Replay queued `markAuthFailed` ids into the inner repo once the manager has
-   * unlocked. Called automatically from the manager's `onUnlock` callback.
-   * Best-effort: non-{@link AtRestLockedError} failures are forwarded to the
-   * {@link flushErrorSink} (when wired); a concurrent re-lock re-queues an id
-   * for the next unlock instead of dropping it.
-   */
   /**
    * CR-7: zeroize the inner repo's at-rest key reference on the unlocked→
    * locked transition. Feature-checks for the optional
@@ -266,27 +281,53 @@ export class LockableRepository implements ConversationRepository {
     }
   }
 
+  /**
+   * Replay queued `markAuthFailed` ids into the inner repo once the manager has
+   * unlocked. Called automatically from the manager's `onUnlock` callback.
+   * Best-effort: non-{@link AtRestLockedError} failures are forwarded to the
+   * {@link flushErrorSink} (when wired); a concurrent re-lock leaves the id
+   * queued for the next unlock instead of dropping it.
+   *
+   * R8F1: entries are removed ONLY when their write settles, not when the
+   * flush dispatches — the writes are fire-and-forget, so clearing the map
+   * up front opened a window where an unlocked {@link getAuthFailed} saw
+   * neither a pending entry nor the landed flag. While an entry remains
+   * pending, {@link getAuthFailed} reports the flag as set on both the
+   * locked and unlocked paths.
+   */
   flushPendingAuthFailed(): void {
     if (this.pendingAuthFailedWrites.size === 0) return;
-    // Snapshot then clear: subsequent markAuthFailed calls during this dispatch
-    // (or a concurrent re-lock) re-queue cleanly.
-    const queued = Array.from(this.pendingAuthFailedWrites);
-    this.pendingAuthFailedWrites.clear();
-    for (const id of queued) {
+    for (const [key, id] of Array.from(this.pendingAuthFailedWrites)) {
       void this.inner
         .markAuthFailed(id)
         .then(() => {
-          // success: nothing to surface. The flag is now durable in the repo.
+          // The flag is now durable in the repo; drop the pending entry.
+          this.deletePendingAuthFailed(key, id);
         })
         .catch((err: unknown) => {
           if (err instanceof AtRestLockedError) {
-            // Re-locked mid-flush: re-queue for the next unlock.
-            this.pendingAuthFailedWrites.add(id);
+            // Re-locked mid-flush: leave the entry queued for the next
+            // unlock's flush.
             return;
           }
-          // Unexpected storage failure: forward to the sink if wired.
+          // Unexpected storage failure: forward to the sink if wired, then
+          // drop the entry — the durable store remains the cross-session
+          // truth, so a stale pending flag would only mask the repo read.
+          this.deletePendingAuthFailed(key, id);
           this.flushErrorSink?.(err);
         });
+    }
+  }
+
+  /**
+   * Drop a pending entry iff it still maps to the id instance this flush
+   * dispatched for. A `markAuthFailed` that re-queued the same id VALUE via
+   * a fresh `ConversationId` instance while the write was in-flight must
+   * survive — deleting unconditionally would lose the re-queued write.
+   */
+  private deletePendingAuthFailed(key: string, id: ConversationId): void {
+    if (this.pendingAuthFailedWrites.get(key) === id) {
+      this.pendingAuthFailedWrites.delete(key);
     }
   }
 

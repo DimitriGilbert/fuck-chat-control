@@ -186,16 +186,28 @@ export async function deriveKeyFromPassphrase(
 }
 
 export async function wrapKey(passphrase: string, key: AtRestKey): Promise<WrappedKey> {
+  // P5.3/R7F6: snapshot the plaintext key bytes BEFORE the first await. The
+  // caller's buffer may be shared with a lock listener that zeroizes it IN
+  // PLACE (LockableRepository's CR-7 onLock listener →
+  // repo.zeroizeAtRestKey → fill(0)). The Argon2 KDF below parks this
+  // coroutine, and aesGcmEncrypt copies its plaintext argument only when it
+  // is invoked — after the KDF resolves — so consuming `key` directly would
+  // seal whatever the buffer holds at resume time. A lock() landing mid-KDF
+  // would turn the persisted wrap into a seal of 32 zero bytes, silently
+  // overwriting the last surviving copy of the at-rest key.
+  const keyBytes = new Uint8Array(key);
   const salt = randomBytes(ARGON2_SALT_BYTES);
   const wrappingKey = await deriveKeyFromPassphrase(passphrase, salt);
   // R1:F1: same fresh-random-nonce construction as encryptAtRest — one wrap per
   // passphrase set, so a random nonce makes reload reuse impossible and the
   // per-record envelope stores it for unwrap.
   const nonce = nextAtRestNonce();
-  const ciphertext = await aesGcmEncrypt(wrappingKey, nonce, EMPTY_AAD, key);
-  // R1:F3: the wrapping KEK is no longer needed after the single GCM seal
-  // above; wipe it so it does not linger on the heap.
+  const ciphertext = await aesGcmEncrypt(wrappingKey, nonce, EMPTY_AAD, keyBytes);
+  // R1:F3: the wrapping KEK and the plaintext snapshot are no longer needed
+  // after the single GCM seal above; wipe them so they do not linger on the
+  // heap.
   zeroize(wrappingKey);
+  zeroize(keyBytes);
   const out = new Uint8Array(WRAPPED_TOTAL_BYTES);
   out.set(salt, WRAPPED_SALT_OFFSET);
   out.set(nonce, WRAPPED_NONCE_OFFSET);

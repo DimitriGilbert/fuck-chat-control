@@ -113,6 +113,18 @@ export interface ChatSession {
    * PAKE code is supplied (Phase 8/10 invitation fragment or `setPakeCode`).
    */
   authMode: AuthMode;
+  /**
+   * R7F2 (Phase 5.1): teardown idempotency latch. Set by `teardownSession`
+   * (chat-session.ts) on its FIRST run so a second call — leaveConversation
+   * racing leaveAll/dispose — is a no-op. This must NOT be derived from
+   * {@link connectionState}: the orchestrator reaches Disconnected on its own
+   * (notifyPeerLeft / notifySignalingClosed / failHandshake) without
+   * teardownSession ever running, and conflating the two skipped the resource
+   * release entirely — leaking the bridge's signaling socket (a held broker
+   * room slot), the RTCPeerConnection + adapter listeners, and leaving
+   * received-file plaintext resident in memory.
+   */
+  tornDown: boolean;
 }
 
 /**
