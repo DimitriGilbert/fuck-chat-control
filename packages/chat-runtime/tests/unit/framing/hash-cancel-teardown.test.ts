@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { decryptFrame, ReplayWindow } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import { decodeTransferCancelPayload } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
 import { MAX_BUFFERED_DATA_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
-import { FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import { ControlSubtype, FrameType } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 import {
+  decodeWireFrame,
   encodeManifest,
   FramingErrorCode,
   MAX_CHUNK_PLAINTEXT_BYTES,
@@ -14,7 +17,7 @@ import type {
   FrameReceiverHandlers,
   ReceivedFile,
 } from "@fuck-eu-chat-control/chat-runtime/framing";
-import { bytesEqual, deterministicData, forgeFrame, makePair } from "./_helpers";
+import { bytesEqual, deterministicData, forgeFrame, makePair, waitFor } from "./_helpers";
 
 function collectHandlers(): {
   files: ReceivedFile[];
@@ -285,6 +288,69 @@ describe("slice 5: teardown releases all transfer buffers", () => {
     await transport.ingestSettled;
     // No manifest frame was ever sent — the cancel landed before hashing
     // completed, so the receiver never saw the transfer.
+    expect(transport.sent).toHaveLength(0);
+  });
+});
+
+describe("R3F3: user-initiated cancel emits TransferCancel", () => {
+  it("a post-manifest cancel emits a TransferCancel control frame on the wire", async () => {
+    const rec = collectHandlers();
+    const { sender, receiver, transport, recvKeys } = await makePair(rec.handlers);
+    transport.setBufferedAmount(MAX_BUFFERED_DATA_BYTES);
+    const data = deterministicData(MAX_CHUNK_PLAINTEXT_BYTES * 2, 5);
+    const transferId = sender.beginFileTransfer();
+    const filePromise = sender.sendFile(
+      transferId,
+      data,
+      "payload.bin",
+      "application/octet-stream",
+    );
+    // The manifest is committed to the wire (and admitted by the linked
+    // receiver) before the chunk loop parks on the over-limit buffer.
+    await waitFor(() => (transport.sent.length >= 1 ? transport.sent.length : 0));
+    await transport.ingestSettled;
+    expect(receiver.activeTransferCount).toBe(1);
+
+    expect(sender.cancelTransfer(transferId)).toBe(true);
+    await expect(filePromise).rejects.toMatchObject({
+      code: FramingErrorCode.TransferCancelled,
+    });
+
+    // The best-effort control send is async — wait for it to hit the wire.
+    await waitFor(() => (transport.sent.length >= 2 ? transport.sent.length : 0));
+    const frame = decodeWireFrame(transport.sent[1]!);
+    expect(frame.aad.frameType).toBe(FrameType.Control);
+    // The control body is encrypted; decrypt with the peer's receive key
+    // (makePair cross-wires keys — the sender encrypts under the key the
+    // receiver reads as recvKey).
+    const plaintext = await decryptFrame(
+      recvKeys.recvKey,
+      new ReplayWindow(),
+      frame.aad,
+      frame.nonce,
+      frame.ciphertext,
+    );
+    expect(plaintext[0]).toBe(ControlSubtype.TransferCancel);
+    expect(decodeTransferCancelPayload(plaintext.subarray(1))).toBe(transferId);
+
+    // The linked receiver's own TransferCancel handler dropped the inbound
+    // transfer — the frame was a real wire event, not just a local signal.
+    await transport.ingestSettled;
+    expect(receiver.activeTransferCount).toBe(0);
+  });
+
+  it("a pre-manifest cancel emits no frame on the wire", async () => {
+    const rec = collectHandlers();
+    const { sender, transport } = await makePair(rec.handlers);
+    // Reserve the id but never start sendFile — no manifest can be on the
+    // wire, so the peer has nothing to drop and the cancel must not emit a
+    // TransferCancel.
+    const transferId = sender.beginFileTransfer();
+    expect(sender.activeTransferCount).toBe(1);
+    expect(sender.cancelTransfer(transferId)).toBe(true);
+    expect(sender.activeTransferCount).toBe(0);
+    // Give any (hypothetical) async control send a chance to land.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
     expect(transport.sent).toHaveLength(0);
   });
 });

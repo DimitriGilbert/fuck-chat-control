@@ -43,6 +43,18 @@ export class FrameSender {
   private nextTransferId = FIRST_TRANSFER_ID;
   private readonly activeTransfers = new Set<number>();
   private readonly cancelledTransfers = new Set<number>();
+  /**
+   * R3F3: ids whose FileManifest frame was already committed to the wire.
+   * The flag is set just BEFORE the manifest's `sendEncryptedFrame` await so
+   * a {@link cancelTransfer} landing inside the encrypt window still counts
+   * as post-manifest — the peer's receiver may admit that manifest and would
+   * otherwise hold the inbound transfer until the inactivity sweep. Only a
+   * post-manifest cancel emits a `TransferCancel` control frame; a
+   * pre-manifest cancel targets a transfer the peer never saw. Entries are
+   * released in `sendFile`'s finally alongside the activeTransfers
+   * reservation, and wholesale in {@link teardown}.
+   */
+  private readonly manifestSentTransfers = new Set<number>();
   private readonly drainWaiters: DrainWaiter[] = [];
   private tearingDown = false;
 
@@ -153,6 +165,11 @@ export class FrameSender {
       };
       try {
         this.assertNotTearingDown(transferId);
+        // R3F3: mark BEFORE the await — `transport.send` runs synchronously at
+        // the end of sendEncryptedFrame, so a cancel landing mid-encrypt still
+        // precedes the manifest on the wire only in sequence-number order;
+        // marking here guarantees that cancel emits a TransferCancel.
+        this.manifestSentTransfers.add(transferId);
         await this.sendEncryptedFrame(
           FrameType.FileManifest,
           encodeManifest(manifest),
@@ -201,6 +218,7 @@ export class FrameSender {
       // pins a slot against the concurrent-transfer cap.
       this.activeTransfers.delete(transferId);
       this.cancelledTransfers.delete(transferId);
+      this.manifestSentTransfers.delete(transferId);
     }
     return transferId;
   }
@@ -222,6 +240,21 @@ export class FrameSender {
       transferId,
       new FramingError(FramingErrorCode.TransferCancelled, `transfer ${transferId} cancelled`),
     );
+    // R3F3: once the manifest is on the wire the peer's receiver is holding
+    // inbound state for this id — emit a best-effort TransferCancel so it
+    // drops the transfer promptly instead of waiting for the inactivity
+    // sweep. A pre-manifest cancel needs no frame (the peer never saw the
+    // transfer). Fire-and-forget with a swallowed rejection: a control-send
+    // failure (teardown, sequence exhaustion, dead transport) must not break
+    // the local cancel.
+    if (this.manifestSentTransfers.has(transferId)) {
+      void this.sendControl(
+        ControlSubtype.TransferCancel,
+        encodeTransferCancelPayload(transferId),
+      ).catch(() => {
+        // Best-effort: the local cancel is already committed.
+      });
+    }
     return true;
   }
 
@@ -232,6 +265,7 @@ export class FrameSender {
     const waiters = this.drainWaiters.splice(0, this.drainWaiters.length);
     for (const w of waiters) w.reject(error);
     this.activeTransfers.clear();
+    this.manifestSentTransfers.clear();
     // LW-12 (Phase 7b): best-effort zeroize the session send key. JS-array
     // zeroing is best-effort — the GC and the runtime's own copies (e.g. V8's
     // externalized ArrayBuffer views) may retain a copy — but matching the

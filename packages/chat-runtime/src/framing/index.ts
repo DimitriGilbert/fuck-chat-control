@@ -1,6 +1,6 @@
 export { FrameSender } from "./sender";
 export { FrameReceiver } from "./receiver";
-export { FramingError, FramingErrorCode } from "./errors";
+export { FramingError, FramingErrorCode, isPerTransferFramingError } from "./errors";
 export {
   computeChunkCount,
   chunkBoundaries,

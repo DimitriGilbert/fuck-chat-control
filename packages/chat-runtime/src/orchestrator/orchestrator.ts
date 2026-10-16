@@ -34,6 +34,7 @@ import { AuthMode, ControlSubtype, Role } from "../protocol/types";
 import type { ConversationId, Signature, Transcript } from "../protocol/types";
 import { FrameReceiver } from "../framing";
 import { FrameSender } from "../framing";
+import { isPerTransferFramingError } from "../framing";
 import type { FrameTransport, ReceivedFile } from "../framing";
 import {
   ConnectionState,
@@ -302,6 +303,18 @@ export class ConversationOrchestrator {
    * begins, cleared on every exit path.
    */
   private pakeConfirmTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * R6F5: timer handle bounding the WHOLE handshake phase (Hello → Signature →
+   * PAKE → Connected) at {@link HANDSHAKE_TIMEOUT_MS} per protocol-v1.md §9.
+   * The PAKE share/confirm awaits bound only their own leg; a silent peer that
+   * never delivers a Hello or Signature would otherwise park the session in
+   * Handshaking forever. Armed when {@link attachTransport} enters Handshaking,
+   * cleared on the Connected transition in {@link verifyPeerAndComplete} and in
+   * {@link teardownSession}. On expiry it drives {@link failHandshake} with a
+   * non-durable `PakeError(Timeout)` so retry() stays usable. Null when no
+   * handshake is in flight.
+   */
+  private handshakeTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
   /**
    * The local SPAKE2 side byte ('A'=0x41 / 'B'=0x42). Recorded when the local
    * share is sent so the confirmation handler can validate the peer's role
@@ -669,6 +682,27 @@ export class ConversationOrchestrator {
     this.handshakeError = null;
     this.transport = transport;
     this.setState(ConnectionState.Handshaking);
+    // R6F5: bound the whole handshake phase (Hello → Signature → PAKE →
+    // Connected) — protocol-v1.md §9's HANDSHAKE_TIMEOUT_MS. The PAKE
+    // share/confirm awaits bound only their own leg; without this outer bound
+    // a silent peer that never sends a Hello or Signature parks the session in
+    // Handshaking forever. On expiry the timer drives failHandshake with a
+    // non-durable PakeError(Timeout); it is cleared on the Connected
+    // transition and in teardownSession. Clear-then-arm so a re-entrant
+    // attachTransport can never leave a stale timer running against the new
+    // handshake.
+    if (this.handshakeTimeoutHandle !== null) {
+      clearTimeout(this.handshakeTimeoutHandle);
+    }
+    this.handshakeTimeoutHandle = setTimeout(() => {
+      this.handshakeTimeoutHandle = null;
+      this.failHandshake(
+        new PakeError(
+          PakeErrorCode.Timeout,
+          `handshake timed out after ${this.handshakeTimeoutMs}ms with no peer progress`,
+        ),
+      );
+    }, this.handshakeTimeoutMs);
     // Kick off the local Hello generation and transmission.
     void this.beginHandshake().catch((err: unknown) => {
       this.failHandshake(err);
@@ -676,6 +710,9 @@ export class ConversationOrchestrator {
     // All inbound bytes (handshake messages, then encrypted frames after
     // Connected) are routed through our receiver.
     transport.setOnMessage((bytes: Uint8Array) => {
+      // R3/F1: handleInbound resolves normally for per-transfer ingest errors
+      // (they are surfaced via onTransferError inside handleInbound); only
+      // session-fatal failures reach this catch and tear the session down.
       this.handleInbound(bytes).catch((err: unknown) => {
         this.failHandshake(err);
       });
@@ -811,9 +848,16 @@ export class ConversationOrchestrator {
   }
 
   /**
-   * Cancel an in-flight transfer on both sides: the sender stops the chunk
-   * loop and the receiver drops any buffered chunks. Either side is safe to
-   * call; an unknown id (no active transfer on either side) is a silent no-op.
+   * Cancel an in-flight transfer in ONE direction. `direction` picks the
+   * side: `"send"` aborts an outbound send (the {@link FrameSender}'s chunk
+   * loop), `"receive"` drops an inbound transfer (the {@link FrameReceiver}'s
+   * buffered chunks). An unknown id on the targeted side is a silent no-op.
+   *
+   * R3F2: the direction parameter is load-bearing, not cosmetic. Sender and
+   * receiver allocate from the SAME numeric id space (both start at
+   * FIRST_TRANSFER_ID), so concurrent bidirectional transfers collide on the
+   * same id — the pre-fix both-sides cancel of an outbound id silently
+   * dropped an unrelated inbound transfer with that id.
    *
    * R2/F3 (Phase 7): `onTransferCancelled` is emitted exactly ONCE, from HERE,
    * and only when an active transfer was actually cancelled — the sender and
@@ -823,13 +867,14 @@ export class ConversationOrchestrator {
    * a cancelled send surfaces one event total, and cancelling an id nothing
    * knows surfaces zero.
    */
-  cancelTransfer(transferId: number): void {
+  cancelTransfer(transferId: number, direction: "send" | "receive"): void {
     let cancelled = false;
-    if (this.frameSender !== null) {
-      cancelled = this.frameSender.cancelTransfer(transferId) || cancelled;
-    }
-    if (this.frameReceiver !== null) {
-      cancelled = this.frameReceiver.cancelTransfer(transferId) || cancelled;
+    if (direction === "send") {
+      if (this.frameSender !== null) {
+        cancelled = this.frameSender.cancelTransfer(transferId);
+      }
+    } else if (this.frameReceiver !== null) {
+      cancelled = this.frameReceiver.cancelTransfer(transferId);
     }
     if (!cancelled) {
       return;
@@ -977,9 +1022,22 @@ export class ConversationOrchestrator {
     // so the newer handshake owns those fields cleanly.
     const generation = this.handshakeGeneration;
     const ephemeral = await generateEphemeralKeyPair();
-    if (generation !== this.handshakeGeneration) {
-      // A newer attachTransport superseded this handshake while we were
-      // generating the ephemeral key. Drop our work silently.
+    // R6F3: bail via the full superseded condition, matching every other
+    // handshake coroutine — generation advance OR a teardown that nulled
+    // transport. This is handshakeSuperseded() minus its `ephemeral === null`
+    // clause: that clause is meaningless at THIS point because this.ephemeral
+    // is structurally null until the assignment below (attachTransport is only
+    // reachable from Waiting/Signaling — i.e. after a teardown that nulled it,
+    // or on a fresh orchestrator) — including it would make EVERY handshake
+    // bail. In both bail cases the keypair we just generated is abandoned:
+    // whether `this.ephemeral` was late-assigned by a superseding
+    // attachTransport's own coroutine (whose key must stay live — we must NOT
+    // zeroize the field) or nulled by teardownSession, OUR local key is owned
+    // by this coroutine alone, so wipe the private key here before dropping
+    // the reference. `ephemeral` is a coroutine local; this is its only wipe
+    // site.
+    if (generation !== this.handshakeGeneration || this.transport === null) {
+      ephemeral.privateKey.fill(0);
       return;
     }
     const sessionId = encodeSessionId(randomBytes(32));
@@ -1001,7 +1059,29 @@ export class ConversationOrchestrator {
       // Post-handshake: bytes are encrypted frames.
       const receiver = this.frameReceiver;
       if (receiver === null) return;
-      await receiver.ingest(bytes);
+      try {
+        await receiver.ingest(bytes);
+      } catch (err: unknown) {
+        // R3/F1 (per-transfer vs session-fatal): a framing error scoped to a
+        // single transferId — admission-limit, ordering, budget, or content
+        // hash failure — is NON-fatal. The peer violated one transfer, not the
+        // session; surface it via onTransferError and stay Connected.
+        // Wire-level violations (malformed frames, AAD/AEAD or session-id
+        // mismatches, unknown control subtypes) indicate a hostile or buggy
+        // peer at the protocol layer and still propagate to the
+        // attachTransport catch → failHandshake → Disconnected.
+        if (isPerTransferFramingError(err)) {
+          if (err.transferId !== undefined) {
+            this.handlers.onTransferError?.(err.transferId, err);
+          } else {
+            // Defensive: every per-transfer throw site annotates its id — an
+            // unannotated one still demotes, surfaced via the generic hook.
+            this.handlers.onError?.(err);
+          }
+          return;
+        }
+        throw err;
+      }
       return;
     }
     // PAKE shares/confirmations arrive AFTER the peer's transcript signature
@@ -1020,6 +1100,21 @@ export class ConversationOrchestrator {
     // handshake owns the field set and would be corrupted by our writes.
     const generation = this.handshakeGeneration;
     if (bytes.length === HELLO_BYTES) {
+      // R6F1 (duplicate-Hello guard): the peer Hello is accepted exactly once
+      // per handshake. Once remoteHello is set it is frozen into the signed
+      // transcript by maybeSignAndSend; a second HELLO_BYTES message — e.g.
+      // injected by a malicious broker or WebRTC MITM — must NOT overwrite it,
+      // or the attacker could substitute the ephemeral ECDH key after the
+      // transcript froze while the identity keys (and thus the safety number)
+      // stay the same. Throwing routes through the attachTransport .catch into
+      // failHandshake; MalformedHandshakeMessage is NOT an auth failure (see
+      // isAuthFailureError), so retry() stays usable.
+      if (this.remoteHello !== null) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedHandshakeMessage,
+          "duplicate HelloMessage: the peer hello was already accepted for this handshake",
+        );
+      }
       const hello = decodeHello(bytes);
       if (generation !== this.handshakeGeneration) return;
       this.remoteHello = hello;
@@ -1177,9 +1272,26 @@ export class ConversationOrchestrator {
     // coroutine is parked.
     const generation = this.handshakeGeneration;
 
-    const remoteIdentityKey = this.remoteHello.identityPublicKey;
-    const remoteEphemeralKey = this.remoteHello.ephemeralPublicKey;
-    const remoteSessionId = this.remoteHello.sessionId;
+    // R6F1: source the peer's identity/ephemeral/session-id inputs from the
+    // SIGNED transcript's role-indexed fields rather than re-reading the
+    // mutable remoteHello. The transcript is what both sides' signatures
+    // cover, so binding ECDH and framing to it is defense-in-depth alongside
+    // the duplicate-Hello guard in handleInbound: even if remoteHello were
+    // somehow overwritten after the signature round, the derived keys could
+    // not silently follow it. The local role is recovered by matching the
+    // local identity key against the transcript's initiator field — the
+    // transcript was built from the local + remote hellos, so exactly one of
+    // its two identity fields is ours.
+    const localIsInitiator = ctEqual(this.identity.publicKey, this.transcript.initiatorIdentityKey);
+    const remoteIdentityKey = localIsInitiator
+      ? this.transcript.responderIdentityKey
+      : this.transcript.initiatorIdentityKey;
+    const remoteEphemeralKey = localIsInitiator
+      ? this.transcript.responderEphemeralKey
+      : this.transcript.initiatorEphemeralKey;
+    const remoteSessionId = localIsInitiator
+      ? this.transcript.responderSessionId
+      : this.transcript.initiatorSessionId;
 
     // CR-2 strict: set the local side byte SYNCHRONOUSLY before the first await
     // (verifyTranscript below) so the inbound dispatcher's PAKE phase guard keys
@@ -1440,10 +1552,26 @@ export class ConversationOrchestrator {
           new Error(`inbound transfer ${transferId} timed out after inactivity`),
         );
       },
+      // R3/F5: the receiver contains host-callback throws (the R3/F5 contract)
+      // and resurfaces them here — a throwing onFileComplete as a per-transfer
+      // error, a throwing onText/onControl via the generic error hook. Both
+      // are non-fatal notifications; the session stays Connected.
+      onTransferError: (transferId: number, error: unknown): void => {
+        this.handlers.onTransferError?.(transferId, error);
+      },
+      onError: (error: unknown): void => {
+        this.handlers.onError?.(error);
+      },
     });
     this.frameSender = sender;
     this.frameReceiver = receiver;
 
+    // R6F5: the handshake phase completed — disarm the whole-handshake timeout
+    // so it cannot fire into the live session.
+    if (this.handshakeTimeoutHandle !== null) {
+      clearTimeout(this.handshakeTimeoutHandle);
+      this.handshakeTimeoutHandle = null;
+    }
     this.setState(ConnectionState.Connected);
     this.handlers.onSafetyNumber?.(safetyNumber, this.safetyNumberVerified);
   }
@@ -1552,9 +1680,31 @@ export class ConversationOrchestrator {
     if (peerShare === null) {
       peerShare = await this.awaitPakeShareBounded();
     }
+    // R6F7 (use-after-free guard): handlePakeShare resolves the parked await
+    // SYNCHRONOUSLY mid-dispatch, so a leave()/notifyPeerLeft() in the same
+    // tick can run teardownSession — which zeroes and .free()s the WASM
+    // PakeState handle — BEFORE this continuation drains. `session` is a
+    // coroutine-local capture: it still references the freed handle even
+    // though this.pakeSession was nulled. Re-check liveness against the field
+    // (identity, not just null: a superseding re-attach may already have
+    // installed a NEW session, which we must not consume either) and throw
+    // PakeError(Cancelled) — the same teardown-driven signal failHandshake's
+    // R6F2 suppression already swallows. Without this guard the freed handle
+    // (__wbg_ptr === 0) is dereferenced inside pake_finish, and the thrown
+    // error maps via mapWasmError to a DURABLE auth failure (Mismatch) —
+    // bricking the conversation after a plain leave().
+    if (this.pakeSession !== session) {
+      throw new PakeError(PakeErrorCode.Cancelled, "PAKE await cancelled: session torn down");
+    }
     this.peerPakeShare = null;
-    const secret = await pakeFinish(session, peerShare);
+    // Detach BEFORE pakeFinish rather than after: pakeFinish parks on its own
+    // `await loadWasm()` before reading session.state, and teardownSession
+    // frees `this.pakeSession.state` — detaching first makes the handle
+    // exclusively coroutine-owned so a mid-finish teardown cannot free it out
+    // from under the wasm call. pakeFinish's own finally disposes the state,
+    // so nothing leaks on either outcome.
     this.pakeSession = null;
+    const secret = await pakeFinish(session, peerShare);
     return secret;
   }
 
@@ -1649,6 +1799,15 @@ export class ConversationOrchestrator {
     if (peerTag === null) {
       peerTag = await this.awaitPakeConfirmBounded();
     }
+    // R6F7 re-check: handlePakeConfirm resolves the parked await
+    // SYNCHRONOUSLY mid-dispatch, so a leave()/notifyPeerLeft() in the same
+    // tick can run teardownSession before this continuation drains (the same
+    // window the awaitPakeFinish guard above closes). Bail BEFORE clearing
+    // this.peerPakeConfirm — after a re-attach that field may hold the FRESH
+    // handshake's stashed tag — and before a post-teardown tag mismatch could
+    // reach failHandshake as a durable auth failure for a session that is
+    // already dead. Silent bail, mirroring the pre-park re-checks above.
+    if (this.handshakeSuperseded(generation)) return;
     this.peerPakeConfirm = null;
     const peerRole = localRole === Role.Initiator ? Role.Responder : Role.Initiator;
     const expectedPeerTag = await derivePakeConfirmationTag(pakeSecret, transcriptHash, peerRole);
@@ -1771,6 +1930,19 @@ export class ConversationOrchestrator {
 
   private failHandshake(err: unknown): void {
     if (this.handshakeError !== null) return;
+    // R6F2: a PakeError(Cancelled) is raised only by teardown-driven paths —
+    // teardownSession rejecting a parked PAKE resolver out from under the
+    // handshake coroutine, and awaitPakeFinish's R6F7 stale-session guard
+    // (which detects that a teardown ran between the share resolution and the
+    // coroutine's resumption). By the time either rejection reaches this
+    // catch the teardown has already completed — surfacing it via onError
+    // would be a phantom post-leave error for a user-initiated teardown, and
+    // re-running teardown/setState would tear down a FRESH session if the
+    // user already retried and re-attached a transport. Swallow it entirely:
+    // no latch, no onError, no state mutation.
+    if (err instanceof PakeError && err.code === PakeErrorCode.Cancelled) {
+      return;
+    }
     this.handshakeError = err;
     // R7/F3: an IdentityChanged or PAKE failure is a durable auth failure.
     // Per the PRD TOFU clause, recovering requires a NEW invitation — record
@@ -1846,6 +2018,15 @@ export class ConversationOrchestrator {
     }
     if (this.pakeSession !== null && this.pakeSession.state !== null) {
       this.pakeSession.state.outgoing_share.fill(0);
+      // R6F4: release the WASM-side SPAKE2 state too — matching the
+      // verifyPeerAndComplete superseded-bail convention and pakeFinish's
+      // finally — so the wasm heap allocation does not outlive the session
+      // for the rest of the JS heap's lifetime.
+      try {
+        this.pakeSession.state.free();
+      } catch {
+        // best-effort; the crate's finalizer is idempotent
+      }
     }
     if (this.localHello !== null) {
       this.localHello.ephemeralPublicKey.fill(0);
@@ -1901,6 +2082,13 @@ export class ConversationOrchestrator {
     // Clear the timeout timers FIRST so a pending timer callback cannot race
     // the rejection we're about to raise and double-settle the promise. After
     // clearing, only one path can settle each parked promise: this rejection.
+    // R6F5: also disarm the whole-handshake bound — teardown ends the phase it
+    // guarded, and a late fire would surface a spurious Timeout via
+    // failHandshake.
+    if (this.handshakeTimeoutHandle !== null) {
+      clearTimeout(this.handshakeTimeoutHandle);
+      this.handshakeTimeoutHandle = null;
+    }
     if (this.pakeShareTimeoutHandle !== null) {
       clearTimeout(this.pakeShareTimeoutHandle);
       this.pakeShareTimeoutHandle = null;

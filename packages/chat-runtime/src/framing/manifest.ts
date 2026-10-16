@@ -56,6 +56,8 @@ export function chunkBoundaries(size: number, chunkIndex: number): { start: numb
 }
 
 export function encodeManifest(manifest: FileManifest): Uint8Array {
+  // R3/F1: every throw here is scoped to `manifest.transferId` so the error
+  // carries the id a per-transfer classifier can attribute.
   if (
     !Number.isInteger(manifest.transferId) ||
     manifest.transferId < 0 ||
@@ -64,6 +66,7 @@ export function encodeManifest(manifest: FileManifest): Uint8Array {
     throw new FramingError(
       FramingErrorCode.Malformed,
       `transferId must be uint32, got ${manifest.transferId}`,
+      manifest.transferId,
     );
   }
   const nameBytes = TEXT_ENCODER.encode(manifest.name);
@@ -71,22 +74,29 @@ export function encodeManifest(manifest: FileManifest): Uint8Array {
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `name length ${nameBytes.length} exceeds ${MAX_MANIFEST_NAME_BYTES}`,
+      manifest.transferId,
     );
   }
   if (nameBytes.length === 0) {
-    throw new FramingError(FramingErrorCode.Malformed, "name must not be empty");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "name must not be empty",
+      manifest.transferId,
+    );
   }
   const mimeBytes = TEXT_ENCODER.encode(manifest.mimeType);
   if (mimeBytes.length > MAX_MANIFEST_MIME_BYTES) {
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `mimeType length ${mimeBytes.length} exceeds ${MAX_MANIFEST_MIME_BYTES}`,
+      manifest.transferId,
     );
   }
   if (manifest.contentHash.length !== SHA256_BYTES) {
     throw new FramingError(
       FramingErrorCode.Malformed,
       `contentHash must be ${SHA256_BYTES} bytes, got ${manifest.contentHash.length}`,
+      manifest.transferId,
     );
   }
   if (
@@ -97,6 +107,7 @@ export function encodeManifest(manifest: FileManifest): Uint8Array {
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `size ${manifest.size} exceeds MAX_INCOMPLETE_TRANSFER_BYTES (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+      manifest.transferId,
     );
   }
   const expectedChunkCount = computeChunkCount(manifest.size);
@@ -104,6 +115,7 @@ export function encodeManifest(manifest: FileManifest): Uint8Array {
     throw new FramingError(
       FramingErrorCode.Malformed,
       `chunkCount ${manifest.chunkCount} does not match canonical ${expectedChunkCount} for size ${manifest.size}`,
+      manifest.transferId,
     );
   }
 
@@ -135,8 +147,15 @@ export function encodeManifest(manifest: FileManifest): Uint8Array {
 }
 
 export function decodeManifest(plaintext: Uint8Array, expectedTransferId: number): FileManifest {
+  // R3/F1: every throw here is scoped to `expectedTransferId` — the frame's
+  // AAD transferId — so a manifest decode failure carries the id the
+  // per-transfer classifier attributes the event to.
   if (plaintext.length < TRANSFER_ID_BYTES + 2) {
-    throw new FramingError(FramingErrorCode.Malformed, "manifest plaintext too short");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "manifest plaintext too short",
+      expectedTransferId,
+    );
   }
   let offset = 0;
   const transferId = readUint32Be(plaintext, offset);
@@ -145,29 +164,47 @@ export function decodeManifest(plaintext: Uint8Array, expectedTransferId: number
     throw new FramingError(
       FramingErrorCode.Malformed,
       `manifest transferId ${transferId} does not match frame transferId ${expectedTransferId}`,
+      expectedTransferId,
     );
   }
   const nameLength = plaintext[offset++];
   if (offset + nameLength > plaintext.length) {
-    throw new FramingError(FramingErrorCode.Malformed, "manifest name overruns plaintext");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "manifest name overruns plaintext",
+      expectedTransferId,
+    );
   }
   const name = TEXT_DECODER.decode(plaintext.subarray(offset, offset + nameLength));
   offset += nameLength;
   if (nameLength === 0) {
-    throw new FramingError(FramingErrorCode.Malformed, "name must not be empty");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "name must not be empty",
+      expectedTransferId,
+    );
   }
   if (nameLength > MAX_MANIFEST_NAME_BYTES) {
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `name length ${nameLength} exceeds ${MAX_MANIFEST_NAME_BYTES}`,
+      expectedTransferId,
     );
   }
   if (offset >= plaintext.length) {
-    throw new FramingError(FramingErrorCode.Malformed, "manifest truncated before mimeType length");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "manifest truncated before mimeType length",
+      expectedTransferId,
+    );
   }
   const mimeLength = plaintext[offset++];
   if (offset + mimeLength > plaintext.length) {
-    throw new FramingError(FramingErrorCode.Malformed, "manifest mimeType overruns plaintext");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "manifest mimeType overruns plaintext",
+      expectedTransferId,
+    );
   }
   const mimeType = TEXT_DECODER.decode(plaintext.subarray(offset, offset + mimeLength));
   offset += mimeLength;
@@ -175,10 +212,15 @@ export function decodeManifest(plaintext: Uint8Array, expectedTransferId: number
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `mimeType length ${mimeLength} exceeds ${MAX_MANIFEST_MIME_BYTES}`,
+      expectedTransferId,
     );
   }
   if (offset + SIZE_BYTES + CHUNK_COUNT_BYTES + SHA256_BYTES > plaintext.length) {
-    throw new FramingError(FramingErrorCode.Malformed, "manifest truncated before fixed tail");
+    throw new FramingError(
+      FramingErrorCode.Malformed,
+      "manifest truncated before fixed tail",
+      expectedTransferId,
+    );
   }
   const size = readUint32Be(plaintext, offset);
   offset += SIZE_BYTES;
@@ -190,12 +232,14 @@ export function decodeManifest(plaintext: Uint8Array, expectedTransferId: number
     throw new FramingError(
       FramingErrorCode.Malformed,
       `manifest has ${plaintext.length - offset} trailing bytes`,
+      expectedTransferId,
     );
   }
   if (!Number.isInteger(size) || size < 0 || size > MAX_INCOMPLETE_TRANSFER_BYTES) {
     throw new FramingError(
       FramingErrorCode.SizeExceeded,
       `size ${size} exceeds MAX_INCOMPLETE_TRANSFER_BYTES (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+      expectedTransferId,
     );
   }
   const expectedChunkCount = computeChunkCount(size);
@@ -203,6 +247,7 @@ export function decodeManifest(plaintext: Uint8Array, expectedTransferId: number
     throw new FramingError(
       FramingErrorCode.Malformed,
       `chunkCount ${chunkCount} does not match canonical ${expectedChunkCount} for size ${size}`,
+      expectedTransferId,
     );
   }
   return { transferId, name, mimeType, size, chunkCount, contentHash };

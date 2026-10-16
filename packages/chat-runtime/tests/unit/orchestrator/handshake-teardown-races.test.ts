@@ -9,9 +9,17 @@ import {
   generateIdentityKeyPair,
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { PakeWasmModule } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import {
+  PAKE_CONFIRM_MESSAGE_BYTES,
+  PAKE_MESSAGE_BYTES,
+} from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
-import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  getAuthFailedDurable,
+  InMemoryConversationRepository,
+  setDurableStorage,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 import type {
   AppendMessageOptions,
   ConversationMessage,
@@ -26,7 +34,9 @@ import {
   type OrchestratorDeps,
   type OrchestratorHandlers,
 } from "@fuck-eu-chat-control/chat-runtime/orchestrator/orchestrator";
+import type { PeerTransport } from "@fuck-eu-chat-control/chat-runtime/transport/peer-transport";
 
+import { MemoryStorage } from "../store/_helpers";
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "./_helpers";
 
 const PKG_JS = fileURLToPath(
@@ -119,6 +129,16 @@ vi.mock("@fuck-eu-chat-control/chat-runtime/crypto", async (importOriginal) => {
   };
 });
 
+/**
+ * Invocation counter for the real WASM `pake_finish` export, wired in
+ * beforeAll via a wrapper binding handed to {@link __setWasmModuleForTests}.
+ * Lets the R6F7 regression tests assert that a stale handshake continuation
+ * never reached the wasm call after teardownSession freed the PakeState
+ * handle — a use-after-free the onError assertions alone cannot distinguish
+ * (the wasm call could theoretically return a value instead of throwing).
+ */
+const pakeFinishCalls = { count: 0 };
+
 // Synchronous wasm init (mirrors pake-handshake-timeout.test.ts) so the
 // createPakeSession scenario runs the real SPAKE2 exchange through the gate.
 beforeAll(async () => {
@@ -130,7 +150,13 @@ beforeAll(async () => {
     pake_finish: PakeWasmModule["pake_finish"];
   };
   binding.initSync({ module: wasmModule });
-  __setWasmModuleForTests(binding);
+  __setWasmModuleForTests({
+    pake_start: binding.pake_start,
+    pake_finish: (state, peerShare) => {
+      pakeFinishCalls.count += 1;
+      return binding.pake_finish(state, peerShare);
+    },
+  });
 });
 
 // A failed assertion inside a scenario must not leak an enabled gate (and a
@@ -289,6 +315,7 @@ class GatedRepository implements ConversationRepository {
 
 interface OrchestratorKit {
   readonly orchestrator: ConversationOrchestrator;
+  readonly repository: ConversationRepository;
   readonly spies: StateSpies;
   readonly socket: MockSignalingSocket;
 }
@@ -313,7 +340,7 @@ async function makeOrchestrator(
     handlers: spiesToHandlers(spies),
     ...(handshakeTimeoutMs !== undefined ? { handshakeTimeoutMsOverride: handshakeTimeoutMs } : {}),
   };
-  return { orchestrator: new ConversationOrchestrator(deps), spies, socket };
+  return { orchestrator: new ConversationOrchestrator(deps), repository, spies, socket };
 }
 
 async function tick(ms: number): Promise<void> {
@@ -655,6 +682,335 @@ describe("stale maybeSignAndSend across a re-attach", () => {
 
       initiator.orchestrator.leave();
       responder.orchestrator.leave();
+    },
+  );
+});
+
+/**
+ * Wrap a PeerTransport so every outbound frame of exactly `dropLength` bytes
+ * is silently dropped while all other handshake/frame traffic passes through —
+ * the same strand-the-peer technique as dropPakeShareTransport in
+ * pake-handshake-timeout.test.ts, parameterized over the frame length so it
+ * can target either the SPAKE2 share (35B) or the confirmation tag (34B).
+ */
+function dropFramesOfLength(inner: PeerTransport, dropLength: number): PeerTransport {
+  return {
+    send: (bytes: Uint8Array): void => {
+      if (bytes.length === dropLength) {
+        return;
+      }
+      inner.send(bytes);
+    },
+    get ready(): boolean {
+      return inner.ready;
+    },
+    get bufferedAmount(): number {
+      return inner.bufferedAmount;
+    },
+    setOnMessage: (h): void => {
+      inner.setOnMessage(h);
+    },
+    setOnDrain: (h): void => {
+      inner.setOnDrain(h);
+    },
+    close: (): void => {
+      inner.close();
+    },
+  };
+}
+
+/**
+ * R6F2: teardownSession rejects parked PAKE resolvers with
+ * PakeError(Cancelled) — a rejection raised BY the teardown itself. When it
+ * propagates through verifyPeerAndComplete into failHandshake it must NOT
+ * surface via onError (a phantom post-leave error for a user-initiated
+ * teardown). Each scenario strands one side in a resolver-based bounded await
+ * by dropping the corresponding peer frame, then leave()s and asserts onError
+ * was never called. The await bound is generous so a genuine Timeout (which
+ * SHOULD still surface) cannot race the leave().
+ */
+const PAKE_PARK_TIMEOUT_MS = 10_000;
+
+describe("teardown-driven PAKE cancellation suppresses onError (R6F2)", () => {
+  it(
+    "awaitPakeShareBounded: leave() while parked for the peer share emits no onError",
+    { timeout: 15_000 },
+    async () => {
+      const repoGates = makeRepoGates();
+      const initiator = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      const responder = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      initiator.orchestrator.setPakeCode(PAKE_CODE);
+      responder.orchestrator.setPakeCode(PAKE_CODE);
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      // The responder's SPAKE2 share (35B) never reaches the initiator, so the
+      // initiator parks inside awaitPakeShareBounded. The responder still
+      // receives the initiator's share and advances to its own confirm await.
+      responder.orchestrator.attachTransport(dropFramesOfLength(b, PAKE_MESSAGE_BYTES));
+
+      await waitUntil(
+        "initiator parked in Verifying",
+        () => initiator.orchestrator.state === ConnectionState.Verifying,
+      );
+      // Settle a few ticks so the coroutine is firmly inside the parked await.
+      await tick(100);
+
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+      await tick(100);
+
+      // The teardown-driven PakeError(Cancelled) reached failHandshake on both
+      // sides — and was swallowed there: no phantom onError on either.
+      expect(initiator.orchestrator.state).toBe(ConnectionState.Disconnected);
+      expect(responder.orchestrator.state).toBe(ConnectionState.Disconnected);
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+      expect(responder.spies.onError.calls).toHaveLength(0);
+    },
+  );
+
+  it(
+    "awaitPakeConfirmBounded: leave() while parked for the peer confirm emits no onError",
+    { timeout: 15_000 },
+    async () => {
+      const repoGates = makeRepoGates();
+      const initiator = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      const responder = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      initiator.orchestrator.setPakeCode(PAKE_CODE);
+      responder.orchestrator.setPakeCode(PAKE_CODE);
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      // The responder's PAKE confirm (34B) never reaches the initiator, so the
+      // initiator parks inside awaitPakeConfirmBounded after the share
+      // exchange completes. The responder still receives the initiator's
+      // confirm and completes its handshake.
+      responder.orchestrator.attachTransport(dropFramesOfLength(b, PAKE_CONFIRM_MESSAGE_BYTES));
+
+      await waitUntil(
+        "responder connected; initiator parked in Verifying",
+        () =>
+          responder.orchestrator.state === ConnectionState.Connected &&
+          initiator.orchestrator.state === ConnectionState.Verifying,
+      );
+      await tick(100);
+
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+      await tick(100);
+
+      expect(initiator.orchestrator.state).toBe(ConnectionState.Disconnected);
+      expect(responder.orchestrator.state).toBe(ConnectionState.Disconnected);
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+      expect(responder.spies.onError.calls).toHaveLength(0);
+    },
+  );
+});
+
+/**
+ * Wrap a PeerTransport so every outbound frame of exactly `captureLength`
+ * bytes is recorded into `captured` and NOT delivered to the peer — the
+ * receiving side stays parked while the test holds the captured frame for
+ * manual, timing-controlled re-injection via LoopbackPeerTransport.deliver.
+ * This is the deterministic seam for the deliver-then-leave-in-one-tick race:
+ * a normal send() hands the frame to the peer synchronously mid-dispatch, so
+ * dropping it here and re-delivering by hand lets the test control the exact
+ * interleave between the resolver firing and teardownSession running.
+ */
+function captureAndDropFramesOfLength(
+  inner: PeerTransport,
+  captureLength: number,
+): { transport: PeerTransport; captured: Uint8Array[] } {
+  const captured: Uint8Array[] = [];
+  return {
+    captured,
+    transport: {
+      send: (bytes: Uint8Array): void => {
+        if (bytes.length === captureLength) {
+          captured.push(bytes);
+          return;
+        }
+        inner.send(bytes);
+      },
+      get ready(): boolean {
+        return inner.ready;
+      },
+      get bufferedAmount(): number {
+        return inner.bufferedAmount;
+      },
+      setOnMessage: (h): void => {
+        inner.setOnMessage(h);
+      },
+      setOnDrain: (h): void => {
+        inner.setOnDrain(h);
+      },
+      close: (): void => {
+        inner.close();
+      },
+    },
+  };
+}
+
+/**
+ * R6F7 (use-after-free on the WASM PakeState handle): handlePakeShare and
+ * handlePakeConfirm resolve their parked awaits SYNCHRONOUSLY mid-dispatch,
+ * so a leave()/notifyPeerLeft() issued in the SAME tick runs teardownSession —
+ * which zeroes and .free()s `this.pakeSession.state` — BEFORE the parked
+ * continuation drains. The coroutine's captured `session` still references
+ * the freed handle; pre-fix it then called `pake_finish` on `__wbg_ptr === 0`
+ * and the throw mapped via mapWasmError to a DURABLE Mismatch — a plain
+ * leave() racing a share delivery permanently bricked the conversation.
+ *
+ * These tests drive exactly that interleave: capture the peer frame (dropped
+ * on the wire so the receiver stays parked), hand-deliver it via
+ * LoopbackPeerTransport.deliver(), then call leave() in the same synchronous
+ * block — before the microtask queue drains the resolver's continuation. The
+ * fix (a `this.pakeSession !== session` liveness check throwing
+ * PakeError(Cancelled), plus detaching the field BEFORE pakeFinish's own
+ * inner await) must leave no trace: no onError, no durable auth-failed mark
+ * (repo or durable store — a real MemoryStorage is registered so the durable
+ * assertion is not vacuous), retry() stays unblocked, and `pakeFinishCalls`
+ * proves the wasm export was never invoked on the freed handle.
+ */
+describe("deliver-then-leave in one tick: stale PAKE continuation (R6F7)", () => {
+  beforeAll(() => {
+    setDurableStorage(new MemoryStorage());
+  });
+
+  it(
+    "awaitPakeFinish: share delivered then leave() before the microtask drains emits no onError, no durable mark, no wasm call",
+    { timeout: 15_000 },
+    async () => {
+      const repoGates = makeRepoGates();
+      const initiator = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      const responder = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      initiator.orchestrator.setPakeCode(PAKE_CODE);
+      responder.orchestrator.setPakeCode(PAKE_CODE);
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      // Swallow the responder's SPAKE2 share so the initiator parks inside
+      // awaitPakeShareBounded; the captured frame is re-injected by hand below.
+      const shareTap = captureAndDropFramesOfLength(b, PAKE_MESSAGE_BYTES);
+      responder.orchestrator.attachTransport(shareTap.transport);
+
+      await waitUntil(
+        "initiator parked in Verifying and responder share captured",
+        () =>
+          initiator.orchestrator.state === ConnectionState.Verifying &&
+          shareTap.captured.length >= 1,
+      );
+      // Settle a few ticks so the initiator is firmly inside the parked await
+      // and the responder has already run its own (legitimate) pakeFinish —
+      // the counter snapshot below must only see the initiator's stale call.
+      await tick(100);
+
+      const finishCallsBefore = pakeFinishCalls.count;
+      const share = shareTap.captured[0];
+      if (share === undefined) {
+        throw new Error("responder SPAKE2 share was not captured");
+      }
+      // THE RACE: deliver the share — the parked resolver resolves and queues
+      // the awaitPakeFinish continuation as a microtask — then leave() in the
+      // SAME synchronous tick, so teardownSession frees the WASM handle before
+      // that continuation drains.
+      a.deliver(share);
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+      expect(initiator.orchestrator.state).toBe(ConnectionState.Disconnected);
+
+      await tick(100);
+
+      // The stale continuation must surface as PakeError(Cancelled), swallowed
+      // by failHandshake: no phantom post-leave onError on either side.
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+      expect(responder.spies.onError.calls).toHaveLength(0);
+      // The freed WASM handle was never passed to pake_finish.
+      expect(pakeFinishCalls.count).toBe(finishCallsBefore);
+
+      // No durable auth-failed mark (repo + durable store): the conversation
+      // stays retryable — the pre-fix Mismatch would have bricked it.
+      const convoId = initiator.orchestrator.conversationId;
+      expect(convoId).not.toBeNull();
+      const cid = convoId as NonNullable<typeof convoId>;
+      expect(await initiator.repository.getAuthFailed(cid)).toBe(false);
+      expect(await getAuthFailedDurable(cid)).toBe(false);
+      expect(() => {
+        initiator.orchestrator.retry();
+      }).not.toThrow();
+      // retry() moved the initiator to Signaling; leave() re-settles it to
+      // Disconnected so no reconnect attempt dangles into later tests.
+      initiator.orchestrator.leave();
+    },
+  );
+
+  it(
+    "runPakeConfirmation: confirm delivered then leave() before the microtask drains emits no onError and no durable mark",
+    { timeout: 15_000 },
+    async () => {
+      // Mismatched codes: both sides complete pakeFinish with DIVERGENT
+      // secrets, so the delivered confirm tag genuinely fails verification —
+      // pre-fix the post-teardown resumption threw PakeError(Mismatch) into
+      // failHandshake, a durable auth failure for a session that was already
+      // dead. Post-fix the superseded re-check bails silently. (The responder
+      // DOES legitimately fail with Mismatch when the initiator's bad confirm
+      // arrives — that is the correct auth-failure path and is not asserted.)
+      const repoGates = makeRepoGates();
+      const initiator = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      const responder = await makeOrchestrator(repoGates, PAKE_PARK_TIMEOUT_MS);
+      initiator.orchestrator.setPakeCode(PAKE_CODE);
+      responder.orchestrator.setPakeCode("654321");
+      const invitation = await initiator.orchestrator.start();
+      await responder.orchestrator.join(invitation);
+
+      const { a, b } = linkLoopbackPair();
+      initiator.orchestrator.attachTransport(a);
+      // Swallow the responder's confirm tag so the initiator parks inside
+      // awaitPakeConfirmBounded after the share exchange completes.
+      const confirmTap = captureAndDropFramesOfLength(b, PAKE_CONFIRM_MESSAGE_BYTES);
+      responder.orchestrator.attachTransport(confirmTap.transport);
+
+      await waitUntil(
+        "initiator parked for confirm and responder confirm captured",
+        () =>
+          initiator.orchestrator.state === ConnectionState.Verifying &&
+          confirmTap.captured.length >= 1,
+      );
+      await tick(100);
+
+      const confirm = confirmTap.captured[0];
+      if (confirm === undefined) {
+        throw new Error("responder PAKE confirm was not captured");
+      }
+      a.deliver(confirm);
+      initiator.orchestrator.leave();
+      responder.orchestrator.leave();
+      expect(initiator.orchestrator.state).toBe(ConnectionState.Disconnected);
+      await tick(100);
+
+      expect(initiator.spies.onError.calls).toHaveLength(0);
+
+      // Initiator-side durable assertions only: the durable store is a
+      // module-level singleton shared by BOTH orchestrators in this process,
+      // and the responder legitimately marked it — a wrong code IS a real
+      // Mismatch auth failure on its side. In production the two peers write
+      // to different devices' stores; here the initiator's own repo and its
+      // authFailedCached (via retry()) are the isolatable signals. Pre-fix the
+      // stale continuation's Mismatch would have set both.
+      const convoId = initiator.orchestrator.conversationId;
+      expect(convoId).not.toBeNull();
+      const cid = convoId as NonNullable<typeof convoId>;
+      expect(await initiator.repository.getAuthFailed(cid)).toBe(false);
+      expect(() => {
+        initiator.orchestrator.retry();
+      }).not.toThrow();
+      initiator.orchestrator.leave();
     },
   );
 });

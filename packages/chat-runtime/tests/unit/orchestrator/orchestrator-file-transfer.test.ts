@@ -107,11 +107,11 @@ async function tick(ms = 50): Promise<void> {
  * The deferred-delivery transport means start is observable before the chunk
  * loop completes, giving the test a real in-flight window to cancel.
  */
-async function waitForStart(kit: OrchKit, timeoutMs = 2000): Promise<number> {
+async function waitForStart(kit: OrchKit, name = "big.bin", timeoutMs = 2000): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const started = kit.summaries.find(
-      (s) => s.direction === "sent" && s.bytesTransferred === 0 && s.name === "big.bin",
+      (s) => s.direction === "sent" && s.bytesTransferred === 0 && s.name === name,
     );
     if (started !== undefined) return started.transferId;
     await tick(5);
@@ -182,6 +182,50 @@ function backpressuredTransport(inner: PeerTransport): PeerTransport {
   };
 }
 
+/**
+ * R3F2 test seam: like {@link backpressuredTransport} but releasable. The
+ * first send arms the gate (`bufferedAmount` reports over-limit), parking
+ * any chunk loop at `waitForDrain`; `release()` drops the gate permanently
+ * and fires the captured drain listener so the parked send resumes and runs
+ * to completion. The handshake's own sends (Hello etc.) arm the gate long
+ * before any file transfer — only the drain check reads bufferedAmount.
+ */
+function releasableBackpressure(inner: PeerTransport): {
+  readonly transport: PeerTransport;
+  readonly release: () => void;
+} {
+  let armed = true;
+  let overLimit = false;
+  let drainListener: (() => void) | null = null;
+  const transport: PeerTransport = {
+    ready: true,
+    get bufferedAmount(): number {
+      return overLimit ? Number.MAX_SAFE_INTEGER : 0;
+    },
+    send: (bytes: Uint8Array): void => {
+      if (armed) overLimit = true;
+      inner.send(bytes);
+    },
+    setOnMessage: (h): void => {
+      inner.setOnMessage(h);
+    },
+    setOnDrain: (h): void => {
+      drainListener = h;
+    },
+    close: (): void => {
+      inner.close();
+    },
+  };
+  return {
+    transport,
+    release: (): void => {
+      armed = false;
+      overLimit = false;
+      drainListener?.();
+    },
+  };
+}
+
 describe("ConversationOrchestrator file transfer", () => {
   it("sendFile before Connected throws NotConnected", async () => {
     const kit = await makeOrchestrator();
@@ -239,7 +283,7 @@ describe("ConversationOrchestrator file transfer", () => {
     expect(transferId).toBeGreaterThan(0);
   });
 
-  it("cancelTransfer delegates to sender + receiver and emits cancelled", async () => {
+  it("cancelTransfer targets the given direction and emits cancelled once", async () => {
     const { initiator, responder } = await makeHandshakePair((t) => backpressuredTransport(t));
     // Use a transfer that will be in-flight: a multi-chunk payload big enough
     // to span multiple awaits but small enough to stay fast.
@@ -255,25 +299,100 @@ describe("ConversationOrchestrator file transfer", () => {
       "application/octet-stream",
     );
     // Wait for the sender's start hook to record the id (so cancel targets a
-    // real in-flight transfer rather than racing with allocation).
+    // real in-flight transfer rather than racing with allocation), then let
+    // the manifest be admitted by the responder's receiver.
     const startedId = await waitForStart(initiator);
-    initiator.orchestrator.cancelTransfer(startedId);
+    await tick(100);
+
+    // A "send"-direction cancel on the responder is a no-op — it has no
+    // outbound transfer for that id.
+    responder.orchestrator.cancelTransfer(startedId, "send");
+    expect(responder.cancelled).toHaveLength(0);
+    // A "receive"-direction cancel DOES drop the responder's inbound
+    // transfer and emits on that side. This must run BEFORE the initiator's
+    // send-cancel: the latter now emits a TransferCancel wire frame (R3F3)
+    // that would already have dropped the inbound state.
+    responder.orchestrator.cancelTransfer(startedId, "receive");
+    expect(responder.cancelled).toContain(startedId);
+
+    initiator.orchestrator.cancelTransfer(startedId, "send");
     await expect(sendPromise).rejects.toBeDefined();
 
     // R2/F3: the cancellation surfaces as EXACTLY ONE onTransferCancelled —
     // emitted by cancelTransfer itself; the rejected sendFile coroutine must
     // NOT emit a second event for the same id.
     expect(initiator.cancelled.filter((id) => id === startedId)).toHaveLength(1);
-    // Receiver-side cancel of the same id is a safe no-op when nothing is
-    // known yet; assert it does not throw.
-    expect(() => responder.orchestrator.cancelTransfer(startedId)).not.toThrow();
+  });
+
+  it("R3F2: cancelling an outbound send does not drop an inbound transfer with the same id", async () => {
+    // Sender and receiver allocate from the same id space (FIRST_TRANSFER_ID
+    // per side), so each peer's FIRST outbound send collides numerically with
+    // its first inbound transfer. Set up exactly that collision: both sends
+    // park after their manifests, so responder holds outbound 1_000_000 AND
+    // inbound 1_000_000 simultaneously.
+    const initiator = await makeOrchestrator();
+    const responder = await makeOrchestrator();
+    const invitation = await initiator.orchestrator.start();
+    await responder.orchestrator.join(invitation);
+    const { a, b } = linkLoopbackPair();
+    const gateA = releasableBackpressure(a);
+    initiator.orchestrator.attachTransport(gateA.transport);
+    responder.orchestrator.attachTransport(backpressuredTransport(b));
+    await waitForConnected(initiator.orchestrator);
+    await waitForConnected(responder.orchestrator);
+
+    const data = new Uint8Array(64 * 1024);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 31 + 7) & 0xff;
+
+    // initiator -> responder send parks after its manifest: responder's
+    // receiver admits inbound id 1_000_000.
+    const initiatorSend = initiator.orchestrator.sendFile(
+      data,
+      "big.bin",
+      "application/octet-stream",
+    );
+    const inboundId = await waitForStart(initiator);
+    // responder -> initiator send parks after ITS manifest: responder's
+    // sender holds outbound id 1_000_000 — numerically identical.
+    const responderSend = responder.orchestrator.sendFile(
+      data,
+      "share.bin",
+      "application/octet-stream",
+    );
+    const outboundId = await waitForStart(responder, "share.bin");
+    expect(outboundId).toBe(inboundId);
+    await tick(100); // let both manifests be admitted on the peer receivers
+
+    // The user cancels THEIR outbound send. Pre-fix this also dropped the
+    // inbound transfer sharing the id; now only the send side is cancelled.
+    responder.orchestrator.cancelTransfer(outboundId, "send");
+    await expect(responderSend).rejects.toBeDefined();
+    expect(responder.cancelled.filter((id) => id === outboundId)).toHaveLength(1);
+
+    // Proof the inbound transfer survived: release the initiator's gate so
+    // its chunks flow — if the cancel had dropped inbound state the late
+    // chunks would surface as UnknownTransfer errors and no file would land.
+    gateA.release();
+    await expect(initiatorSend).resolves.toBe(inboundId);
+    const deadline = Date.now() + 2000;
+    while (
+      !responder.received.some((f) => f.manifest.name === "big.bin") &&
+      Date.now() < deadline
+    ) {
+      await tick(10);
+    }
+    expect(responder.received.some((f) => f.manifest.name === "big.bin")).toBe(true);
+    expect(responder.errors.filter((e) => e.id === inboundId)).toHaveLength(0);
+
+    responder.orchestrator.leave();
+    initiator.orchestrator.leave();
   });
 
   it("R2/F3: cancelling an unknown id is a silent no-op — no emission, no throw", async () => {
     const { initiator } = await makeHandshakePair();
     const unknownId = 4_242_424;
 
-    expect(() => initiator.orchestrator.cancelTransfer(unknownId)).not.toThrow();
+    expect(() => initiator.orchestrator.cancelTransfer(unknownId, "send")).not.toThrow();
 
     // Neither the sender nor the receiver knows the id, so no event fires.
     expect(initiator.cancelled).toHaveLength(0);

@@ -49,6 +49,20 @@ export class FrameReceiver {
   private readonly replayWindow = new ReplayWindow();
   private readonly transfers = new Map<number, ActiveTransfer>();
   private totalBufferedBytes = 0;
+  /**
+   * R3/F4: aggregate declared-but-not-yet-received bytes reserved by admitted
+   * manifests (`manifest.size - transfer.receivedBytes`, summed over live
+   * transfers). The manifest-admission budget check must charge the DECLARED
+   * size — not just bytes already buffered — or up to
+   * MAX_CONCURRENT_TRANSFERS manifests each declaring
+   * MAX_INCOMPLETE_TRANSFER_BYTES would all be admitted while committing 4x
+   * the aggregate budget of prospective buffering. A stored chunk converts
+   * reserved bytes into real buffered bytes (decremented here, incremented in
+   * `totalBufferedBytes`), so the committed total `totalBufferedBytes +
+   * outstandingDeclaredBytes` is invariant across chunk stores and is fully
+   * released by {@link dropTransfer}.
+   */
+  private outstandingDeclaredBytes = 0;
   private readonly inactivityTimeoutMs: number;
   private readonly inactivityTickMs: number;
   /**
@@ -154,7 +168,15 @@ export class FrameReceiver {
     if (this.tornDown) return;
     switch (frame.aad.frameType) {
       case FrameType.Text:
-        this.config.onText(plaintext);
+        // R3/F5: contain host-callback throws. The frame authenticated and
+        // decoded fine — a throwing onText is an application bug, not a wire
+        // violation, so it must not reject ingest (callers treat a rejection
+        // as session-fatal). Surface it via the non-fatal onError hook.
+        try {
+          this.config.onText(plaintext);
+        } catch (err: unknown) {
+          this.config.onError?.(err);
+        }
         return;
       case FrameType.Control:
         this.handleControl(plaintext);
@@ -217,7 +239,14 @@ export class FrameReceiver {
       this.cancelTransfer(transferId);
       return;
     }
-    this.config.onControl(subtype, payload);
+    // R3/F5: same containment as onText — a throwing host onControl is an
+    // application bug, not a wire violation, and must not reject ingest into
+    // the caller's session-fatal path.
+    try {
+      this.config.onControl(subtype, payload);
+    } catch (err: unknown) {
+      this.config.onError?.(err);
+    }
   }
 
   /**
@@ -248,18 +277,29 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.TransferInactive,
         `transfer ${transferId} is already active`,
+        transferId,
       );
     }
     if (this.transfers.size >= MAX_CONCURRENT_TRANSFERS) {
       throw new FramingError(
         FramingErrorCode.ConcurrentTransfersExceeded,
         `concurrent transfer limit (${MAX_CONCURRENT_TRANSFERS}) reached`,
+        transferId,
       );
     }
-    if (this.totalBufferedBytes + manifest.size > MAX_INCOMPLETE_TRANSFER_BYTES) {
+    // R3/F4: charge the manifest's DECLARED size against the aggregate budget
+    // — `totalBufferedBytes + outstandingDeclaredBytes` is the committed total
+    // (buffered bytes plus the unreceived remainder of every admitted
+    // manifest). Without the reservation a peer could admit
+    // MAX_CONCURRENT_TRANSFERS manifests each declaring the full budget.
+    if (
+      this.totalBufferedBytes + this.outstandingDeclaredBytes + manifest.size >
+      MAX_INCOMPLETE_TRANSFER_BYTES
+    ) {
       throw new FramingError(
         FramingErrorCode.SizeExceeded,
         `transfer size ${manifest.size} would exceed incomplete-transfer budget (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+        transferId,
       );
     }
     const chunks: (Uint8Array | null)[] =
@@ -281,9 +321,13 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.TransferInactive,
         `transfer ${transferId} is already active`,
+        transferId,
       );
     }
     this.transfers.set(transferId, transfer);
+    // R3/F4: reserve the declared size — released progressively as chunks land
+    // and in full by dropTransfer.
+    this.outstandingDeclaredBytes += manifest.size;
     if (manifest.chunkCount === 0) {
       await this.completeTransfer(transferId, transfer);
     }
@@ -299,12 +343,14 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.UnknownTransfer,
         `chunk for unknown or inactive transfer ${transferId}`,
+        transferId,
       );
     }
     if (chunkId < 0 || chunkId >= transfer.manifest.chunkCount) {
       throw new FramingError(
         FramingErrorCode.ChunkOutOfRange,
         `chunk ${chunkId} out of range [0, ${transfer.manifest.chunkCount})`,
+        transferId,
       );
     }
     // LW-4 (defense-in-depth): reject a non-canonical chunk length BEFORE the
@@ -322,12 +368,14 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.Malformed,
         `chunk ${chunkId} length ${plaintext.length} does not match canonical length ${expectedLength} for transfer ${transferId}`,
+        transferId,
       );
     }
     if (transfer.chunks[chunkId] !== null) {
       throw new FramingError(
         FramingErrorCode.DuplicateChunk,
         `chunk ${chunkId} already received for transfer ${transferId}`,
+        transferId,
       );
     }
     const projectedReceived = transfer.receivedBytes + plaintext.length;
@@ -335,19 +383,24 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.SizeExceeded,
         `chunk ${chunkId} would exceed declared size ${transfer.manifest.size}`,
+        transferId,
       );
     }
     if (this.totalBufferedBytes + plaintext.length > MAX_INCOMPLETE_TRANSFER_BYTES) {
       throw new FramingError(
         FramingErrorCode.SizeExceeded,
         `chunk would exceed incomplete-transfer budget (${MAX_INCOMPLETE_TRANSFER_BYTES})`,
+        transferId,
       );
     }
     transfer.chunks[chunkId] = plaintext;
     transfer.receivedCount += 1;
     transfer.receivedBytes += plaintext.length;
     transfer.lastActivity = Date.now();
+    // R3/F4: a stored chunk converts reserved declared bytes into real buffered
+    // bytes — the committed total (buffered + outstanding) is unchanged.
     this.totalBufferedBytes += plaintext.length;
+    this.outstandingDeclaredBytes -= plaintext.length;
 
     if (transfer.receivedCount === transfer.manifest.chunkCount) {
       await this.completeTransfer(transferId, transfer);
@@ -364,6 +417,7 @@ export class FrameReceiver {
         throw new FramingError(
           FramingErrorCode.Malformed,
           `missing chunk ${i} during reassembly of transfer ${transferId}`,
+          transferId,
         );
       }
       reassembled.set(chunk, offset);
@@ -374,6 +428,7 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.SizeExceeded,
         `reassembled length ${offset} does not match declared size ${transfer.manifest.size}`,
+        transferId,
       );
     }
     const actualHash = await sha256(reassembled);
@@ -382,6 +437,7 @@ export class FrameReceiver {
       throw new FramingError(
         FramingErrorCode.HashMismatch,
         `reassembled content hash does not match manifest for transfer ${transferId}`,
+        transferId,
       );
     }
     // R2:F2: re-check after the sha256 await. A teardown that raced the await
@@ -397,7 +453,17 @@ export class FrameReceiver {
     }
     const file: ReceivedFile = { manifest: transfer.manifest, data: reassembled };
     this.dropTransfer(transferId, transfer);
-    this.config.onFileComplete(file);
+    // R3/F5: the transfer is already verified, reassembled, and dropped — a
+    // throwing host onFileComplete is an application bug, not a wire
+    // violation. Contain it and surface via the non-fatal onTransferError hook
+    // instead of letting the throw reject ingest (callers treat a rejection
+    // as session-fatal; an already-completed file must not tear the session
+    // down).
+    try {
+      this.config.onFileComplete(file);
+    } catch (err: unknown) {
+      this.config.onTransferError?.(file.manifest.transferId, err);
+    }
   }
 
   private dropTransfer(transferId: number, transfer: ActiveTransfer): void {
@@ -408,6 +474,10 @@ export class FrameReceiver {
     if (transfer.dropped) return;
     transfer.dropped = true;
     this.totalBufferedBytes -= transfer.receivedBytes;
+    // R3/F4: release the transfer's remaining declared-byte reservation
+    // (declared size minus what was actually received — zero for a completed
+    // transfer). Mirrored against the charge in handleManifest.
+    this.outstandingDeclaredBytes -= transfer.manifest.size - transfer.receivedBytes;
     this.transfers.delete(transferId);
   }
 }

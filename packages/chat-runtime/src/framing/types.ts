@@ -63,6 +63,23 @@ export interface FrameReceiverConfig extends FrameReceiverHandlers {
    */
   readonly onTransferTimeout?: (transferId: number) => void;
   /**
+   * R3/F5: non-fatal notification that the host's `onFileComplete` callback
+   * threw. By the time it fires the transfer has already been hash-verified,
+   * reassembled, and dropped — a throwing host handler is an application bug,
+   * not a wire violation, so the receiver contains it here instead of
+   * rejecting `ingest` (which callers would treat as session-fatal).
+   * Additive: callers that omit it silently drop the host error.
+   */
+  readonly onTransferError?: (transferId: number, error: unknown) => void;
+  /**
+   * R3/F5: non-fatal notification that the host's `onText` or `onControl`
+   * callback threw — contained for the same reason as
+   * {@link onTransferError}. The frame itself was authenticated and decoded
+   * successfully; only the host's handler failed. Additive: callers that omit
+   * it silently drop the host error.
+   */
+  readonly onError?: (error: unknown) => void;
+  /**
    * Max wall-clock gap (ms) between activity events on a single transfer
    * before the sweep evicts it. Defaults to 120_000 (2 minutes). CR-5.
    */

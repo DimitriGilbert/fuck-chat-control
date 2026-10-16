@@ -1224,8 +1224,18 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
           return;
         }
       }
-      // Otherwise delegate to the orchestrator (sender + receiver).
-      session.orchestrator.cancelTransfer(transferId);
+      // Otherwise delegate to the orchestrator. R3F2: the orchestrator's
+      // cancel is direction-aware over an id space shared between the send
+      // and receive sides, so resolve the direction from the snapshot's own
+      // TransferState — a "send" cancel must never drop a same-id inbound
+      // transfer. A snapshot miss means the id is a send still in its
+      // hashing window (inbound transfers only enter the snapshot at
+      // completion), so "send" is the correct fallback.
+      const tracked = session.transfers.find((t) => t.id === transferId);
+      session.orchestrator.cancelTransfer(
+        transferId,
+        tracked?.direction === "received" ? "receive" : "send",
+      );
     },
 
     getReceivedFile(id: ConversationId, transferId: number): ReceivedFile | null {
@@ -1370,7 +1380,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
             transfer.status === "receiving"
           ) {
             try {
-              session.orchestrator.cancelTransfer(transfer.id);
+              session.orchestrator.cancelTransfer(
+                transfer.id,
+                transfer.direction === "received" ? "receive" : "send",
+              );
             } catch {
               // best-effort: the orchestrator may have already torn the
               // transfer down (e.g. peer disconnect). The snapshot wipe below
@@ -1441,7 +1454,10 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
             transfer.status === "receiving"
           ) {
             try {
-              session.orchestrator.cancelTransfer(transfer.id);
+              session.orchestrator.cancelTransfer(
+                transfer.id,
+                transfer.direction === "received" ? "receive" : "send",
+              );
             } catch {
               // best-effort: the orchestrator may have already torn the
               // transfer down. The snapshot wipe below is authoritative.

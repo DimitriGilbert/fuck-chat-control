@@ -268,16 +268,12 @@ describe("ConversationOrchestrator PAKE handshake timeout (HIGH-A)", () => {
     expect(initiator.orchestrator.state).toBe(ConnectionState.Disconnected);
 
     // Let the teardown-driven rejection propagate through the parked
-    // verifyPeerAndComplete await -> failHandshake. The Cancelled error is
-    // expected to surface here via onError (the rejection has to go somewhere);
-    // capture the baseline AFTER it settles so the leak assertion below measures
-    // only LATE activity, not this legitimate one-shot emission.
+    // verifyPeerAndComplete await -> failHandshake. R6F2: the PakeError(Cancelled)
+    // is swallowed there — it is raised BY teardownSession itself, so emitting it
+    // via onError would be a phantom post-leave error for a user-initiated
+    // teardown. Assert no onError fired at all.
     await tick(50);
-    const cancelledErrors = initiator.spies.onError.calls
-      .map((c) => c[0])
-      .filter((e): e is PakeError => e instanceof PakeError)
-      .filter((e) => e.code === PakeErrorCode.Cancelled);
-    expect(cancelledErrors.length).toBe(1);
+    expect(initiator.spies.onError.calls).toHaveLength(0);
 
     // H1 regression: a teardown-driven PakeError(Cancelled) must NOT be
     // classified as a durable auth failure. Before the fix, isAuthFailureError
