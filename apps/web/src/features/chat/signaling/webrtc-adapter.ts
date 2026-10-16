@@ -255,7 +255,22 @@ export class WebRtcAdapter implements PeerConnectionInterface {
   }
 
   public createDataChannel(): DataChannelTransport {
-    if (this.dataChannel !== null) {
+    // Only a LIVE channel blocks creation. RTCDataChannel.close() flips
+    // readyState to "closing" SYNCHRONOUSLY — "closed" only arrives via a
+    // queued task — so a `!== "closed"` guard still observes "closing" on
+    // the same-tick turnover path (handlePeerJoin → releaseNegotiation →
+    // discardChannel → initiateOffer → createDataChannel) and throws, which
+    // silently kills the re-offer. "connecting"/"open" are the only live
+    // states; a "closing"/"closed" channel is exactly the dead reference the
+    // bridge discards before re-offering (a glare-rolled-back local channel,
+    // or the stale channel released on seat turnover), so release it and let
+    // renegotiation create a fresh one. The bridge never legitimately needs
+    // two concurrent local channels on one peer connection.
+    const existing = this.dataChannel;
+    if (
+      existing !== null &&
+      (existing.readyState === "connecting" || existing.readyState === "open")
+    ) {
       throw new Error("A data channel has already been created");
     }
     const channel = this.peerConnection.createDataChannel(DATA_CHANNEL_LABEL, {

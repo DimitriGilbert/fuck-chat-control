@@ -240,11 +240,23 @@ export function wireBridge(params: {
     peerConnectionFactory: params.peerConnectionFactory,
     iceServers: params.iceServers,
     transportReady: (transport: PeerTransport): void => {
-      try {
-        orchestrator.attachTransport(transport);
-      } catch {
-        // best-effort; surfaced via the orchestrator's onError handler.
-      }
+      // R7F7: let an attachTransport throw PROPAGATE into the bridge's
+      // maybeFireTransportReady — do NOT swallow it here. The bridge latches
+      // transportReadyFired and arms the post-handshake broker teardown only
+      // on success; the previous best-effort catch armed those for a channel
+      // that could never reach the orchestrator — e.g. a turnover re-offer
+      // while the orchestrator is still Connected (attachTransport accepts
+      // only Waiting/Signaling, and throws BEFORE mutating, so a rejected
+      // attach leaves handshake state untouched). Propagation is safe: the
+      // callback only ever runs inside the bridge's data-channel /
+      // connection-state event dispatch, so the throw surfaces as a reported
+      // handler error — never an unhandled rejection — and the un-latched
+      // bridge can retry the attach on the next channel/state event. The
+      // suggested "harmless" case (orchestrator Connected with this exact
+      // transport already attached) cannot arise: once the latch is set the
+      // bridge never invokes the callback again, and attachTransport wraps
+      // the channel in a fresh PeerTransport on every attempt.
+      orchestrator.attachTransport(transport);
     },
     onPeerJoin: params.onPeerJoin,
     onPeerLeave: params.onPeerLeave,

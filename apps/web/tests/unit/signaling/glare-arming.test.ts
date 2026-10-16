@@ -217,12 +217,14 @@ describe("R3F5: glare flag armed at offer initiation (not send time)", () => {
     bridge.start();
     socket.serverOpen();
 
-    // Drive the real initiateOffer path directly so the test controls when
-    // the parked createOffer resolves (any notified side may originate —
-    // handlePeerJoin does not gate on role). It parks inside createOffer
-    // with the glare flag armed at initiation.
-    const internal = bridge as unknown as { initiateOffer(): Promise<void> };
-    void internal.initiateOffer();
+    // Peer join → the real initiateOffer path runs and PARKS inside
+    // createOffer with the glare flag armed at initiation (any notified
+    // side may originate — handlePeerJoin does not gate on role). Delivering
+    // a real join also seats peer presence, so the inbound offer below is
+    // dispatched straight to onOffer rather than through the auto-promotion
+    // peer-join path — which, post-R5F1, is a fresh presence edge that would
+    // release the nascent offer instead of colliding with it.
+    deliver(socket, { t: "join", roomId: roomHex(roomId) });
     await flush();
     expect(fakePc.localDescTypes).not.toContain("offer");
 

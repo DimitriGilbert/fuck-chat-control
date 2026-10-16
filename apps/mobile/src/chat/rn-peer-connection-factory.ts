@@ -118,6 +118,17 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
   private drainListener: (() => void) | null = null;
   private messageHandler: ((bytes: Uint8Array) => void) | null = null;
   private openListener: (() => void) | null = null;
+  /**
+   * Set by {@link close}. Unlike the DOM — where RTCDataChannel.close()
+   * flips readyState to "closing" synchronously — react-native-webrtc's
+   * close() only calls into the native module; `_readyState` updates later
+   * via the async `dataChannelStateChanged` event. A locally-closed channel
+   * therefore keeps reporting its last live state ("connecting"/"open")
+   * until that event lands, so the single-channel guard in
+   * {@link RnPeerConnection.createDataChannel} cannot rely on readyState
+   * alone to tell a discarded channel from a live one.
+   */
+  private locallyClosed = false;
 
   public constructor(channel: RnDataChannel) {
     this.channel = channel;
@@ -164,6 +175,19 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
     return this.channel.readyState === "open";
   }
 
+  /**
+   * Whether this channel is still live for the
+   * {@link RnPeerConnection.createDataChannel} single-channel guard: not
+   * locally closed AND the last-seen native readyState is a live one
+   * ("connecting" or "open"). Mirrors the web adapter's guard.
+   */
+  public get live(): boolean {
+    return (
+      !this.locallyClosed &&
+      (this.channel.readyState === "connecting" || this.channel.readyState === "open")
+    );
+  }
+
   public onOpen(listener: () => void): void {
     this.openListener = listener;
   }
@@ -184,6 +208,7 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
   }
 
   public close(): void {
+    this.locallyClosed = true;
     this.channel.onopen = null;
     this.channel.onmessage = null;
     this.channel.onbufferedamountlow = null;
@@ -203,7 +228,7 @@ class RnDataChannelTransport implements DataChannelTransportInterface {
 class RnPeerConnection implements PeerConnectionInterface {
   private readonly peerConnection: RnPeerConnectionInstance;
   private handlers: PeerConnectionFactoryOptions;
-  private dataChannel: RnDataChannel | null = null;
+  private dataChannel: RnDataChannelTransport | null = null;
   private pendingIceCandidates: IceCandidate[] = [];
 
   public constructor(options: PeerConnectionFactoryOptions) {
@@ -286,15 +311,25 @@ class RnPeerConnection implements PeerConnectionInterface {
   }
 
   public createDataChannel(): DataChannelTransportInterface {
-    if (this.dataChannel !== null) {
+    // Only a LIVE channel blocks creation — parity with the web adapter's
+    // readyState guard. The turnover path (peer-join → releaseNegotiation →
+    // discardChannel → initiateOffer → createDataChannel) closes the stale
+    // channel and re-creates in the same tick; RN's close() leaves
+    // readyState at its last live value until the async native statechange
+    // event lands, so liveness is decided by the transport's locallyClosed
+    // flag plus the last-seen readyState (see RnDataChannelTransport.live),
+    // not by `this.dataChannel !== null` alone.
+    const existing = this.dataChannel;
+    if (existing !== null && existing.live) {
       throw new Error("A data channel has already been created");
     }
     const channel = this.peerConnection.createDataChannel(DATA_CHANNEL_LABEL, {
       ordered: true,
       negotiated: false,
     });
-    this.dataChannel = channel;
-    return new RnDataChannelTransport(channel);
+    const transport = new RnDataChannelTransport(channel);
+    this.dataChannel = transport;
+    return transport;
   }
 
   public get connectionState(): PeerConnectionState {

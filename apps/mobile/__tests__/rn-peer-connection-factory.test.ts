@@ -244,6 +244,48 @@ describe("rnPeerConnectionFactory", () => {
     pc.close();
   });
 
+  it("createDataChannel throws while the existing channel is live", () => {
+    const pc = rnPeerConnectionFactory({}) as PeerConnection;
+    pc.createDataChannel();
+    // Fresh fake channel starts "connecting" — live.
+    expect(() => pc.createDataChannel()).toThrow("already been created");
+    // "open" is equally live.
+    const first = fakePc.createDataChannel.mock.results[0]?.value as FakeRTCDataChannel;
+    first.readyState = "open";
+    expect(() => pc.createDataChannel()).toThrow("already been created");
+    expect(fakePc.createDataChannel).toHaveBeenCalledTimes(1);
+    pc.close();
+  });
+
+  it("createDataChannel permits re-creation once the prior channel is dead", () => {
+    const pc = rnPeerConnectionFactory({}) as PeerConnection;
+    const t1 = pc.createDataChannel();
+    const first = fakePc.createDataChannel.mock.results[0]?.value as FakeRTCDataChannel;
+    first.readyState = "open";
+
+    // Turnover path: discardChannel calls transport.close(). RN's
+    // RTCDataChannel.close() does NOT flip readyState synchronously — the
+    // native dataChannelStateChanged event delivers "closed" on a later
+    // tick — so readyState still reads "open" here. The adapter must
+    // nevertheless allow the same-tick re-create (this is the exact
+    // re-offer sequence: peer-join → releaseNegotiation → initiateOffer).
+    t1.close();
+    expect(first.readyState).toBe("open");
+    const t2 = pc.createDataChannel();
+    expect(t2).not.toBe(t1);
+
+    // A natively-reported dead channel is replaceable too, even without an
+    // explicit transport close.
+    const second = fakePc.createDataChannel.mock.results[1]?.value as FakeRTCDataChannel;
+    second.readyState = "closing";
+    pc.createDataChannel();
+    const third = fakePc.createDataChannel.mock.results[2]?.value as FakeRTCDataChannel;
+    third.readyState = "closed";
+    pc.createDataChannel();
+    expect(fakePc.createDataChannel).toHaveBeenCalledTimes(4);
+    pc.close();
+  });
+
   it("sets bufferedAmountLowThreshold to 1 so RN strict-< dispatch can fire", () => {
     // react-native-webrtc's bufferedamountlow dispatch is strict `<`:
     // `if (bufferedAmount < bufferedAmountLowThreshold)`. With threshold 0 the

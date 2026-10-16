@@ -102,6 +102,19 @@ export class WebRtcBridge {
   };
   private closed = false;
   /**
+   * Negotiation epoch (R7F8). Bumped by {@link reconnect} and {@link close};
+   * every async negotiation coroutine captures it at entry and re-checks it
+   * after each `await`. Without the guard, a parked `initiateOffer` /
+   * `handleRemoteOffer` continuation that wakes after reconnect would act on
+   * the FRESH adapter and socket with stale SDP — e.g. pushing a dead
+   * offer's `setLocalDescription` onto the replacement peer connection and
+   * transmitting a second offer over the re-dialed socket (the
+   * `localOfferInFlight` flag alone cannot catch this: the fresh
+   * negotiation legitimately re-arms it). Same pattern as the
+   * orchestrator's `handshakeGeneration`.
+   */
+  private negotiationGeneration = 0;
+  /**
    * Set once the P2P data channel has carried its first open event and the
    * bridge has fired `transportReady`. While true, the broker socket's close
    * is expected (it is the post-handshake teardown) and must not be surfaced
@@ -123,9 +136,7 @@ export class WebRtcBridge {
           this.options.onPeerJoin?.();
         },
         onPeerLeave: (): void => {
-          // The broker says the peer left the room. Surface the drop to the
-          // orchestrator so it can move to Disconnected and offer retry.
-          this.options.onPeerLeave?.();
+          this.handlePeerLeave();
         },
         onOffer: (sdp: unknown): void => {
           void this.handleRemoteOffer(sdp);
@@ -135,6 +146,14 @@ export class WebRtcBridge {
           // no longer in flight. Release both the bridge's local flag and the
           // glare resolver's flag so a subsequent remote offer is answered
           // (rather than treated as a glare collision).
+          // Known residual (same-epoch stale continuation): these clears are
+          // unconditional — a stale answer addressed to a SUPERSEDED
+          // same-generation attempt (e.g. a turnover re-offer re-armed the
+          // flags while the answer was in flight) disarms the newer attempt
+          // too. Self-limiting: an answer can only arrive for an offer we
+          // actually sent, so the window is bounded by the re-offer
+          // completing, and the loser abandons cleanly at its next
+          // isLiveOffer check rather than corrupting the exchange.
           this.nego.localOfferInFlight = false;
           this.signaling.endOffer();
           void this.adapter.setRemoteDescription(sdp as SessionDescription).catch(() => {
@@ -217,6 +236,10 @@ export class WebRtcBridge {
    */
   public reconnect(): void {
     if (this.closed) return;
+    // R7F8: invalidate every parked negotiation continuation BEFORE swapping
+    // anything — a coroutine that wakes mid-swap must observe the stale
+    // epoch and bail rather than act on half-swapped state.
+    this.negotiationGeneration++;
     // Cancel a pending post-handshake grace teardown: letting it fire after
     // the fresh dial would relay `leave` and close the NEW connection's
     // socket.
@@ -226,12 +249,7 @@ export class WebRtcBridge {
     }
     // Swap in a fresh peer connection. The identity guard in createAdapter
     // drops callbacks still in flight from the dead one.
-    try {
-      this.nego.channel?.close();
-    } catch {
-      // best-effort
-    }
-    this.nego.channel = null;
+    this.discardChannel();
     try {
       this.adapter.close();
     } catch {
@@ -263,6 +281,7 @@ export class WebRtcBridge {
   public close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.negotiationGeneration++;
     if (this.brokerTeardownTimer !== null) {
       clearTimeout(this.brokerTeardownTimer);
       this.brokerTeardownTimer = null;
@@ -279,12 +298,7 @@ export class WebRtcBridge {
     // without an explicit close here its listeners (bufferedamountlow /
     // message / open) stay attached to the underlying RTCDataChannel until
     // the browser GCs it.
-    try {
-      this.nego.channel?.close();
-    } catch {
-      // best-effort
-    }
-    this.nego.channel = null;
+    this.discardChannel();
     try {
       this.adapter.close();
     } catch {
@@ -318,13 +332,32 @@ export class WebRtcBridge {
     // Offers are ordinary relayed SDP, so this stays within the frozen wire
     // protocol. Create the data channel BEFORE the offer so the SDP
     // advertises it, and offer at most once.
-    if (this.nego.channel !== null) return;
-    if (this.nego.localOfferInFlight) return;
+    //
+    // R5F1/R7F9 (Phase 4): every broker `join` is a FRESH presence edge — a
+    // join arriving while a channel or in-flight offer already exists can
+    // only mean seat turnover (the departed peer's silent leave is never
+    // relayed; see BrokerConnection.handleLeave). The existing negotiation
+    // belonged to the departed peer: release it so the re-offer below is
+    // not swallowed by the guards it used to enforce. The same release is
+    // what makes it safe for the signaling client to fire onPeerJoin on
+    // EVERY inbound join.
+    if (this.nego.channel !== null || this.nego.localOfferInFlight) {
+      this.releaseNegotiation();
+    }
     void this.initiateOffer();
   }
 
   private async initiateOffer(): Promise<void> {
     if (this.closed) return;
+    // R7F8: capture the negotiation epoch. reconnect()/close() bump it; a
+    // continuation that wakes in a newer epoch must not act on the fresh
+    // adapter/socket with this attempt's stale SDP.
+    const generation = this.negotiationGeneration;
+    // The channel THIS attempt created, tracked independently of
+    // `nego.channel` so the catch can release a channel that recordChannel
+    // never adopted and the post-await checks can detect this channel
+    // having been superseded.
+    let channel: DataChannelTransport | null = null;
     // The whole body — including the synchronous createDataChannel/
     // recordChannel section — lives inside the try: a sync throw there must
     // unwind through the catch below (which disarms the resolver) instead of
@@ -343,33 +376,79 @@ export class WebRtcBridge {
       // wire.
       this.signaling.beginOffer();
       // Create the channel first; the offer SDP will reference it.
-      const channel = this.adapter.createDataChannel();
+      channel = this.adapter.createDataChannel();
       this.recordChannel(channel);
       this.nego.localOfferInFlight = true;
       const offer = await this.adapter.createOffer();
       // R3F5: the awaits above can straddle a glare resolution. If the
-      // polite-side rollback in handleRemoteOffer (or the failure path below)
-      // cleared localOfferInFlight while we were parked, this nascent offer is
-      // superseded — abandon it instead of pushing a stale second offer on top
-      // of the exchange that just completed.
-      if (!this.nego.localOfferInFlight) return;
+      // polite-side rollback in handleRemoteOffer (or the failure path
+      // below) superseded this nascent offer while we were parked, abandon
+      // it instead of pushing a stale second offer on top of the exchange
+      // that just completed. The channel-identity check (R7F1) also covers
+      // a FRESH attempt having re-armed localOfferInFlight in the meantime.
+      if (!this.isLiveOffer(generation, channel)) {
+        this.closeIfUnadopted(channel);
+        return;
+      }
       await this.adapter.setLocalDescription(offer);
-      if (!this.nego.localOfferInFlight) return;
+      if (!this.isLiveOffer(generation, channel)) {
+        this.closeIfUnadopted(channel);
+        return;
+      }
       // sendOffer re-asserts the glare flag (idempotent — armed at initiation
       // above); it stays true until the matching answer arrives or we roll
       // back — do NOT endOffer() here.
       this.signaling.sendOffer(offer);
     } catch {
+      // R7F1/R7F9: release the channel THIS attempt created — adopted or
+      // not — so a rolled-back or failed offer cannot leave a corpse in
+      // `nego.channel` that starves the answering side's onDataChannel
+      // (recordChannel is first-wins) or a rejoin's fresh offer.
+      try {
+        channel?.close();
+      } catch {
+        // best-effort
+      }
+      if (generation !== this.negotiationGeneration) return;
+      if (this.nego.channel === channel) {
+        this.nego.channel = null;
+      }
+      // Known residual (same-epoch stale continuation): when a NEWER
+      // same-generation attempt re-armed the flags while this attempt was
+      // parked (e.g. a turnover join re-offered while our createOffer/
+      // setLocalDescription was in flight), the generation check cannot tell
+      // the flags' owner — the clears below disarm the newer attempt as
+      // well. The window is self-limiting: the newer attempt's next
+      // isLiveOffer check sees the cleared flag and abandons cleanly, so the
+      // worst outcome is one aborted offer per turnover, never a stale offer
+      // on the wire.
       this.nego.localOfferInFlight = false;
-      this.nego.channel = null;
       // Reset the glare resolver's in-flight flag too so a later remote offer
       // is answered rather than treated as a glare collision.
       this.signaling.endOffer();
     }
   }
 
+  /**
+   * Whether a parked {@link initiateOffer} continuation still owns the live
+   * negotiation (R7F8): same epoch (no reconnect/close intervened), its
+   * offer still marked in-flight (not rolled back by glare, not cleared by
+   * a peer-leave release), and its channel still the adopted one (not
+   * replaced by a fresh attempt's channel or the answering side's
+   * onDataChannel).
+   */
+  private isLiveOffer(generation: number, channel: DataChannelTransport | null): boolean {
+    return (
+      generation === this.negotiationGeneration &&
+      this.nego.localOfferInFlight &&
+      channel !== null &&
+      this.nego.channel === channel
+    );
+  }
+
   private async handleRemoteOffer(sdp: unknown): Promise<void> {
     if (this.closed) return;
+    const generation = this.negotiationGeneration;
     const outcome = this.signaling.resolveRemoteOffer();
     if (outcome === "ignore") return;
     // We will answer. If we have a local offer in flight, the glare resolver
@@ -385,24 +464,111 @@ export class WebRtcBridge {
         // RTCPeerConnection is in an indeterminate state. Surface as a peer
         // drop so the orchestrator moves to Disconnected; do NOT proceed to
         // setRemoteDescription (it would fail with InvalidStateError).
+        if (generation !== this.negotiationGeneration) return;
         this.nego.localOfferInFlight = false;
         this.signaling.endOffer();
+        this.discardChannel();
         this.options.onPeerLeave?.();
         return;
       }
+      if (generation !== this.negotiationGeneration) return;
       this.nego.localOfferInFlight = false;
       // The local offer is gone; release the glare resolver's in-flight flag
       // so it answers (not ignores) the next remote offer.
       this.signaling.endOffer();
+      // R7F1 (HIGH): the rolled-back offer's locally-created channel is
+      // dead — its m=application section never made it into the winning
+      // offer. Close and clear it BEFORE applying the remote description so
+      // the answering side's channel (delivered via adapter.onDataChannel
+      // while setRemoteDescription processes the offer) is adopted by
+      // recordChannel instead of being dropped by its first-wins guard.
+      // Without this both ends send on disjoint SCTP streams and every
+      // frame is silently dropped.
+      this.discardChannel();
     }
     try {
       await this.adapter.setRemoteDescription(sdp as SessionDescription);
+      if (generation !== this.negotiationGeneration) return;
       const answer = await this.adapter.createAnswer();
+      if (generation !== this.negotiationGeneration) return;
       await this.adapter.setLocalDescription(answer);
+      if (generation !== this.negotiationGeneration) return;
       this.signaling.sendAnswer(answer);
     } catch {
-      // best-effort; the connection will fail and the orchestrator surfaces it
+      // best-effort; the connection will fail and the orchestrator surfaces
+      // it. R7F9: if the channel never went live, release it so a peer
+      // rejoin gets a fresh offer rather than hitting the first-wins guard
+      // with a corpse — but never tear down a channel that already carried
+      // the session (a stray renegotiation failure must not kill live P2P).
+      if (generation === this.negotiationGeneration && !this.nego.transportReadyFired) {
+        this.discardChannel();
+      }
     }
+  }
+
+  /**
+   * R7F9: release every latch tied to the current negotiation — the in-
+   * flight-offer flag, the data channel, the transport-ready latch, the
+   * post-handshake suppression, and a pending broker-teardown timer. Used
+   * by the three "this negotiation is dead" edges: an inbound peer-leave, a
+   * terminal connection-state transition, and a fresh-presence join (seat
+   * turnover). Resetting `transportReadyFired` here is what lets a LATER
+   * negotiation on this same bridge attach its channel; the timer cancel
+   * keeps a grace teardown armed by the dead session from closing the
+   * socket mid-renegotiation.
+   */
+  private releaseNegotiation(): void {
+    this.nego.localOfferInFlight = false;
+    this.nego.transportReadyFired = false;
+    this.signaling.endOffer();
+    this.discardChannel();
+    if (this.brokerTeardownTimer !== null) {
+      clearTimeout(this.brokerTeardownTimer);
+      this.brokerTeardownTimer = null;
+    }
+    this.suppressSignalingClose = false;
+  }
+
+  /**
+   * Close and clear the channel recorded in {@link NegotiationState} — the
+   * single place `nego.channel` is released. Idempotent; the channel's own
+   * close() is also idempotent so a doubly-released channel is safe.
+   */
+  private discardChannel(): void {
+    const channel = this.nego.channel;
+    if (channel === null) return;
+    this.nego.channel = null;
+    try {
+      channel.close();
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * Close a locally-created channel that is not the one {@link recordChannel}
+   * adopted (the guard is first-wins, so an extra createDataChannel result
+   * would otherwise leak its listeners). A no-op for the adopted channel —
+   * that one is owned by the negotiation and released via
+   * {@link discardChannel}.
+   */
+  private closeIfUnadopted(channel: DataChannelTransport | null): void {
+    if (channel === null || this.nego.channel === channel) return;
+    try {
+      channel.close();
+    } catch {
+      // best-effort
+    }
+  }
+
+  private handlePeerLeave(): void {
+    // R7F9: the broker says the peer left the room — release the dead
+    // negotiation's channel and latches FIRST so a rejoin gets a fresh
+    // offer rather than being dropped by the `nego.channel !== null` /
+    // `localOfferInFlight` guards. Then surface the drop so the
+    // orchestrator can move to Disconnected and offer retry.
+    this.releaseNegotiation();
+    this.options.onPeerLeave?.();
   }
 
   private recordChannel(transport: DataChannelTransport): void {
@@ -431,11 +597,14 @@ export class WebRtcBridge {
       return;
     }
     // "failed" / "closed" = the peer connection is gone (the peer tore down its
-    // RTCPeerConnection on leave, or ICE gave up). Surface the drop to the
-    // orchestrator so it can move to Disconnected and offer retry. "disconnected"
-    // is intentionally NOT treated as a drop — it can fire transiently during
-    // ICE re-negotiation and self-heal without dropping the session.
+    // RTCPeerConnection on leave, or ICE gave up). Release the dead
+    // negotiation's channel and latches (R7F9), then surface the drop to the
+    // orchestrator so it can move to Disconnected and offer retry.
+    // "disconnected" is intentionally NOT treated as a drop — it can fire
+    // transiently during ICE re-negotiation and self-heal without dropping
+    // the session.
     if (state === "failed" || state === "closed") {
+      this.releaseNegotiation();
       this.options.onPeerLeave?.();
     }
   }
@@ -454,8 +623,15 @@ export class WebRtcBridge {
       // has not fired yet; the next state change will retry.
       return;
     }
-    this.nego.transportReadyFired = true;
+    // R7F7: invoke the attach callback BEFORE latching anything. The
+    // callback is the orchestrator's attach path and can throw (e.g.
+    // attachTransport rejects a state that is not Waiting/Signaling). If
+    // transportReadyFired / suppressSignalingClose / the teardown timer were
+    // latched first, the throw would be permanent — the channel is open and
+    // the broker socket would never be released, yet no later channel event
+    // could retry the attach. Latch only on success.
     this.options.transportReady(toPeerTransport(channel));
+    this.nego.transportReadyFired = true;
     // Once the data channel is carrying bytes, the broker is out of the data
     // path entirely (PRD: broker is signaling-only). Hold the socket open for
     // a short grace window so a channel that drops instantly can re-signal

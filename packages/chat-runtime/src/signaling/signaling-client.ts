@@ -99,9 +99,13 @@ export class SignalingClient {
     // INITIATION (before its createOffer/setLocalDescription awaits — R3F5),
     // so by the time the offer reaches the wire the flag is already true.
     // Keeping the set here means a direct sendOffer caller that did not arm
-    // early still gets the glare protection.
-    this.glare.beginOffer();
-    this.relay({ kind: "offer", sdp });
+    // early still gets the glare protection — but ONLY when the relay
+    // actually puts the offer on the wire (R5F2): arming on a dead socket
+    // would latch offerInFlight with no offer outstanding, making the
+    // impolite side ignore the next remote offer forever.
+    if (this.relay({ kind: "offer", sdp })) {
+      this.glare.beginOffer();
+    }
   }
 
   /**
@@ -176,7 +180,15 @@ export class SignalingClient {
     // second peer enters the room. Treat that as peer presence so the WebRTC
     // bridge initiates the offer. (A `join` reflected back to its own sender
     // is ignored: the sender's own socket is never returned by getPeer.)
-    if (!this.peerPresent && message.kind === "join") {
+    //
+    // R5F1: fire on EVERY join, not just the first — a join arriving while
+    // `peerPresent` can only mean seat turnover: the previous occupant's
+    // silent leave is never relayed (BrokerConnection.handleLeave does not
+    // notify), so this join is the first and only signal that the seated
+    // peer changed. The bridge's renegotiation handling (release of the
+    // stale channel/latches, glare rollback channel adoption) makes firing
+    // again safe.
+    if (message.kind === "join") {
       this.peerPresent = true;
       this.handlers.onPeerJoin?.();
       return;
@@ -222,6 +234,11 @@ export class SignalingClient {
     this.joined = false;
     this.peerPresent = false;
     this.socket = null;
+    // R5F2: the offer this socket carried is dead with it — reset the glare
+    // resolver so a same-client re-dial does not inherit a latched
+    // offerInFlight that would make the impolite side ignore the next
+    // remote offer.
+    this.glare.endOffer();
     if (wasPeerPresent) {
       this.handlers.onPeerLeave?.();
     }
@@ -233,18 +250,22 @@ export class SignalingClient {
     this.socket = null;
     this.joined = false;
     this.peerPresent = false;
+    // R5F2: same-client re-dial (leaveAndClose + connect) must not inherit
+    // a stale offerInFlight.
+    this.glare.endOffer();
     if (socket !== null && socket.readyState !== READY_CLOSED) {
       socket.close(1000, "client closing");
     }
   }
 
-  private relay(message: BrokerMessage): void {
+  private relay(message: BrokerMessage): boolean {
     const socket = this.socket;
     if (socket === null || socket.readyState !== READY_OPEN) {
       this.handlers.onError?.(new Error("Signaling socket is not open"));
-      return;
+      return false;
     }
     socket.send(formatMessage(message));
+    return true;
   }
 }
 

@@ -287,3 +287,93 @@ describe("SignalingClient — peer leave", () => {
     client.close();
   });
 });
+
+describe("SignalingClient — join as a fresh presence edge (R5F1)", () => {
+  it("fires onPeerJoin again when a second join arrives while a peer is already present", () => {
+    // Seat turnover: the departing peer's silent leave is never relayed
+    // (BrokerConnection.handleLeave does not notify), so a `join` arriving
+    // while `peerPresent` is the first and only signal that the seated peer
+    // changed. The bridge's renegotiation handling makes firing again safe.
+    const a = new MockSignalingSocket();
+    const ha = recordingHandlers();
+    const client = createClient(Role.Initiator, ha, a);
+
+    a.deliver(JSON.stringify({ t: "join", roomId: ROOM_ID }));
+    expect(ha.events).toEqual(["join"]);
+    expect(client.isPeerPresent()).toBe(true);
+
+    // Second join on the same socket with no intervening leave — this must
+    // fire onPeerJoin again (pre-fix it was swallowed by the !peerPresent
+    // gate, leaving the new peer waiting for an offer that never came).
+    a.deliver(JSON.stringify({ t: "join", roomId: ROOM_ID }));
+    expect(ha.events).toEqual(["join", "join"]);
+    expect(client.isPeerPresent()).toBe(true);
+    client.close();
+  });
+});
+
+describe("SignalingClient — glare flag lifecycle (R5F2)", () => {
+  function poolClient(role: Role, sockets: MockSignalingSocket[]): SignalingClient {
+    let idx = 0;
+    return new SignalingClient({
+      brokerUrl: "ws://broker.example/ws",
+      roomId: ROOM_ID,
+      role,
+      handlers: recordingHandlers(),
+      socketFactory: () => {
+        const socket = sockets[idx];
+        if (socket === undefined) throw new Error("socket pool exhausted");
+        idx++;
+        return socket;
+      },
+    });
+  }
+
+  it("resets offerInFlight when the socket closes — a same-client re-dial answers a remote offer", () => {
+    const sockets = [new MockSignalingSocket(), new MockSignalingSocket()];
+    const client = poolClient(Role.Initiator, sockets);
+    client.connect();
+    sockets[0].serverOpen();
+
+    // Impolite side with an offer on the wire ignores a colliding offer.
+    client.sendOffer({ type: "offer", sdp: "o" });
+    expect(client.resolveRemoteOffer()).toBe("ignore");
+
+    // The socket dies and the SAME client re-dials (leaveAndClose + connect
+    // is exactly what the bridge's reconnect does). The dead socket's offer
+    // must not latch offerInFlight on the fresh connection.
+    sockets[0].serverClose();
+    client.connect();
+    sockets[1].serverOpen();
+    expect(client.resolveRemoteOffer()).toBe("answer");
+    client.close();
+  });
+
+  it("resets offerInFlight on teardown() — close() then re-dial answers a remote offer", () => {
+    const sockets = [new MockSignalingSocket(), new MockSignalingSocket()];
+    const client = poolClient(Role.Initiator, sockets);
+    client.connect();
+    sockets[0].serverOpen();
+    client.sendOffer({ type: "offer", sdp: "o" });
+    expect(client.resolveRemoteOffer()).toBe("ignore");
+
+    client.close();
+    client.connect();
+    sockets[1].serverOpen();
+    expect(client.resolveRemoteOffer()).toBe("answer");
+    client.close();
+  });
+
+  it("does not arm offerInFlight when the offer never reaches the wire (dead socket)", () => {
+    const socket = new MockSignalingSocket();
+    const ha = recordingHandlers();
+    const client = createClient(Role.Initiator, ha, socket);
+    // Drive the socket back to a non-open state without a close event: a
+    // sendOffer now fails the relay, and must not latch the glare flag.
+    socket.readyState = 0;
+    client.sendOffer({ type: "offer", sdp: "o" });
+    expect(ha.events).toContain("error");
+    expect(client.resolveRemoteOffer()).toBe("answer");
+    client.close();
+  });
+});
