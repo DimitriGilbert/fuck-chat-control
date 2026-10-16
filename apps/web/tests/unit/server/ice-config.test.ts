@@ -29,7 +29,10 @@ function expectedCredential(secret: string, username: string): string {
 const STUN_URL = "stun:turn.example.com:3478";
 const TURN_URL = "turn:turn.example.com:3478";
 const TURN_TLS_URL = "turns:turn.example.com:5349";
-const SHARED_SECRET = "shared-secret-value";
+// Must satisfy the env schema's 32-char TURN_SHARED_SECRET floor (R15:F2):
+// the half-set-warning and rate-limit suites below re-import the route, which
+// re-parses the real env schema at module scope.
+const SHARED_SECRET = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 describe("mintTurnCredentials — TURN REST API format", () => {
   it("produces username = '<expiry>:<32-hex random id>' (R7:F1 per-request entropy)", () => {

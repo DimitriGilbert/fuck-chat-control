@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { BrokerConnection } from "@fuck-eu-chat-control/chat-runtime/broker/connection";
+import { BROKER_MAX_BUFFERED_BYTES } from "@fuck-eu-chat-control/chat-runtime/broker/protocol";
 import { RoomRegistry } from "@fuck-eu-chat-control/chat-runtime/broker/room-registry";
 import { MockBrokerSocket } from "./_helpers";
 
@@ -135,6 +136,34 @@ describe("BrokerConnection — relay", () => {
     const conn = join(registry, a, id);
     conn.onMessage(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "x" } }));
     expect(a.sent).toHaveLength(0);
+  });
+
+  it("closes and evicts a stalled peer whose send backlog exceeds the bound (R4/F1)", () => {
+    const registry = new RoomRegistry();
+    const a = new MockBrokerSocket();
+    const b = new MockBrokerSocket();
+    const id = roomId(12);
+    const connA = join(registry, a, id);
+    const connB = join(registry, b, id);
+    // Clear the join-presence notification b's arrival sent to a.
+    a.sent.length = 0;
+
+    // Simulate a stalled TCP receiver: the socket stays OPEN (the zombie
+    // sweep keys on readyState > 1, so it cannot see this) while the write
+    // queue grows past the bound.
+    b.bufferedAmount = BROKER_MAX_BUFFERED_BYTES + 1;
+    expect(b.readyState).toBe(1);
+    connA.onMessage(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "x" } }));
+
+    expect(b.sent).toHaveLength(0);
+    expect(b.closed).toBe(true);
+    expect(b.closeCode).toBe(1013);
+
+    // The runtime's close hook runs the same teardown as a real socket close:
+    // onClose releases the seat and notifies the partner with a `leave`.
+    connB.onClose();
+    expect(registry.peerCount(id)).toBe(1);
+    expect(JSON.parse(a.sent[a.sent.length - 1])).toEqual({ t: "leave", roomId: id });
   });
 });
 

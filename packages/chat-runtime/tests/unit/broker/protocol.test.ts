@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BROKER_MAX_BUFFERED_BYTES,
   BROKER_MESSAGE_MAX_BYTES,
   formatMessage,
   forward,
@@ -142,6 +143,42 @@ describe("forward", () => {
     const peer = new MockBrokerSocket();
     forward(peer, { kind: "leave", roomId: roomId(21) });
     expect(peer.sent).toHaveLength(0);
+  });
+
+  it("closes a still-OPEN peer without relaying once its send backlog exceeds the bound (R4/F1)", () => {
+    const peer = new MockBrokerSocket();
+    // A stalled TCP receiver: the socket stays OPEN — readyState never leaves
+    // 1, so the zombie sweep cannot see it — while the write queue grows.
+    expect(peer.readyState).toBe(1);
+    peer.bufferedAmount = BROKER_MAX_BUFFERED_BYTES + 1;
+
+    forward(peer, { kind: "offer", sdp: { type: "offer", sdp: "x" } });
+
+    expect(peer.sent).toHaveLength(0);
+    expect(peer.closed).toBe(true);
+    expect(peer.closeCode).toBe(1013);
+  });
+
+  it("still relays when the send backlog is at (not over) the bound", () => {
+    const peer = new MockBrokerSocket();
+    peer.bufferedAmount = BROKER_MAX_BUFFERED_BYTES;
+
+    forward(peer, { kind: "ice", candidate: { candidate: "k" } });
+
+    expect(peer.sent).toHaveLength(1);
+    expect(peer.closed).toBe(false);
+  });
+
+  it("keeps relaying for a peer whose backlog drains between sends", () => {
+    const peer = new MockBrokerSocket();
+    // At the bound (not over): relays. Then the receiver drains the queue.
+    peer.bufferedAmount = BROKER_MAX_BUFFERED_BYTES;
+    forward(peer, { kind: "offer", sdp: { type: "offer", sdp: "a" } });
+    peer.bufferedAmount = 0;
+    forward(peer, { kind: "offer", sdp: { type: "offer", sdp: "b" } });
+
+    expect(peer.sent).toHaveLength(2);
+    expect(peer.closed).toBe(false);
   });
 });
 

@@ -10,6 +10,15 @@ export interface BrokerSocket {
    * socket that the runtime failed to deliver an `onClose` for.
    */
   readonly readyState: number;
+  /**
+   * Bytes queued for transmission but not yet flushed to the client
+   * (WebSocket `bufferedAmount`). The relay path checks this against
+   * `BROKER_MAX_BUFFERED_BYTES` before enqueueing — a stalled receiver keeps
+   * the socket OPEN, so backpressure cannot be detected via `readyState`.
+   * Adapters without a buffer signal must report 0 (never throw), which
+   * disables the bound for that adapter.
+   */
+  readonly bufferedAmount: number;
   send(data: string): void;
   close(code?: number, reason?: string): void;
 }

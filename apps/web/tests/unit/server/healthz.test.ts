@@ -31,6 +31,9 @@ async function importFresh(): Promise<typeof healthz> {
 import { afterEach, vi } from "vitest";
 
 const TURN_VARS = ["TURN_URL", "TURN_TLS_URL", "TURN_SHARED_SECRET"] as const;
+// ≥ 32 chars to satisfy the env schema's TURN_SHARED_SECRET floor (R15:F2) —
+// importFresh() re-imports healthz, which re-parses the real env schema.
+const VALID_SECRET = "0123456789abcdef0123456789abcdef";
 
 afterEach(() => {
   for (const k of TURN_VARS) delete process.env[k];
@@ -45,7 +48,7 @@ describe("/healthz (R7:F5)", () => {
 
   it("returns ok and mints when TURN is fully configured", async () => {
     process.env.TURN_URL = "turn:turn.example.com:3478";
-    process.env.TURN_SHARED_SECRET = "s3cret";
+    process.env.TURN_SHARED_SECRET = VALID_SECRET;
     const handler = await importFresh();
     const result = handler(fakeEvent());
     expect(result).toEqual({ ok: true });
@@ -62,7 +65,7 @@ describe("/healthz (R7:F5)", () => {
   });
 
   it("returns 503 when TURN_SHARED_SECRET is set but no TURN URL is configured", async () => {
-    process.env.TURN_SHARED_SECRET = "s3cret";
+    process.env.TURN_SHARED_SECRET = VALID_SECRET;
     const handler = await importFresh();
     const event = fakeEvent();
     const result = handler(event);

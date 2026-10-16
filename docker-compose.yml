@@ -73,12 +73,17 @@ services:
   # before the container even starts. Instead the secret flows through the
   # compose `environment:` passthrough here and coturn's entrypoint enforces
   # non-emptiness AT RUNTIME (deploy/coturn/entrypoint.sh exits 1 with a clear
-  # log when TURN_SHARED_SECRET is unset/empty). coturn's config parser does
-  # NOT expand `$VAR`, so the entrypoint reads TURN_SHARED_SECRET/TURN_REALM
-  # from the runtime env and passes them to `turnserver` as
-  # `--static-auth-secret`/`--realm` CLI flags after `-c …turnserver.conf`
-  # (CLI args override config-file values); the web app mints per-request
-  # HMAC-SHA1 credentials from the same secret via /ice-config.
+  # log when TURN_SHARED_SECRET is unset/empty/too short). coturn's config
+  # parser does NOT expand `$VAR`, so the entrypoint resolves
+  # TURN_SHARED_SECRET/TURN_REALM/TURN_EXTERNAL_IP from the runtime env and
+  # renders a merged runtime config at /var/lib/coturn/turnserver.runtime.conf
+  # (the mounted conf minus any `static-auth-secret` directives — coturn
+  # accumulates them rather than overriding — plus one appended
+  # `static-auth-secret=` line, mode 0600 and owned by the nobody uid the
+  # image runs as) — keeping the secret OFF turnserver's argv, which /proc
+  # exposes to unprivileged host users. Only the non-secret flags (`--realm`,
+  # `--external-ip`) go on argv; the web app mints per-request HMAC-SHA1
+  # credentials from the same secret via /ice-config.
   # See deploy/coturn/turnserver.conf + deploy/coturn/entrypoint.sh.
   coturn:
     image: coturn/coturn:4.15.0

@@ -76,6 +76,10 @@ interface CrosswsPeer {
   // the `Origin` header without coupling to a specific runtime adapter.
   readonly request: { readonly headers: { get(name: string): string | null } };
   readonly websocket: { readonly readyState?: number } | null;
+  // R4/F1: crossws `Peer.bufferedAmount` proxies the underlying ws
+  // bufferedAmount (bytes queued but not yet flushed) and falls back to 0 on
+  // adapters without a buffer signal.
+  readonly bufferedAmount: number;
   send(data: unknown): unknown;
   close(code?: number, reason?: string): void;
 }
@@ -92,6 +96,10 @@ function wrapPeer(peer: CrosswsPeer): BrokerSocket {
         return ws.readyState;
       }
       return 1;
+    },
+    get bufferedAmount() {
+      // R4/F1: surface the ws send backlog so the relay path can bound it.
+      return peer.bufferedAmount;
     },
     send(data) {
       peer.send(data);
@@ -134,9 +142,36 @@ export default defineWebSocketHandler({
     cleanup(peer.id);
   },
   error(peer) {
-    cleanup(peer.id);
+    handlePeerError(peer);
   },
 });
+
+/**
+ * Minimal structural view of the peer for the `error` hook — the hook only
+ * needs the id (for cleanup) and `close` (for teardown), so tests can drive it
+ * without a real upgrade. crossws `Peer` satisfies this shape.
+ */
+interface ErroredPeer {
+  readonly id: string;
+  close(code?: number, reason?: string): void;
+}
+
+/**
+ * R4/F2: error-hook teardown. `cleanup` removes the socket from all broker
+ * tracking (registry seat via onClose, sweep map, connection-cap slot) but
+ * does NOT close the underlying WebSocket — without an explicit `close`, a
+ * non-fatal socket error leaves the connection live in crossws (still pinged,
+ * still holding a file descriptor) while invisible to the zombie sweep and
+ * freed from the connection cap: a permanent fd leak plus cap bypass.
+ * `close(1011)` is a no-op when the socket already transitioned to
+ * CLOSING/CLOSED, and the `close` hook it triggers re-runs `cleanup`
+ * harmlessly (idempotent). Exported so the teardown contract is unit-testable
+ * without a real WebSocket upgrade, matching `shouldRejectConnection`.
+ */
+export function handlePeerError(peer: ErroredPeer): void {
+  cleanup(peer.id);
+  peer.close(1011, "websocket error");
+}
 
 function cleanup(id: string): void {
   const connection = connections.get(id);

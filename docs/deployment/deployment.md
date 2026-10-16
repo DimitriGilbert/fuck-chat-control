@@ -102,13 +102,21 @@ reverse proxy. Operators must publish 3478/udp, 3478/tcp, 5349/tcp (if using
 `turns:`), and the full relay range 49152-49172/udp on the host firewall.
 coturn reads its config from `deploy/coturn/turnserver.conf` (mounted
 read-only). The config parser does NOT expand `$VARIABLE` tokens, so the
-shared secret and realm are NOT written into that file — instead
-`deploy/coturn/entrypoint.sh` reads `TURN_SHARED_SECRET` and `TURN_REALM`
-from the runtime environment and passes them to `turnserver` as
-`--static-auth-secret` / `--realm` CLI flags after `-c …turnserver.conf`.
-CLI flags override config-file values in coturn, so the secret/realm reach
-the parser as the resolved shell values rather than the literal
-`$TURN_…` strings (which would open the relay).
+shared secret cannot be written into that mounted file — and it is never
+passed on `turnserver`'s command line either, because `/proc/<pid>/cmdline`
+is world-readable to unprivileged host users and execve auditing captures
+argv. Instead `deploy/coturn/entrypoint.sh` resolves `TURN_SHARED_SECRET`
+from the runtime environment and renders a merged runtime config at
+`/var/lib/coturn/turnserver.runtime.conf` inside the container's writable
+layer: the mounted settings with any `static-auth-secret` directives stripped
+(coturn accumulates them rather than overriding, so a leftover would stay
+valid) plus a single appended `static-auth-secret=<resolved>` line, written
+with mode `0600` and owned by the `nobody` uid the image runs as — only the
+turnserver process itself can read it via `turnserver -c`. The secret thus
+reaches the parser as the resolved value — never argv, never the literal
+`$TURN_…` string (which would open the relay). The non-secret `realm` and
+`external-ip` values are still passed as `--realm` / `--external-ip` CLI
+flags, which override config-file values in coturn.
 
 The `/ws` route must be reached over WSS (secure WebSocket) in production.
 A plain-WS broker reachable over HTTP is not acceptable: the signaling
@@ -219,18 +227,18 @@ a TCP connect on 3478.
 
 The server env surface is small. From `packages/env/src/server.ts`:
 
-| Variable              | Required | Purpose                                                                                            |
-| --------------------- | -------- | -------------------------------------------------------------------------------------------------- |
-| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                              |
-| `CORS_ORIGIN`         | No       | The origin allowed for CORS. Set to your deployed origin.                                          |
-| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`).   |
-| `STUN_URL`            | No       | Public STUN endpoint, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`.   |
-| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay), e.g. `turn:turn.example.com:3478`.                           |
-| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint, e.g. `turns:turn.example.com:5349`.                                 |
-| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials. Never sent to the client.                         |
-| `TURN_REALM`          | No       | coturn `realm` directive. Set to your own domain; no default (empty falls back to coturn's).       |
-| `TURN_EXTERNAL_IP`    | No       | Host's public IPv4 when ports are NAT-forwarded (docker behind NAT); maps to coturn `external-ip`. |
-| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                     |
+| Variable              | Required | Purpose                                                                                                                                                             |
+| --------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                                                                                               |
+| `CORS_ORIGIN`         | No       | The exact origin allowed on the broker WebSocket. Canonicalized at parse time — `https://host/`, `https://host:443`, and `HTTPS://HOST` all fold to `https://host`. |
+| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`).                                                                    |
+| `STUN_URL`            | No       | Public STUN endpoint with an explicit `stun:`/`stuns:` scheme, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`.                           |
+| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay) with an explicit `turn:`/`turns:` scheme, e.g. `turn:turn.example.com:3478`.                                                   |
+| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint; must use the `turns:` scheme, e.g. `turns:turn.example.com:5349`.                                                                    |
+| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials (minimum 32 characters). Never sent to the client.                                                                  |
+| `TURN_REALM`          | No       | coturn `realm` directive. Set to your own domain; no default (empty falls back to coturn's).                                                                        |
+| `TURN_EXTERNAL_IP`    | No       | Host's public IPv4 when ports are NAT-forwarded (docker behind NAT); maps to coturn `external-ip`.                                                                  |
+| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                                                                                      |
 
 Client side (`packages/env/src/web.ts`): none. The client bakes no ICE
 endpoints. STUN/TURN coordinates are fetched at runtime from `/ice-config`,
@@ -256,9 +264,15 @@ resolves from the deployment environment, a project-root `.env`, or
 `--env-file` — not from `apps/web/.env`, whose entry the passthrough
 overrides with empty). It is read server-side only — the
 `/ice-config` route uses it to compute per-request HMAC-SHA1 credentials and
-never serializes it into a response or log. The empty-or-set guard on the
-coturn side lives in `deploy/coturn/entrypoint.sh`, which exits if the
-secret is empty; the compose passthrough itself uses `${TURN_SHARED_SECRET:-}`
+never serializes it into a response or log. The guard on the coturn side
+lives in `deploy/coturn/entrypoint.sh`, which exits if the secret is empty
+or shorter than 32 characters — the required minimum, enforced there so
+coturn-only deployments fail closed without depending on the web service's
+env validation. The web service's env schema (`packages/env/src/server.ts`)
+enforces the same 32-character floor at startup — `/ice-config` is an
+unauthenticated HMAC-SHA1 oracle, so a weak secret makes the credential TTL
+brute-forceable. The compose passthrough itself uses
+`${TURN_SHARED_SECRET:-}`
 (empty default), not a required `${VAR:?}` form, which is what makes the
 service deployable on Dokploy without a hard failure at interpolation time.
 
@@ -385,7 +399,9 @@ Before going live:
      overridden to empty and silently discarded.
    - Set `STUN_URL`, `TURN_URL` (and optionally `TURN_TLS_URL`) the same way
      to the public host:port clients will reach coturn on (e.g.
-     `stun:turn.example.com:3478`).
+     `stun:turn.example.com:3478`). The URLs must carry their scheme — a
+     bare `host:port` now fails startup env validation instead of silently
+     breaking every client's `RTCPeerConnection`.
    - Publish the coturn ports on the host firewall: `3478/udp`, `3478/tcp`,
      `5349/tcp` (if using `turns:`), and the full relay range
      `49152-49172/udp`. These are already in `docker-compose.yml`'s `ports:`

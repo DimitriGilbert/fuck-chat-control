@@ -59,7 +59,13 @@
 # Exit codes: 0 success; non-zero on any failure. Only the browser sessions are
 # closed on exit -- your dev server is left running.
 
-set -uo pipefail
+# R15:F4 — `set -e` makes failed ffmpeg/ffprobe/agent-browser/mkdir calls exit
+# non-zero, matching the documented "non-zero on any failure" contract. Steps
+# that are intentionally best-effort keep their explicit `|| true` /
+# `|| log "WARN"` markers, and command substitutions that are allowed to come
+# up empty carry `|| true` INSIDE the substitution so a flaky probe yields an
+# empty string (handled below) instead of tripping `set -e` on the assignment.
+set -euo pipefail
 
 # ---------- paths and params -------------------------------------------------
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -78,8 +84,11 @@ export PATH="$REPO_ROOT/node_modules/.bin:$PATH"
 
 # Auto-pick a bold TTF for ffmpeg drawtext if not provided.
 if [[ -z "${FONT:-}" ]]; then
-  FONT="$(find /usr/share/fonts -name "LiberationSans-Bold.ttf" 2>/dev/null | head -1)"
-  [[ -z "$FONT" ]] && FONT="$(find /usr/share/fonts -name "DejaVuSans-Bold.ttf" 2>/dev/null | head -1)"
+  # `|| true` inside the substitutions: with pipefail, a missing font dir
+  # makes find exit non-zero; the empty-string FATAL check below is the
+  # intended failure path, not a silent `set -e` abort.
+  FONT="$(find /usr/share/fonts -name "LiberationSans-Bold.ttf" 2>/dev/null | head -1 || true)"
+  [[ -z "$FONT" ]] && FONT="$(find /usr/share/fonts -name "DejaVuSans-Bold.ttf" 2>/dev/null | head -1 || true)"
 fi
 if [[ -z "$FONT" || ! -f "$FONT" ]]; then
   echo "FATAL: no bold TTF font found for ffmpeg drawtext" >&2
@@ -112,11 +121,14 @@ trap teardown EXIT
 # Usage:  ref_for <session> <grep-regex>   -> prints "eN" (without @), empty if none.
 ref_for() {
   local session="$1" pattern="$2"
+  # `|| true`: no match means grep exits 1 and pipefail propagates it — but
+  # callers assign the result and branch on empty, so the function must not
+  # return non-zero or `set -e` would kill the script on the assignment.
   npx agent-browser --session "$session" snapshot -i 2>/dev/null \
     | grep -iE "$pattern" \
     | grep -oE 'ref=e[0-9]+' \
     | head -1 \
-    | sed 's/ref=//'
+    | sed 's/ref=//' || true
 }
 
 # Wait until a session's snapshot contains $2 (case-insensitive), timeout $3s.
@@ -190,7 +202,6 @@ npx agent-browser --session alice set viewport 1920 1080 >/dev/null
 
 log "starting recorder on Alice's session"
 npx agent-browser --session alice record start "$RAW" >/dev/null
-RECORDING_STARTED=1
 
 # Wait for the sidebar's Start button to render. The new shell exposes two
 # Start affordances (sidebar + empty-state card); the sidebar is the persistent
@@ -240,7 +251,9 @@ fi
 sleep 3
 
 # Read the (now coded) invitation URL Alice generated.
-INVITATION="$(npx agent-browser --session alice get value 'input[aria-label="Invitation link"]' 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+# `|| true` inside the substitution keeps a transient `get value` failure on
+# the empty-string FATAL path below rather than aborting via `set -e`.
+INVITATION="$(npx agent-browser --session alice get value 'input[aria-label="Invitation link"]' 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)"
 if [[ -z "$INVITATION" ]]; then
   echo "FATAL: invitation link is empty" >&2
   exit 5
@@ -337,11 +350,7 @@ sleep 4
 # shows Bob's reply. We accept a best-effort click here -- if it misses, the
 # drop in BEAT 7 still dispatches on whatever chat is active.
 log "Alice: switching back to the first conversation"
-FIRST_REF="$(npx agent-browser --session alice snapshot -i 2>/dev/null \
-  | grep -iE 'server never sees this' \
-  | grep -oE 'ref=e[0-9]+' \
-  | head -1 \
-  | sed 's/ref=//')"
+FIRST_REF="$(ref_for alice 'server never sees this')"
 if [[ -n "$FIRST_REF" ]]; then
   # The match is inside the row's button; ref_for returned the inner text node's
   # ref. Walk up to the clickable row by clicking the ref anyway -- agent-browser
@@ -410,11 +419,13 @@ if [[ "$DEMO_AUTH_FAILED_CTA" == "1" ]]; then
   log "DEMO_AUTH_FAILED_CTA=1: attempting best-effort wrong-code beat"
   # Build a wrong code by incrementing the last digit of the ~code tail. The
   # invitation is of the form ...<convId>~<6 digits>; mutate the final digit.
+  # `|| true` inside the substitution: this whole beat is best-effort, so an
+  # awk hiccup must degrade to "unmutated -> skip" below, not abort the demo.
   WRONG_INVITATION="$(printf '%s' "$INVITATION" | awk '{
     n=length($0); d=substr($0,n,1);
     if (d ~ /[0-9]/) { nd=(d+1)%10; printf "%s%d", substr($0,1,n-1), nd }
     else { print $0 }
-  }')"
+  }' || true)"
   if [[ "$WRONG_INVITATION" == "$INVITATION" ]]; then
     log "WARN: could not mutate PAKE code tail; skipping auth-failed beat"
   else
@@ -445,11 +456,12 @@ fi
 # Stop recording.
 log "stopping recorder"
 npx agent-browser --session alice record stop >/dev/null 2>&1 || true
-RECORDING_STARTED=0
 sleep 1
 
 # ---------- 2. burn in captions + compress ----------------------------------
-RAW_DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$RAW" 2>/dev/null)"
+# `|| true`: a corrupt/absent raw recording yields an empty duration here —
+# the ffmpeg render below is the step that reports the real error and fails.
+RAW_DUR="$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$RAW" 2>/dev/null || true)"
 log "raw recording: ${RAW_DUR}s"
 
 # Caption timing. Keep these in sync with the BEAT comments above.

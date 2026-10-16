@@ -25,6 +25,12 @@
  *
  * @param allowedOrigin The configured `env.CORS_ORIGIN` (exact origin string,
  *   e.g. `https://app.example.com`), or `undefined`/empty when not configured.
+ *   The env schema canonicalizes the configured value at parse time
+ *   (`new URL(v).origin` — R4:F3), so `https://host/`, `https://host:443`,
+ *   and `HTTPS://HOST` all reach this function as `https://host`. The
+ *   comparison below is deliberately strict string equality: the browser's
+ *   `Origin` header is already a serialized (canonical) origin, so no
+ *   normalization is applied — or needed — on the request side.
  * @param requestOrigin The `Origin` header value from the upgrade request, or
  *   `null`/`undefined` when absent (non-browser clients, `ws` CLI).
  * @returns `true` when the connection should be admitted.

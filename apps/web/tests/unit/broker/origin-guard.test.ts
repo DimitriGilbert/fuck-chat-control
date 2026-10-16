@@ -33,6 +33,15 @@ describe("isOriginAllowed — CR-16 WebSocket origin guard", () => {
       expect(isOriginAllowed(allowed, "https://app.example.com.evil.example")).toBe(false);
       expect(isOriginAllowed(allowed, "https://app.example.com:443")).toBe(false);
     });
+
+    it("rejects noncanonical REQUEST origins even though they serialize to the same origin", () => {
+      // R4:F3: canonicalization happens once, at env parse, on the CONFIGURED
+      // value — the request side stays strict. Browsers always send a
+      // serialized origin, so a noncanonical header is at best a hand-rolled
+      // client and at worst a probe; it must not be admitted.
+      expect(isOriginAllowed(allowed, "https://app.example.com/")).toBe(false);
+      expect(isOriginAllowed(allowed, "HTTPS://APP.EXAMPLE.COM")).toBe(false);
+    });
   });
 
   describe("absent Origin header (non-browser clients)", () => {
