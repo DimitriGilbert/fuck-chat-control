@@ -132,29 +132,20 @@ function resolveBrowserDeps(): {
     // configured" the same as "field absent" — both fall back to the network
     // fetch on the web build, and to host-candidate-only WebRTC on desktop.
     //
-    // M2: per-entry validation at the boundary. The injected list is threaded
-    // through from `window.__FCK_CONFIG__` (Rust-built JSON) with a length
-    // check only; a malformed entry (e.g. `url:` instead of `urls:`, or a
-    // `{ username, credential }`-only entry with no `urls`) would otherwise
-    // flow into `new RTCPeerConnection({ iceServers: [{ urls: undefined }] })`
-    // and silently break candidate gathering. Mirror the /ice-config fetch
-    // path's reshape: project each entry to `{ urls, username?, credential? }`
-    // and DROP any whose `urls` is not a string or non-empty array — stricter
-    // to drop just the bad entry and keep the rest than to fail the whole list.
-    const iceServers =
-      injected.iceServers !== undefined && injected.iceServers.length > 0
-        ? injected.iceServers
-            .map((s): IceServer | null => {
-              if (typeof s.urls !== "string" && !isNonEmptyStringArray(s.urls)) return null;
-              const base: IceServer = { urls: s.urls };
-              return {
-                ...base,
-                ...(s.username !== undefined ? { username: s.username } : {}),
-                ...(s.credential !== undefined ? { credential: s.credential } : {}),
-              };
-            })
-            .filter((s): s is IceServer => s !== null)
-        : undefined;
+    // M2: per-entry validation at the boundary via {@link toIceServer}. The
+    // injected list is threaded through from `window.__FCK_CONFIG__`
+    // (Rust-built JSON) with a length check only; a malformed entry (e.g.
+    // `url:` instead of `urls:`, `urls: ""`, or a `{ username, credential }`
+    // -only entry with no `urls`) would otherwise flow into
+    // `new RTCPeerConnection({ iceServers: [{ urls: undefined }] })` and
+    // silently break candidate gathering. R9F1 (Phase 9.3): the same
+    // all-dropped → absent rule applies — an injected list whose EVERY entry
+    // fails validation falls back to "not configured" (the fetch path on
+    // web) rather than pinning an empty list.
+    const projected = injected.iceServers
+      ?.map(toIceServer)
+      .filter((s): s is IceServer => s !== null);
+    const iceServers = projected !== undefined && projected.length > 0 ? projected : undefined;
     return { brokerUrl: injected.brokerUrl, baseUrl, publicBaseUrl, iceServers };
   }
   const { protocol, host, origin } = window.location;
@@ -222,24 +213,26 @@ async function fetchIceConfig(): Promise<{
     if (!Array.isArray(body.iceServers)) return degraded();
     // Map the untyped JSON body into the neutral IceServer shape at the fetch
     // boundary so the DOM RTCIceServer type never threads into the runtime.
-    // The /ice-config route only emits { urls, username, credential } so this
-    // is a pure contract fix — runtime behavior is unchanged. Extra DOM-only
-    // fields (e.g. credentialType, iceProvider) are intentionally dropped.
+    // Extra DOM-only fields (e.g. credentialType, iceProvider) are
+    // intentionally dropped.
+    //
+    // R9F1 (Phase 9.3): per-entry validation, mirroring the injected-config
+    // path. The list used to forward each entry's `urls` verbatim into
+    // `new RTCPeerConnection` — a single malformed entry (`urls: undefined`,
+    // `""`, `123`, or a non-ICE scheme) throws there and kills EVERY session
+    // start. Project through {@link toIceServer} and drop the bad entries.
     const raw = body.iceServers as ReadonlyArray<{
-      readonly urls: string | readonly string[];
-      readonly username?: string;
-      readonly credential?: string;
+      readonly urls?: unknown;
+      readonly username?: unknown;
+      readonly credential?: unknown;
     }>;
-    const iceServers = raw.map((s): IceServer => {
-      const base: IceServer = { urls: s.urls };
-      // IceServer's fields are readonly, so build the entry with conditional
-      // spreads rather than mutating after construction.
-      return {
-        ...base,
-        ...(s.username !== undefined ? { username: s.username } : {}),
-        ...(s.credential !== undefined ? { credential: s.credential } : {}),
-      };
-    });
+    const iceServers = raw.map(toIceServer).filter((s): s is IceServer => s !== null);
+    // Entries were present but EVERY one failed validation = an unusable
+    // list: degrade (which logs) rather than silently returning [], so an
+    // operator serving a malformed /ice-config sees the warning. A genuinely
+    // EMPTY array stays non-degraded — that is the intentional
+    // "host-candidate-only" configuration, not a failure.
+    if (raw.length > 0 && iceServers.length === 0) return degraded();
     // MEDIUM-E: pull the runtime publicBaseUrl from the server. Only accept a
     // non-empty string — the route omits the field entirely when
     // PUBLIC_BASE_URL is unset, but defensive-guard against an empty string
@@ -328,12 +321,42 @@ const ephemeralStorage: DurableStorage = {
 
 /**
  * Narrows an unknown value to a non-empty `readonly string[]`. Used by the
- * injected-ICE-server validator to accept the `IceServer.urls` array form
- * without an `any` cast. A non-string element or empty array rejects the
- * entry so it is dropped at the boundary.
+ * ICE-server validator to accept the `IceServer.urls` array form without an
+ * `any` cast. A non-string element or empty array rejects the entry so it is
+ * dropped at the boundary.
  */
 function isNonEmptyStringArray(value: unknown): value is readonly string[] {
   return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string");
+}
+
+/**
+ * Project one untrusted ICE entry — whether from the `__FCK_CONFIG__`
+ * injection or the `/ice-config` response — into the runtime's neutral
+ * {@link IceServer} shape, or return `null` when the entry is unusable.
+ *
+ * `urls` must be a NON-EMPTY string or a non-empty array of strings:
+ * `undefined`, `""`, a number, or an empty array would throw inside
+ * `new RTCPeerConnection` and kill every session start (R9F1 / Phase 9.3 —
+ * `""` used to slip through the `typeof === "string"` check). Dropping just
+ * the bad entry keeps the rest of the list usable. `username`/`credential`
+ * pass through only when they are strings. The runtime's `IceServer` fields
+ * are readonly, so the entry is built with conditional spreads rather than
+ * mutated after construction.
+ */
+function toIceServer(entry: {
+  readonly urls?: unknown;
+  readonly username?: unknown;
+  readonly credential?: unknown;
+}): IceServer | null {
+  const urls: unknown = entry.urls;
+  const usable = (typeof urls === "string" && urls.length > 0) || isNonEmptyStringArray(urls);
+  if (!usable) return null;
+  const base: IceServer = { urls };
+  return {
+    ...base,
+    ...(typeof entry.username === "string" ? { username: entry.username } : {}),
+    ...(typeof entry.credential === "string" ? { credential: entry.credential } : {}),
+  };
 }
 
 export interface ChatContextValue {

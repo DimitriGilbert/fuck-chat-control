@@ -35,6 +35,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
+import { conversationIdToHex } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -58,11 +59,18 @@ export function ChatView(): React.ReactElement {
   const { controller, state } = useChat();
   const transcriptRef = React.useRef<HTMLDivElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
-  const [draft, setDraft] = React.useState("");
   const [isDragOver, setIsDragOver] = React.useState(false);
 
   const activeId = state.activeConversationId;
   const connected = state.connectionState === ConnectionState.Connected;
+  // R10F2 (Phase 9): the composer draft lives on the SESSION (mirrored into
+  // the snapshot as `active.draft`), not in component state. A component-level
+  // draft survived conversation switches and sent to whichever session was
+  // active at send time — text leaked across conversations. The fully
+  // controlled textarea reads the stored value; every keystroke writes
+  // through to `controller.setDraft`, so switching conversations restores
+  // that conversation's own draft.
+  const draft = state.active?.draft ?? "";
 
   // Auto-scroll to the newest message when the transcript grows.
   React.useEffect(() => {
@@ -77,14 +85,28 @@ export function ChatView(): React.ReactElement {
   const canAttach = controller !== null && connected && activeId !== null;
 
   function handleSend(): void {
-    if (controller === null) return;
+    if (controller === null || activeId === null) return;
     const text = draft;
-    setDraft("");
-    void controller.sendText(text).catch((err: unknown) => {
-      // R7/F5 (Phase 12): restore only into an empty draft. sendText makes a
+    controller.setDraft(activeId, "");
+    void controller.sendText(activeId, text).catch((err: unknown) => {
+      // R7/F5 (Phase 12): restore only into an EMPTY draft. sendText makes a
       // network round-trip; resetting to `text` unconditionally would clobber
-      // whatever the user typed while the send was in flight.
-      setDraft((prev) => (prev === "" ? text : prev));
+      // whatever the user typed while the send was in flight. Read the LIVE
+      // snapshot inside the catch — the `state` this closure captured at
+      // render time is stale by then.
+      //
+      // R10F2 (Phase 9): with per-session drafts the restore additionally
+      // gates on the send's target still being the ACTIVE conversation —
+      // restoring into a different session's composer would leak the failed
+      // text across conversations, the exact bug per-session drafts fix.
+      const live = controller.getState();
+      if (
+        live.active !== null &&
+        conversationIdToHex(live.active.id) === conversationIdToHex(activeId) &&
+        live.active.draft === ""
+      ) {
+        controller.setDraft(activeId, text);
+      }
       toast.error("Send failed", {
         description: err instanceof Error ? err.message : String(err),
       });
@@ -176,8 +198,13 @@ export function ChatView(): React.ReactElement {
   }
 
   function handleDragOver(event: React.DragEvent<HTMLDivElement>): void {
-    if (!connected) return;
+    // R10F3 (Phase 9): preventDefault unconditionally. Skipping it while
+    // disconnected let the browser treat `drop` as a navigation (opening the
+    // file), which tore down the page — live sessions and received
+    // attachments included. Only the affordance highlight is gated on
+    // connected.
     event.preventDefault();
+    if (!connected) return;
     if (!isDragOver) setIsDragOver(true);
   }
 
@@ -295,7 +322,15 @@ export function ChatView(): React.ReactElement {
           </InputGroupAddon>
           <InputGroupTextarea
             value={draft}
-            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setDraft(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => {
+              // R10F2: write every keystroke through to the session's draft so
+              // the text is scoped to THIS conversation and restored on
+              // switch-back. The emit in setDraft publishes the echo for the
+              // controlled textarea.
+              if (controller !== null && activeId !== null) {
+                controller.setDraft(activeId, e.target.value);
+              }
+            }}
             onKeyDown={handleKeyDown}
             placeholder={
               connected
@@ -418,11 +453,19 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
   } = props;
   const variant = CONNECTION_STATE_VARIANTS[connectionState];
   const label = CONNECTION_STATE_LABELS[connectionState];
-  // SEC-4: once connected, label the session's auth provenance. PAKE sessions
-  // surface the stronger guarantee; safety-number sessions read as such so the
-  // user can tell which conversations are only verified post-hoc.
+  // SEC-4: label the session's auth provenance. PAKE sessions surface the
+  // stronger guarantee; safety-number sessions read as such so the user can
+  // tell which conversations are only verified post-hoc.
+  //
+  // R10F5 (Phase 9): label, styling, data-auth-mode, and aria-label all key
+  // on `authMode` alone. Previously the label alone keyed on `connected &&`,
+  // so a waiting/handshaking PAKE session rendered "Safety number" text on
+  // PAKE styling — an inconsistent pill that claimed the WEAKER guarantee
+  // while wearing the stronger one's colors. A not-yet-connected PAKE
+  // session now reads "PAKE (pending)" so all four signals agree.
   const connected = connectionState === ConnectionState.Connected;
-  const authLabel = connected && authMode === AuthMode.Pake ? "PAKE" : "Safety number";
+  const authLabel =
+    authMode === AuthMode.Pake ? (connected ? "PAKE" : "PAKE (pending)") : "Safety number";
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
       <StatusPill variant={variant} label={label} />
@@ -515,7 +558,6 @@ function InvitationBanner(): React.ReactElement | null {
   // we will generate a fresh CSPRNG code on toggle. Held in component state so
   // the typing experience stays responsive independent of the controller's
   // snapshot cadence.
-  const [pakeEnabled, setPakeEnabled] = React.useState(false);
   const [codeDraft, setCodeDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -527,10 +569,17 @@ function InvitationBanner(): React.ReactElement | null {
   const tildeIdx = bare.indexOf("~");
   const activeCode = tildeIdx >= 0 ? bare.slice(tildeIdx + 1) : null;
 
-  // Sync the local toggle to whatever the active invitation is shaped like.
+  // R10F1 (Phase 9): the checkbox is DERIVED from the active invitation's
+  // shape rather than held in local state. A failed toggle-on used to leave
+  // the box checked over an uncoded invitation (the sync effect only refires
+  // when activeCode CHANGES, and a rejected startConversation leaves it
+  // null). Deriving means the checkbox can never lie: checked iff the live
+  // invitation actually carries a code.
+  const pakeEnabled = activeCode !== null;
+
+  // Sync the custom-code input to whatever the active invitation carries.
   // This keeps the banner honest if the conversation is replaced externally.
   React.useEffect(() => {
-    setPakeEnabled(activeCode !== null);
     if (activeCode !== null) setCodeDraft(activeCode);
   }, [activeCode]);
 
@@ -579,8 +628,14 @@ function InvitationBanner(): React.ReactElement | null {
    * Phase 3b (CR-4): the 6-digit code is generated by the controller's
    * `generatePakeCode()` so the CSPRNG sampling + modular reduction live in
    * the security-relevant runtime, not the render layer.
+   *
+   * `explicitCode` (R10F1, Phase 9) lets the caller hand in a code that was
+   * JUST generated. Without it the code came from `codeDraft` — but
+   * `setCodeDraft` is asynchronous, so a regenerate that set state and called
+   * this in the same tick applied the STALE draft and silently re-issued the
+   * old code.
    */
-  async function applyPakeChoice(next: boolean): Promise<void> {
+  async function applyPakeChoice(next: boolean, explicitCode?: string): Promise<void> {
     if (controller === null || busy) return;
     setBusy(true);
     try {
@@ -590,7 +645,8 @@ function InvitationBanner(): React.ReactElement | null {
       }
       if (next) {
         const code =
-          codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode();
+          explicitCode ??
+          (codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode());
         setCodeDraft(code);
         await controller.startConversation({ code });
         toast.success("PAKE-protected invitation ready", {
@@ -610,17 +666,20 @@ function InvitationBanner(): React.ReactElement | null {
   }
 
   function handleTogglePake(): void {
-    const next = !pakeEnabled;
-    setPakeEnabled(next);
-    void applyPakeChoice(next);
+    // No local resync needed: `pakeEnabled` derives from the invitation, so a
+    // failed apply leaves the checkbox reflecting reality (unchecked when no
+    // coded invitation exists).
+    void applyPakeChoice(!pakeEnabled);
   }
 
   function handleRegeneratePakeCode(): void {
     if (busy || controller === null) return;
     const fresh = controller.generatePakeCode();
     setCodeDraft(fresh);
-    // Apply immediately so the invitation reflects the new code.
-    void applyPakeChoice(true);
+    // Apply immediately so the invitation reflects the new code. The fresh
+    // code MUST be passed explicitly — `applyPakeChoice` cannot see the
+    // `setCodeDraft` above within this same tick (R10F1).
+    void applyPakeChoice(true, fresh);
   }
 
   function handleCodeDraftChange(e: React.ChangeEvent<HTMLInputElement>): void {

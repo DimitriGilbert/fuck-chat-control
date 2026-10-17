@@ -237,6 +237,47 @@ describe("createChatController / multi-session", () => {
     expect(controller.getActiveConversationId()).toBeNull();
   });
 
+  it("setDraft stores the draft per session and mirrors it via the active snapshot (R10F2)", async () => {
+    await controller.startConversation();
+    const idA = controller.getActiveConversationId() as ConversationId;
+    await controller.startConversation();
+    const idB = controller.getActiveConversationId() as ConversationId;
+
+    // B is active. Write a draft for B and for the BACKGROUND session A —
+    // drafts are session-scoped, so A's text never appears while B is active.
+    controller.setDraft(idB, "draft for B");
+    controller.setDraft(idA, "draft for A");
+    expect(controller.getState().active?.draft).toBe("draft for B");
+
+    // Selecting a session restores ITS draft; the other stays stored.
+    controller.selectConversation(idA);
+    expect(controller.getState().active?.draft).toBe("draft for A");
+    controller.selectConversation(idB);
+    expect(controller.getState().active?.draft).toBe("draft for B");
+  });
+
+  it("setDraft no-ops for an unknown session and emits only on change", async () => {
+    await controller.startConversation();
+    const idA = controller.getActiveConversationId() as ConversationId;
+
+    let emissions = 0;
+    const unsubscribe = controller.subscribe(() => {
+      emissions += 1;
+    });
+    const before = emissions;
+
+    controller.setDraft(idA, "x");
+    controller.setDraft(idA, "x"); // unchanged value: no snapshot churn
+    expect(emissions).toBe(before + 1);
+    expect(controller.getState().active?.draft).toBe("x");
+
+    // Unknown session: no throw, no emit.
+    const unknownId = new Uint8Array(16).fill(0xab) as unknown as ConversationId;
+    controller.setDraft(unknownId, "y");
+    expect(emissions).toBe(before + 1);
+    unsubscribe();
+  });
+
   it("the active snapshot mirrors the active session's fields", async () => {
     await controller.startConversation();
     const idA = controller.getActiveConversationId() as ConversationId;

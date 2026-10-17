@@ -173,6 +173,15 @@ export interface ChatController {
   selectConversation(conversationId: ConversationId): void;
   leaveConversation(conversationId?: ConversationId): void;
   leaveAll(): void;
+  /**
+   * Store the composer's draft text for a session (R10F2 / Phase 9). The
+   * draft is per-session UI state: it survives conversation switches via the
+   * {@link ActiveSessionState.draft} snapshot mirror, so text typed in one
+   * conversation can never leak into another's composer. Emits a fresh
+   * snapshot when the value changes so a controlled composer renders the
+   * stored value directly. No-op for an unknown session.
+   */
+  setDraft(id: ConversationId, draft: string): void;
 
   /**
    * Per-session text send. The single-argument overload targets the ACTIVE
@@ -1359,6 +1368,17 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       holders.clear();
       readMarkers.clear();
       activeConversationId = null;
+      emit(null);
+    },
+
+    setDraft(id: ConversationId, draft: string): void {
+      assertNotDisposed(disposed);
+      const session = sessions.get(keyOf(id));
+      if (session === undefined) return;
+      // Skip the emit when nothing changed: the composer calls this on every
+      // keystroke, and an unchanged value would only churn subscribers.
+      if (session.draft === draft) return;
+      session.draft = draft;
       emit(null);
     },
 

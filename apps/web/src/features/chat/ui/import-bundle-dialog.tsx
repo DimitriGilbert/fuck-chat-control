@@ -39,9 +39,18 @@ export function ImportBundleDialog({
   const [passphrase, setPassphrase] = React.useState("");
   const [mode, setMode] = React.useState<ImportModeType>(ImportMode.Merge);
   const [busy, setBusy] = React.useState(false);
+  // R10F4 (Phase 9): file-read ordering token. `setFilename` applies
+  // synchronously but `file.text()` resolves unordered — without a token the
+  // LAST-SETTLING read won `bundle` while `filename` already showed the last
+  // pick, and a stale `.catch` could clear a newer valid bundle. Every pick
+  // bumps the token; only the latest pick's continuation may touch state.
+  const pickTokenRef = React.useRef(0);
 
   React.useEffect(() => {
     if (!open) {
+      // Invalidate any in-flight read so its late resolution cannot repopulate
+      // state the reset below just cleared.
+      pickTokenRef.current += 1;
       setBundle(null);
       setFilename("");
       setPassphrase("");
@@ -51,6 +60,7 @@ export function ImportBundleDialog({
   }, [open]);
 
   function handleFile(event: React.ChangeEvent<HTMLInputElement>): void {
+    const token = ++pickTokenRef.current;
     const file = event.target.files?.[0];
     if (file === undefined) {
       setBundle(null);
@@ -61,9 +71,11 @@ export function ImportBundleDialog({
     void file
       .text()
       .then((text: string) => {
+        if (pickTokenRef.current !== token) return; // stale read — a newer pick owns the state
         setBundle(text);
       })
       .catch(() => {
+        if (pickTokenRef.current !== token) return; // stale failure must not clear a newer bundle
         setBundle(null);
         toast.error("Could not read file");
       });

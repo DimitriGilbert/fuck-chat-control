@@ -39,17 +39,40 @@ function idFromNumber(n: number): ConversationId {
 /** Harness shared with the hoisted useChat mock below. */
 const ctx = vi.hoisted(() => ({
   controller: null as null | unknown,
-  state: null as null | unknown,
+  state: null as null | ChatControllerState,
+  listeners: new Set<() => void>(),
 }));
 
-vi.mock("@/features/chat/runtime/chat-provider", () => ({
-  useChat: () => ({
-    controller: ctx.controller,
-    state: ctx.state,
-    ready: true,
-    iceDegraded: false,
-  }),
-}));
+/**
+ * Publish a fresh controller snapshot and notify subscribers — the reactive
+ * twin of the real controller's emit(). Needed now that the composer draft is
+ * fully controlled by `state.active.draft` (R10F2): `controller.setDraft`
+ * must echo back through a new snapshot for the textarea to update.
+ */
+function publish(next: ChatControllerState): void {
+  ctx.state = next;
+  for (const listener of Array.from(ctx.listeners)) listener();
+}
+
+vi.mock("@/features/chat/runtime/chat-provider", async () => {
+  const React = await import("react");
+  return {
+    useChat: () => ({
+      controller: ctx.controller,
+      state: React.useSyncExternalStore(
+        (onStoreChange: () => void) => {
+          ctx.listeners.add(onStoreChange);
+          return () => {
+            ctx.listeners.delete(onStoreChange);
+          };
+        },
+        () => ctx.state,
+      ),
+      ready: true,
+      iceDegraded: false,
+    }),
+  };
+});
 
 const toasts = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock("sonner", () => ({ toast: toasts }));
@@ -95,11 +118,14 @@ function makeActive(
 /**
  * Controller double covering exactly the methods the composer touches. The
  * sendText promise settles only when the test rejects it, modelling the
- * in-flight round-trip during which the user keeps typing.
+ * in-flight round-trip during which the user keeps typing. `setDraft`
+ * mirrors the real controller: it stores the draft on the (active) session
+ * and emits a fresh snapshot so the controlled textarea echoes.
  */
 function makeSendController(): {
   readonly controller: ChatController;
   readonly sendText: ReturnType<typeof vi.fn>;
+  readonly setDraft: ReturnType<typeof vi.fn>;
   readonly rejectSend: (err: Error) => void;
 } {
   let pendingReject: (err: Error) => void = () => {};
@@ -109,8 +135,18 @@ function makeSendController(): {
         pendingReject = reject;
       }),
   );
-  const controller = { sendText } as unknown as ChatController;
-  return { controller, sendText, rejectSend: (err: Error) => pendingReject(err) };
+  const setDraft = vi.fn((_id: ConversationId, value: string): void => {
+    const current = ctx.state;
+    if (current?.active !== null && current?.active !== undefined) {
+      publish({ ...current, active: { ...current.active, draft: value } });
+    }
+  });
+  const controller = {
+    sendText,
+    setDraft,
+    getState: (): ChatControllerState | null => ctx.state,
+  } as unknown as ChatController;
+  return { controller, sendText, setDraft, rejectSend: (err: Error) => pendingReject(err) };
 }
 
 /**
@@ -164,7 +200,8 @@ describe("ChatView composer draft restore (R7/F5)", () => {
 
     // The newer text wins; the failed text may only land in an EMPTY draft.
     expect(composer.value).toBe("typed meanwhile");
-    expect(sendText).toHaveBeenCalledWith("original draft");
+    // R10F2: the send targets the session that was active at click time.
+    expect(sendText).toHaveBeenCalledWith(id, "original draft");
     expect(toasts.error).toHaveBeenCalledWith(
       "Send failed",
       expect.objectContaining({ description: "data channel closed" }),

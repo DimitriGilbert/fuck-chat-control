@@ -95,6 +95,9 @@ is testable in isolation. Its public API:
 - `getHistory(id)` / `getHistory()`, `setDisplayName(id?, name)`,
   `markSafetyNumberVerified(id?)`, `retry(id?)`, `clearConversation(id?)`,
   `leave(id?)`, `clearAll()`.
+- `setDraft(id, draft)` — store the composer's per-session draft (mirrored
+  back via `state.active.draft` so drafts persist across conversation
+  switches without leaking between them).
 - `lock()`, `unlock(passphrase): Promise<boolean>`, `isLocked()`.
 - `getActiveConversationId()`, `listConversations()`,
   `exportBundle(passphrase)`, `importBundle(passphrase, bundle, mode)`.
