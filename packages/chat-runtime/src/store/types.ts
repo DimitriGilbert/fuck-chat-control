@@ -184,6 +184,18 @@ export interface ConversationRepository {
     options?: AppendMessageOptions,
   ): Promise<ConversationMessage>;
   getMessages(id: ConversationId): Promise<ConversationMessage[]>;
+  /**
+   * R8/F6: list the stored message ids for a conversation WITHOUT decrypting
+   * the rows — message ids are stored as cleartext columns/keys in every
+   * repo, so this never touches the at-rest key. The merge-import path dedups
+   * incoming bundle message ids against this seam: reading ids only keeps a
+   * single corrupt ciphertext row from aborting the scan (getMessages would
+   * surface it as WrongPassphrase on the in-memory repo, or silently omit
+   * the id on the browser repo and let a later insert collide as a raw
+   * DuplicateKeyError). Same {@link StoreErrorCode.ConversationNotFound}
+   * contract as {@link getMessages}.
+   */
+  listMessageIds(id: ConversationId): Promise<string[]>;
   storePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void>;
   /**
    * Replace the peer identity even if one is already pinned. Used only by the

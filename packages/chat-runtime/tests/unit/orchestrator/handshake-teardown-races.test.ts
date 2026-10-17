@@ -270,6 +270,10 @@ class GatedRepository implements ConversationRepository {
     return this.inner.getMessages(id);
   }
 
+  listMessageIds(id: ConversationId): Promise<string[]> {
+    return this.inner.listMessageIds(id);
+  }
+
   storePeerIdentity(id: ConversationId, fingerprint: string, publicKey: PublicKey): Promise<void> {
     return runGated(this.gates.storePeerIdentity, () =>
       this.inner.storePeerIdentity(id, fingerprint, publicKey),

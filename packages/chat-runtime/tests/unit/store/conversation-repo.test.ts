@@ -13,6 +13,8 @@ import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 import { StoreErrorCode } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 
+import { bytesToHex, bytesToBase64 } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
+
 import { bytesEqual, conversationId, deterministicPublicKey, fingerprintOf } from "./_helpers";
 
 const PLAINTEXT_A = "hello world";
@@ -330,5 +332,163 @@ describe("InMemoryConversationRepository — slice 3 (per-conversation and full 
     expect(await repo.getPeerIdentity(idA)).toBeNull();
     expect(repo.serialize().conversations).toEqual([]);
     expect(repo.serialize().messages).toEqual([]);
+  });
+});
+
+describe("InMemoryConversationRepository — reload hardening (R8/F7)", () => {
+  it("rejects a malformed conversation id hex BEFORE wiping existing data", async () => {
+    const { repo, key } = newKeyedRepo();
+    const keep = conversationId(30);
+    await repo.createConversation(keep, 1000);
+    await repo.appendMessage(keep, "keep me", MessageDirection.Sent, 1100);
+
+    await expect(
+      repo.reload(key, {
+        conversations: [{ id: "zz-not-hex", createdAt: 1, displayName: null, peer: null }],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+    // Validation runs BEFORE clearAll — the pre-existing contents survive.
+    expect((await repo.getMessages(keep)).map((m) => m.text)).toEqual(["keep me"]);
+  });
+
+  it("rejects a wrong-length conversation id with MalformedBundle (not a raw Error)", async () => {
+    const { repo, key } = newKeyedRepo();
+    await expect(
+      repo.reload(key, {
+        conversations: [{ id: "aabb", createdAt: 1, displayName: null, peer: null }],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+  });
+
+  it("normalizes an uppercase conversation id to the canonical lowercase key", async () => {
+    const { repo, key } = newKeyedRepo();
+    const id = conversationId(31);
+    const upper = bytesToHex(id).toUpperCase();
+    await repo.reload(key, {
+      conversations: [{ id: upper, createdAt: 1, displayName: null, peer: null }],
+      messages: [],
+    });
+    expect(await repo.getConversation(id)).not.toBeNull();
+    expect(repo.serialize().conversations[0]?.id).toBe(bytesToHex(id));
+  });
+
+  it("wraps an invalid-base64 peer publicKey in MalformedBundle (not a raw Error)", async () => {
+    const { repo, key } = newKeyedRepo();
+    await expect(
+      repo.reload(key, {
+        conversations: [
+          {
+            id: bytesToHex(conversationId(32)),
+            createdAt: 1,
+            displayName: null,
+            peer: { fingerprint: "fp", publicKey: "not!base64" },
+          },
+        ],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+  });
+
+  it("wraps a peer publicKey that decodes but is not a valid SEC1 key in MalformedBundle", async () => {
+    const { repo, key } = newKeyedRepo();
+    // 65 zero bytes: valid base64 but fails the uncompressed-SEC1 prefix check.
+    await expect(
+      repo.reload(key, {
+        conversations: [
+          {
+            id: bytesToHex(conversationId(33)),
+            createdAt: 1,
+            displayName: null,
+            peer: { fingerprint: "fp", publicKey: bytesToBase64(new Uint8Array(65)) },
+          },
+        ],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+  });
+
+  it("wraps an invalid-base64 message nonce and ciphertext in MalformedBundle", async () => {
+    const { repo, key } = newKeyedRepo();
+    const hex = bytesToHex(conversationId(34));
+    for (const field of ["nonce", "ciphertext"] as const) {
+      const message = {
+        id: "m1",
+        direction: MessageDirection.Sent,
+        timestamp: 1,
+        nonce: "AAAA",
+        ciphertext: "AAAA",
+        [field]: "not!base64",
+      };
+      await expect(
+        repo.reload(key, {
+          conversations: [{ id: hex, createdAt: 1, displayName: null, peer: null }],
+          messages: [{ conversationId: hex, messages: [message] }],
+        }),
+      ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+    }
+  });
+
+  it("rejects duplicate message groups for the same conversation instead of silently overwriting", async () => {
+    const { repo, key } = newKeyedRepo();
+    const hex = bytesToHex(conversationId(35));
+    const message = {
+      id: "m1",
+      direction: MessageDirection.Sent,
+      timestamp: 1,
+      nonce: "AAAA",
+      ciphertext: "AAAA",
+    };
+    await expect(
+      repo.reload(key, {
+        conversations: [{ id: hex, createdAt: 1, displayName: null, peer: null }],
+        messages: [
+          { conversationId: hex, messages: [message] },
+          { conversationId: hex, messages: [message] },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+  });
+
+  it("rejects a message group for an unknown conversation", async () => {
+    const { repo, key } = newKeyedRepo();
+    await expect(
+      repo.reload(key, {
+        conversations: [],
+        messages: [
+          {
+            conversationId: bytesToHex(conversationId(36)),
+            messages: [
+              {
+                id: "m1",
+                direction: MessageDirection.Sent,
+                timestamp: 1,
+                nonce: "AAAA",
+                ciphertext: "AAAA",
+              },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: StoreErrorCode.MalformedBundle });
+  });
+});
+
+describe("InMemoryConversationRepository — listMessageIds (R8/F6)", () => {
+  it("returns the cleartext ids without requiring decryptable rows", async () => {
+    const repo = newRepo();
+    const id = conversationId(40);
+    await repo.createConversation(id, 1000);
+    await repo.appendMessage(id, "a", MessageDirection.Sent, 1100, { id: "id-a" });
+    await repo.appendMessage(id, "b", MessageDirection.Sent, 1200, { id: "id-b" });
+    expect((await repo.listMessageIds(id)).sort()).toEqual(["id-a", "id-b"]);
+  });
+
+  it("throws ConversationNotFound for an unknown conversation", async () => {
+    const repo = newRepo();
+    await expect(repo.listMessageIds(conversationId(41))).rejects.toMatchObject({
+      code: StoreErrorCode.ConversationNotFound,
+    });
   });
 });

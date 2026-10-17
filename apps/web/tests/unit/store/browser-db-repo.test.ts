@@ -5,7 +5,13 @@ import type { Collection } from "@tanstack/db";
 import { encryptAtRest, generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import { bytesToBase64 } from "@fuck-eu-chat-control/chat-runtime/store/encoding";
-import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
+import {
+  ImportMode,
+  InMemoryConversationRepository,
+  MessageDirection,
+  exportBundle,
+  importBundle,
+} from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
 import type { ConversationRow, MessageRow } from "@/features/chat/store/browser-db-repo";
@@ -631,5 +637,273 @@ describe("BrowserDbConversationRepository — at-rest record binding AAD (R1:F2)
 
     const list = await repo.getMessages(id);
     expect(list.map((m) => m.text)).toEqual(["legacy row"]);
+  });
+});
+
+describe("BrowserDbConversationRepository — listMessageIds (R8/F6)", () => {
+  it("returns stored ids verbatim, including rows whose ciphertext is corrupt", async () => {
+    const { repo, messages } = makeRepoWithCollections();
+    const id = conversationId(70);
+    await repo.createConversation(id, 1);
+    await repo.appendMessage(id, "a", MessageDirection.Sent, 1, { id: "id-a" });
+    messages.update("id-a", (draft) => {
+      draft.ciphertext = "AAAA";
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // getMessages would skip the corrupt row; the id seam must still see it
+      // — that is what keeps merge dedup from colliding at insert time.
+      expect(await repo.listMessageIds(id)).toEqual(["id-a"]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("throws ConversationNotFound for an unknown conversation", async () => {
+    const repo = makeRepo();
+    await expect(repo.listMessageIds(conversationId(71))).rejects.toMatchObject({
+      code: "conversation_not_found",
+    });
+  });
+
+  it("merge import skips a stored-but-corrupt row's id instead of colliding (R8/F6)", async () => {
+    const { repo, messages } = makeRepoWithCollections();
+    const owner = conversationId(72);
+    await repo.createConversation(owner, 1);
+    await repo.appendMessage(owner, "stored", MessageDirection.Sent, 10, { id: "corrupt-id" });
+    messages.update("corrupt-id", (draft) => {
+      draft.ciphertext = "AAAA";
+    });
+
+    const source = new InMemoryConversationRepository(generateAtRestKey());
+    const incoming = conversationId(73);
+    await source.createConversation(incoming, 2);
+    await source.appendMessage(incoming, "dup", MessageDirection.Received, 20, {
+      id: "corrupt-id",
+    });
+
+    // Pre-fix the dedup scan used getMessages, which silently skipped the
+    // corrupt row → its id was missing → the append collided with the stored
+    // row as a raw DuplicateKeyError.
+    const result = await importBundle(
+      "import-passphrase",
+      await exportBundle("import-passphrase", source),
+      repo,
+      ImportMode.Merge,
+    );
+    expect(result.conversationsAdded).toBe(1);
+    expect(result.messagesImported).toBe(0);
+    expect(await repo.listMessageIds(owner)).toEqual(["corrupt-id"]);
+    expect(await repo.listMessageIds(incoming)).toEqual([]);
+  });
+});
+
+describe("BrowserDbConversationRepository — write-path races (R9/F3, R9/F4)", () => {
+  it("appendMessage rejects as orphan when the conversation is deleted between the check and the insert (R9/F3)", async () => {
+    const { repo, conversations, messages } = makeRepoWithCollections();
+    const id = conversationId(50);
+    await repo.createConversation(id, 1);
+    const key = idKeyOf(id);
+    const originalHas = conversations.has.bind(conversations);
+    let deleted = false;
+    // Simulate a concurrent clearConversation committing while the repo is
+    // parked in the encryptAtRest await: the first existence check passes,
+    // the row disappears, and the post-encrypt re-check must refuse to write.
+    const spy = vi.spyOn(conversations, "has").mockImplementation((k) => {
+      const present = originalHas(k);
+      if (present && k === key && !deleted) {
+        deleted = true;
+        void conversations.delete(k);
+      }
+      return present;
+    });
+    try {
+      await expect(
+        repo.appendMessage(id, "orphan", MessageDirection.Sent, 10),
+      ).rejects.toMatchObject({ code: "conversation_not_found" });
+      // No orphan row may persist under the deleted conversation's key.
+      expect(messages.toArray.filter((m) => m.conversationId === key)).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("createConversation surfaces ConversationNotFound when a racing delete removes the row before read-back (R9/F4)", async () => {
+    const { repo, conversations } = makeRepoWithCollections();
+    const id = conversationId(51);
+    const key = idKeyOf(id);
+    const realInsert = conversations.insert.bind(conversations);
+    // Simulate a concurrent clearAll committing while the repo awaits the
+    // insert's persistence signal — the subsequent read-back sees undefined.
+    const spy = vi.spyOn(conversations, "insert").mockImplementation((data, config) => {
+      const tx = realInsert(data, config);
+      void conversations.delete(key);
+      return tx;
+    });
+    try {
+      await expect(repo.createConversation(id, 1)).rejects.toMatchObject({
+        code: "conversation_not_found",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("BrowserDbConversationRepository — reload normalization + validation (R9/F2)", () => {
+  it("normalizes an uppercase conversation id to the canonical lowercase key", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const id = conversationId(60);
+    await repo.reload(atRestKey, {
+      conversations: [
+        { id: idKeyOf(id).toUpperCase(), createdAt: 1, displayName: null, peer: null },
+      ],
+      messages: [],
+    });
+    // Pre-fix the verbatim uppercase id persisted as the row key while
+    // idKey() lowercases every lookup — the row was unreachable.
+    expect(await repo.getConversation(id)).not.toBeNull();
+    expect(repo.serialize().conversations[0]?.id).toBe(idKeyOf(id));
+    expect((await repo.listConversations()).map((c) => c.id)).toEqual([id]);
+  });
+
+  it("normalizes an uppercase message-group conversationId so rows land under the canonical key", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const id = conversationId(61);
+    await repo.reload(atRestKey, {
+      conversations: [{ id: idKeyOf(id), createdAt: 1, displayName: null, peer: null }],
+      messages: [
+        {
+          conversationId: idKeyOf(id).toUpperCase(),
+          messages: [
+            {
+              id: "m-1",
+              direction: MessageDirection.Sent,
+              timestamp: 1,
+              nonce: "AAAA",
+              ciphertext: "AAAA",
+            },
+          ],
+        },
+      ],
+    });
+    expect(await repo.listMessageIds(id)).toEqual(["m-1"]);
+    expect(repo.serialize().messages[0]?.conversationId).toBe(idKeyOf(id));
+  });
+
+  it("rejects a non-base64 peer publicKey WITHOUT touching the collections", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const keep = conversationId(62);
+    await repo.createConversation(keep, 1);
+    await expect(
+      repo.reload(atRestKey, {
+        conversations: [
+          {
+            id: idKeyOf(conversationId(63)),
+            createdAt: 1,
+            displayName: null,
+            peer: { fingerprint: "fp", publicKey: "not!base64" },
+          },
+        ],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: "malformed_bundle" });
+    // Validation runs BEFORE the replace transaction — the survivor stays.
+    expect(await repo.getConversation(keep)).not.toBeNull();
+  });
+
+  it("rejects a peer publicKey that decodes but is not a valid SEC1 point", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    await expect(
+      repo.reload(atRestKey, {
+        conversations: [
+          {
+            id: idKeyOf(conversationId(64)),
+            createdAt: 1,
+            displayName: null,
+            // 65 zero bytes: valid base64, fails the SEC1 prefix check.
+            peer: { fingerprint: "fp", publicKey: bytesToBase64(new Uint8Array(65)) },
+          },
+        ],
+        messages: [],
+      }),
+    ).rejects.toMatchObject({ code: "malformed_bundle" });
+  });
+
+  it("rejects a non-base64 message nonce/ciphertext", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const hex = idKeyOf(conversationId(65));
+    for (const field of ["nonce", "ciphertext"] as const) {
+      const message = {
+        id: "m1",
+        direction: MessageDirection.Sent,
+        timestamp: 1,
+        nonce: "AAAA",
+        ciphertext: "AAAA",
+        [field]: "not!base64",
+      };
+      await expect(
+        repo.reload(atRestKey, {
+          conversations: [{ id: hex, createdAt: 1, displayName: null, peer: null }],
+          messages: [{ conversationId: hex, messages: [message] }],
+        }),
+      ).rejects.toMatchObject({ code: "malformed_bundle" });
+    }
+  });
+
+  it("rejects duplicate message groups and globally-duplicate message ids", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const hex = idKeyOf(conversationId(66));
+    const message = {
+      id: "m1",
+      direction: MessageDirection.Sent,
+      timestamp: 1,
+      nonce: "AAAA",
+      ciphertext: "AAAA",
+    };
+    await expect(
+      repo.reload(atRestKey, {
+        conversations: [{ id: hex, createdAt: 1, displayName: null, peer: null }],
+        messages: [
+          { conversationId: hex, messages: [message] },
+          { conversationId: hex, messages: [] },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "malformed_bundle" });
+
+    // Message rows are keyed by id GLOBALLY — the same id under a second
+    // conversation collides exactly like a same-conversation duplicate.
+    const hexB = idKeyOf(conversationId(67));
+    await expect(
+      repo.reload(atRestKey, {
+        conversations: [
+          { id: hex, createdAt: 1, displayName: null, peer: null },
+          { id: hexB, createdAt: 2, displayName: null, peer: null },
+        ],
+        messages: [
+          { conversationId: hex, messages: [message] },
+          { conversationId: hexB, messages: [{ ...message }] },
+        ],
+      }),
+    ).rejects.toMatchObject({ code: "malformed_bundle" });
+  });
+
+  it("accepts a valid peer pin and reads it back after reload", async () => {
+    const { repo, atRestKey } = makeRepoWithCollections();
+    const id = conversationId(68);
+    const publicKey = deterministicPublicKey(8);
+    await repo.reload(atRestKey, {
+      conversations: [
+        {
+          id: idKeyOf(id),
+          createdAt: 1,
+          displayName: null,
+          peer: { fingerprint: "fp-ok", publicKey: bytesToBase64(publicKey) },
+        },
+      ],
+      messages: [],
+    });
+    const peer = await repo.getPeerIdentity(id);
+    expect(peer?.fingerprint).toBe("fp-ok");
   });
 });

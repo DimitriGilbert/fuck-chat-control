@@ -99,6 +99,10 @@ class AppendMessageFlakeWrapper implements ConversationRepository {
     return await this.inner.getMessages(id);
   }
 
+  async listMessageIds(id: ConversationId): Promise<string[]> {
+    return await this.inner.listMessageIds(id);
+  }
+
   async storePeerIdentity(
     id: ConversationId,
     fingerprint: string,

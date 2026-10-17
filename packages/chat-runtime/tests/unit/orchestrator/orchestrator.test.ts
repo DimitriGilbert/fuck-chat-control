@@ -504,6 +504,10 @@ describe("ConversationOrchestrator", () => {
         return this.inner.getMessages(id);
       }
 
+      listMessageIds(id: ConversationId): Promise<string[]> {
+        return this.inner.listMessageIds(id);
+      }
+
       storePeerIdentity(
         id: ConversationId,
         fingerprint: string,

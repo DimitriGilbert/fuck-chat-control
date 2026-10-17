@@ -308,7 +308,18 @@ export class BrowserDbConversationRepository
       // R4/F6: await the SQLite commit, not just the optimistic local insert.
       await this.awaitPersistence(this.conversations.insert(row));
     }
-    return this.toRecord(id, this.conversations.get(key) as ConversationRow);
+    // R9/F4: the awaitPersistence above parked this coroutine — a racing
+    // clearConversation/clearAll can delete the row before this read-back.
+    // Surface a typed StoreError instead of a raw TypeError from toRecord on
+    // an undefined row.
+    const stored = this.conversations.get(key);
+    if (stored === undefined) {
+      throw new StoreError(
+        StoreErrorCode.ConversationNotFound,
+        "conversation was deleted before the create could be read back",
+      );
+    }
+    return this.toRecord(id, stored);
   }
 
   async getConversation(id: ConversationId): Promise<ConversationRecord | null> {
@@ -363,6 +374,17 @@ export class BrowserDbConversationRepository
     // sealed before the binding still decrypt via decryptAtRest's legacy
     // empty-AAD fallback.
     const sealed = await encryptAtRest(atRestKey, encoded, messageRecordAad(id, direction));
+    // R9/F3: the encrypt await parked this coroutine — a concurrent
+    // clearConversation/clearAll may have committed meanwhile. Re-check
+    // before inserting so the row cannot persist as an orphan (unreadable —
+    // its conversationId references nothing — and poisoning serialize/reload
+    // with a message group for an unknown conversation).
+    if (!this.conversations.has(convoKey)) {
+      throw new StoreError(
+        StoreErrorCode.ConversationNotFound,
+        "conversation was deleted while the message was being encrypted",
+      );
+    }
     const row: MessageRow = {
       id: messageId,
       conversationId: convoKey,
@@ -431,6 +453,21 @@ export class BrowserDbConversationRepository
     }
     out.sort((a, b) => a.timestamp - b.timestamp || a.id.localeCompare(b.id));
     return out;
+  }
+
+  async listMessageIds(id: ConversationId): Promise<string[]> {
+    const convoKey = idKey(id);
+    if (!this.conversations.has(convoKey)) {
+      throw new StoreError(
+        StoreErrorCode.ConversationNotFound,
+        "cannot list message ids for a conversation that does not exist",
+      );
+    }
+    // R8/F6: the id + conversationId columns are cleartext — return them
+    // verbatim (INCLUDING rows whose ciphertext is corrupt) so the merge-import
+    // dedup sees every stored id and never collides with a raw
+    // DuplicateKeyError at messages.insert.
+    return this.messages.toArray.filter((m) => m.conversationId === convoKey).map((m) => m.id);
   }
 
   async storePeerIdentity(
@@ -620,39 +657,140 @@ export class BrowserDbConversationRepository
   }
 
   async reload(atRestKey: AtRestKey, state: SerializedState): Promise<void> {
-    // R6/F5: validate the ENTIRE incoming state BEFORE touching the
+    // R6/F5 + R9/F2: validate the ENTIRE incoming state BEFORE touching the
     // collections — every conversation id must be well-formed hex of exactly
-    // CONVERSATION_ID_BYTES bytes, and every message group must reference a
-    // known conversation. Validation failures must reject the reload outright
-    // rather than half-applying.
+    // CONVERSATION_ID_BYTES bytes, every message group must reference a known
+    // conversation, every peer key must decode to a valid SEC1 P-256 point,
+    // and every nonce/ciphertext must be valid base64. Validation failures
+    // must reject the reload outright rather than half-applying.
+    //
+    // Ids are NORMALIZED to the canonical lowercase hex key before they are
+    // persisted: an uppercase incoming id passes hexToBytes but idKey()
+    // lowercases, so storing it verbatim would yield unreachable keys and a
+    // split-brain listConversations.
     const conversationRows: ConversationRow[] = [];
     const conversationIds = new Set<string>();
     for (const convo of state.conversations) {
-      // Throws StoreError(MalformedBundle) on bad hex / wrong length.
-      decodeRowConversationId(convo.id);
-      conversationIds.add(convo.id);
+      if (convo === null || typeof convo !== "object") {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          "serialized conversation must be an object",
+        );
+      }
+      // Throws StoreError(MalformedBundle) on bad hex / wrong length; the
+      // return value carries the canonical lowercase row key.
+      const canonicalId = bytesToHex(decodeRowConversationId(convo.id));
+      if (conversationIds.has(canonicalId)) {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          `serialized state contains conversation ${convo.id} more than once`,
+        );
+      }
+      conversationIds.add(canonicalId);
+      if (typeof convo.createdAt !== "number" || !Number.isFinite(convo.createdAt)) {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          `conversation ${convo.id} createdAt must be a finite number`,
+        );
+      }
+      if (convo.displayName !== null && typeof convo.displayName !== "string") {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          `conversation ${convo.id} displayName must be a string or null`,
+        );
+      }
+      let peerFingerprint: string | null = null;
+      let peerPublicKey: string | null = null;
+      if (convo.peer !== null) {
+        const peer = convo.peer;
+        // Mirrors the in-memory repo's deserializePeer: the pinned key must
+        // decode to a valid SEC1 P-256 point BEFORE it is persisted, and the
+        // fingerprint must be a string.
+        if (
+          typeof peer !== "object" ||
+          typeof peer.fingerprint !== "string" ||
+          typeof peer.publicKey !== "string"
+        ) {
+          throw new StoreError(
+            StoreErrorCode.MalformedBundle,
+            `conversation ${convo.id} peer must be an object with string fingerprint/publicKey`,
+          );
+        }
+        decodeOrMalformed("peer publicKey", () => encodePublicKey(base64ToBytes(peer.publicKey)));
+        peerFingerprint = peer.fingerprint;
+        peerPublicKey = peer.publicKey;
+      }
       conversationRows.push({
-        id: convo.id,
+        id: canonicalId,
         createdAt: convo.createdAt,
         displayName: convo.displayName,
-        peerFingerprint: convo.peer?.fingerprint ?? null,
-        peerPublicKey: convo.peer?.publicKey ?? null,
+        peerFingerprint,
+        peerPublicKey,
         authFailed: convo.authFailed === true,
         authFailedAt: convo.authFailedAt ?? null,
       });
     }
     const messageRows: MessageRow[] = [];
+    const seenMessageIds = new Set<string>();
+    const seenMessageGroups = new Set<string>();
     for (const group of state.messages) {
-      if (!conversationIds.has(group.conversationId)) {
+      if (group === null || typeof group !== "object" || !Array.isArray(group.messages)) {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          "serialized message group must be an object with a messages array",
+        );
+      }
+      const canonicalGroupId = bytesToHex(decodeRowConversationId(group.conversationId));
+      if (!conversationIds.has(canonicalGroupId)) {
         throw new StoreError(
           StoreErrorCode.MalformedBundle,
           `serialized state references messages for an unknown conversation ${group.conversationId}`,
         );
       }
+      if (seenMessageGroups.has(canonicalGroupId)) {
+        throw new StoreError(
+          StoreErrorCode.MalformedBundle,
+          `serialized state lists messages for conversation ${group.conversationId} more than once`,
+        );
+      }
+      seenMessageGroups.add(canonicalGroupId);
       for (const m of group.messages) {
+        if (m === null || typeof m !== "object") {
+          throw new StoreError(
+            StoreErrorCode.MalformedBundle,
+            `serialized message in conversation ${group.conversationId} must be an object`,
+          );
+        }
+        if (typeof m.id !== "string" || m.id.length === 0) {
+          throw new StoreError(
+            StoreErrorCode.MalformedBundle,
+            `serialized message id in conversation ${group.conversationId} must be a non-empty string`,
+          );
+        }
+        // Message rows are keyed by id GLOBALLY — a duplicated id in the
+        // incoming state would silently overwrite via the incomingMessages
+        // map below, so reject it here.
+        if (seenMessageIds.has(m.id)) {
+          throw new StoreError(
+            StoreErrorCode.MalformedBundle,
+            `serialized state contains message id ${m.id} more than once`,
+          );
+        }
+        seenMessageIds.add(m.id);
+        if (typeof m.timestamp !== "number" || !Number.isFinite(m.timestamp)) {
+          throw new StoreError(
+            StoreErrorCode.MalformedBundle,
+            `serialized message ${m.id} timestamp must be a finite number`,
+          );
+        }
+        // The stored fields must decode as base64 BEFORE they are persisted —
+        // a verbatim invalid string would poison every later getMessages
+        // decrypt pass.
+        decodeStoredBase64(m.nonce, `message ${m.id} nonce`);
+        decodeStoredBase64(m.ciphertext, `message ${m.id} ciphertext`);
         messageRows.push({
           id: m.id,
-          conversationId: group.conversationId,
+          conversationId: canonicalGroupId,
           direction: assertDirection(m.direction),
           timestamp: m.timestamp,
           nonce: m.nonce,
@@ -849,6 +987,44 @@ function assertDirection(value: string): MessageDirection {
     throw new StoreError(StoreErrorCode.MalformedBundle, `unknown message direction ${value}`);
   }
   return dir;
+}
+
+/**
+ * R9/F2: decode a base64 serialized-state field, surfacing both a non-string
+ * value and invalid base64 as typed MalformedBundle instead of a raw
+ * TypeError/Error. Mirrors the in-memory repo's decodeStoredBase64.
+ */
+function decodeStoredBase64(input: string, field: string): Uint8Array {
+  if (typeof input !== "string") {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `serialized ${field} must be a base64 string`,
+    );
+  }
+  try {
+    return base64ToBytes(input);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `serialized ${field} is not valid base64: ${detail}`,
+    );
+  }
+}
+
+/**
+ * R9/F2: run a decoder and convert any non-StoreError failure (raw Error from
+ * base64ToBytes, ProtocolError for a bad key shape) into a typed
+ * MalformedBundle. Mirrors the in-memory repo's decodeOrMalformed.
+ */
+function decodeOrMalformed<T>(field: string, decode: () => T): T {
+  try {
+    return decode();
+  } catch (err) {
+    if (err instanceof StoreError) throw err;
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new StoreError(StoreErrorCode.MalformedBundle, `serialized ${field}: ${detail}`);
+  }
 }
 
 function newMessageId(): string {

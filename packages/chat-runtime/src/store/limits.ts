@@ -14,8 +14,28 @@ export const MAX_ENVELOPE_CIPHERTEXT_BYTES = 16 * 1024 * 1024;
 /** Maximum decoded byte length of `kdf.salt`. */
 export const MAX_SALT_BYTES = 64;
 
-/** Maximum decoded byte length of `aead.nonce`. */
+/**
+ * Minimum decoded byte length of `kdf.salt` (R8/F3 floor). Argon2id itself
+ * requires ≥ 8 bytes; a shorter salt must be rejected as MalformedBundle
+ * pre-auth rather than escaping the KDF as a raw Error.
+ */
+export const MIN_SALT_BYTES = 8;
+
+/**
+ * Maximum decoded byte length of `aead.nonce`. The pre-auth CEILING stays
+ * loose — the exact 96-bit GCM length is enforced by the importer against
+ * `GCM_NONCE_BYTES` (protocol/limits.ts) after the decode, so a wrong-length
+ * nonce surfaces as MalformedBundle instead of CryptoError(InvalidArgument).
+ */
 export const MAX_NONCE_BYTES = 24;
+
+/**
+ * Maximum character length of a payload `peer.fingerprint` (R8/F4). The
+ * production fingerprint is the 17-char safety number; test vectors use
+ * 130-char hex. The cap rejects absurd/hostile values while leaving ample
+ * headroom for either shape.
+ */
+export const MAX_FINGERPRINT_CHARS = 256;
 
 /** Maximum number of conversations in a single bundle payload. */
 export const MAX_CONVERSATIONS = 1024;

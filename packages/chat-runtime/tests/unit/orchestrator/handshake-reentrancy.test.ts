@@ -107,6 +107,10 @@ class CountingRepository implements ConversationRepository {
     return this.inner.getMessages(id);
   }
 
+  listMessageIds(id: ConversationId): Promise<string[]> {
+    return this.inner.listMessageIds(id);
+  }
+
   async storePeerIdentity(
     id: ConversationId,
     fingerprint: string,

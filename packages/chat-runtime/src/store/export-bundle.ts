@@ -2,8 +2,14 @@ import { decryptAtRest, deriveKeyFromPassphrase, encryptAtRest } from "../crypto
 import type { KdfParams } from "../crypto/at-rest";
 import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
+import { zeroize } from "../crypto/primitives";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
-import { CONVERSATION_ID_BYTES, EXPORT_BUNDLE_VERSION, PUBLIC_KEY_BYTES } from "../protocol/limits";
+import {
+  CONVERSATION_ID_BYTES,
+  EXPORT_BUNDLE_VERSION,
+  GCM_NONCE_BYTES,
+  PUBLIC_KEY_BYTES,
+} from "../protocol/limits";
 import type { ConversationId } from "../protocol/types";
 
 import { clearAllAuthFailedDurable, markAuthFailedDurable } from "./auth-failed-store";
@@ -19,9 +25,11 @@ import {
   MAX_BUNDLE_BYTES,
   MAX_CONVERSATIONS,
   MAX_ENVELOPE_CIPHERTEXT_BYTES,
+  MAX_FINGERPRINT_CHARS,
   MAX_MESSAGES_PER_CONVERSATION,
   MAX_NONCE_BYTES,
   MAX_SALT_BYTES,
+  MIN_SALT_BYTES,
 } from "./limits";
 import { MessageDirection, MESSAGE_DIRECTION_VALUES, StoreError, StoreErrorCode } from "./types";
 import type {
@@ -144,21 +152,28 @@ export async function exportBundle(
   const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
   const salt = randomSalt();
   const bundleKey = await deriveKeyFromPassphrase(passphrase, salt);
-  const sealed = await encryptAtRest(bundleKey, payloadBytes);
-  const bundle: ExportBundle = {
-    v: EXPORT_BUNDLE_VERSION,
-    kdf: {
-      algorithm: KDF_ALGORITHM,
-      version: ARGON2_VERSION,
-      m: ARGON2_MEMORY_BYTES,
-      t: ARGON2_ITERATIONS,
-      p: ARGON2_PARALLELISM,
-      salt: bytesToBase64(salt),
-    },
-    aead: { algorithm: AEAD_ALGORITHM, nonce: bytesToBase64(sealed.nonce) },
-    ciphertext: bytesToBase64(sealed.ciphertext),
-  };
-  return JSON.stringify(bundle);
+  try {
+    const sealed = await encryptAtRest(bundleKey, payloadBytes);
+    const bundle: ExportBundle = {
+      v: EXPORT_BUNDLE_VERSION,
+      kdf: {
+        algorithm: KDF_ALGORITHM,
+        version: ARGON2_VERSION,
+        m: ARGON2_MEMORY_BYTES,
+        t: ARGON2_ITERATIONS,
+        p: ARGON2_PARALLELISM,
+        salt: bytesToBase64(salt),
+      },
+      aead: { algorithm: AEAD_ALGORITHM, nonce: bytesToBase64(sealed.nonce) },
+      ciphertext: bytesToBase64(sealed.ciphertext),
+    };
+    return JSON.stringify(bundle);
+  } finally {
+    // R8/F2: wipe the bundle KEK and the plaintext payload on every path —
+    // the returned JSON retains only the sealed envelope.
+    zeroize(bundleKey);
+    zeroize(payloadBytes);
+  }
 }
 
 export async function importBundle(
@@ -176,7 +191,24 @@ export async function importBundle(
   }
   const envelope = parseEnvelope(bundle);
   const salt = decodeBoundedBase64(envelope.kdf.salt, MAX_SALT_BYTES, "kdf.salt");
+  // R8/F3 floor: decodeBoundedBase64 enforces the ceiling only; a too-short
+  // salt previously reached argon2id and escaped as a raw Error pre-auth.
+  if (salt.length < MIN_SALT_BYTES) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `kdf.salt must be at least ${MIN_SALT_BYTES} bytes, got ${salt.length}`,
+    );
+  }
   const nonce = decodeBoundedBase64(envelope.aead.nonce, MAX_NONCE_BYTES, "aead.nonce");
+  // R8/F3 floor: only the AES-256-GCM 96-bit nonce is valid — a wrong-length
+  // nonce previously escaped decryptAtRest as CryptoError(InvalidArgument)
+  // pre-auth.
+  if (nonce.length !== GCM_NONCE_BYTES) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `aead.nonce must be exactly ${GCM_NONCE_BYTES} bytes, got ${nonce.length}`,
+    );
+  }
   // R8/F3: cap the decoded ciphertext length BEFORE allocating the
   // Uint8Array — base64ToBytes enforces maxBytes against the pre-decode
   // length calculation, so a hostile envelope cannot wedge the device.
@@ -190,17 +222,51 @@ export async function importBundle(
   // to KiB (hash-wasm's memorySize unit) by dividing by 1024.
   const kdfParams = envelopeKdfParams(envelope.kdf);
   const bundleKey = await deriveKeyFromPassphrase(passphrase, salt, kdfParams);
-  let payloadBytes: Uint8Array;
   try {
-    payloadBytes = await decryptAtRest(bundleKey, nonce, ciphertext);
-  } catch (err) {
-    if (err instanceof CryptoError && err.code === CryptoErrorCode.AuthenticationFailed) {
-      throw new StoreError(StoreErrorCode.WrongPassphrase, "wrong passphrase or tampered bundle");
+    let payloadBytes: Uint8Array;
+    try {
+      payloadBytes = await decryptAtRest(bundleKey, nonce, ciphertext);
+    } catch (err) {
+      if (err instanceof CryptoError && err.code === CryptoErrorCode.AuthenticationFailed) {
+        throw new StoreError(StoreErrorCode.WrongPassphrase, "wrong passphrase or tampered bundle");
+      }
+      throw err;
     }
-    throw err;
+    try {
+      return await importPayload(payloadBytes, repo, mode);
+    } finally {
+      // R8/F2: wipe the decrypted plaintext once parse/validation/persistence
+      // (and decodeIdentity, which reads the PARSED string — the returned
+      // deviceIdentity buffer is intentionally handed to the caller) are done.
+      zeroize(payloadBytes);
+    }
+  } finally {
+    // R8/F2: wipe the bundle KEK on every path — decrypt failure included.
+    zeroize(bundleKey);
   }
+}
+
+/**
+ * Post-decrypt half of {@link importBundle}: parse, validate, and persist the
+ * payload. Split out so the caller can wrap the whole flow in the R8/F2
+ * plaintext-zeroize finally while keeping the merge/replace branching in one
+ * readable unit.
+ */
+async function importPayload(
+  payloadBytes: Uint8Array,
+  repo: ConversationRepository,
+  mode: ImportMode,
+): Promise<ImportResult> {
   const payload = parsePayload(payloadBytes);
   const validated = validateConversations(payload);
+  // R8/F5: decode the device identity BEFORE any repo mutation. In the merge
+  // branch this previously ran inside the return literal — AFTER
+  // createConversation/storePeerIdentity/appendMessage had already committed —
+  // so a malformed identity threw post-mutation and the controller skipped
+  // refreshConversations, leaving a half-imported repo with no UI refresh.
+  // Evaluating it here matches replace-mode's rollback-guarded ordering: the
+  // payload is fully proven before the first write.
+  const deviceIdentity = decodeIdentity(payload.identity);
   if (mode === ImportMode.Replace) {
     // CR-6: atomic Replace. Snapshot the pre-existing state BEFORE clearAll so
     // a mid-import failure (e.g. an AtRestLockedError thrown by a
@@ -225,7 +291,7 @@ export async function importBundle(
         conversationsMerged: 0,
         messagesImported,
         conflicts: [],
-        deviceIdentity: decodeIdentity(payload.identity),
+        deviceIdentity,
       };
     } catch (importError) {
       // Rollback: restore the pre-existing state captured before clearAll.
@@ -313,8 +379,10 @@ export async function importBundle(
     if (existing.displayName === null && convo.displayName !== null) {
       await repo.setDisplayName(convo.id, convo.displayName);
     }
-    const existingMessages = await repo.getMessages(convo.id);
-    const existingIds = new Set(existingMessages.map((m) => m.id));
+    // R8/F6: dedup needs the stored ids only — read them through the
+    // cleartext seam so a corrupt stored row cannot abort the merge with a
+    // decrypt failure the way getMessages would.
+    const existingIds = new Set(await repo.listMessageIds(convo.id));
     for (const message of convo.messages) {
       if (existingIds.has(message.id)) continue;
       // Any REMAINING snapshot hit is a row stored under a different
@@ -336,7 +404,7 @@ export async function importBundle(
     conversationsMerged,
     messagesImported,
     conflicts,
-    deviceIdentity: decodeIdentity(payload.identity),
+    deviceIdentity,
   };
 }
 
@@ -686,15 +754,20 @@ type RepoSnapshot = ValidatedConversation[];
  * is already stored under a different conversation as an already-imported
  * duplicate (skip) — appending it instead would insert against the
  * globally-keyed row in durable repos (the browser repo's `messages`
- * collection throws a raw DuplicateKeyError there). Same read surface as the
- * merge loop itself (listConversations + getMessages), so it adds no error
- * types the import path does not already surface.
+ * collection throws a raw DuplicateKeyError there).
+ *
+ * R8/F6: this reads the repo's CLEARTEXT id seam ({@link
+ * ConversationRepository.listMessageIds}) rather than getMessages, which
+ * AEAD-decrypts every row. Decrypting here meant one corrupt stored row
+ * aborted the whole import as WrongPassphrase (in-memory repo), or — worse —
+ * had its id silently omitted on the browser repo, so a re-import collided
+ * with the existing row as a raw DuplicateKeyError at messages.insert.
  */
 async function collectStoredMessageIds(repo: ConversationRepository): Promise<Set<string>> {
   const ids = new Set<string>();
   for (const convo of await repo.listConversations()) {
-    for (const message of await repo.getMessages(convo.id)) {
-      ids.add(message.id);
+    for (const id of await repo.listMessageIds(convo.id)) {
+      ids.add(id);
     }
   }
   return ids;
@@ -825,6 +898,17 @@ function decodePeerIdentity(peer: PayloadPeer): PeerIdentityRecord {
   }
   if (typeof peer.publicKey !== "string") {
     throw new StoreError(StoreErrorCode.MalformedBundle, "peer publicKey must be a string");
+  }
+  // R8/F4: the fingerprint was persisted verbatim — a non-string value
+  // produced phantom IdentityConflicts downstream (and a TypeError at the
+  // mobile home screen's `.slice`). Cap the length consistently with the
+  // sibling fields' bounds; production fingerprints are the 17-char safety
+  // number and test vectors are 130-char hex, far under the cap.
+  if (typeof peer.fingerprint !== "string" || peer.fingerprint.length > MAX_FINGERPRINT_CHARS) {
+    throw new StoreError(
+      StoreErrorCode.MalformedBundle,
+      `peer fingerprint must be a string of at most ${MAX_FINGERPRINT_CHARS} characters`,
+    );
   }
   // R4/F5: a valid-string-but-invalid-base64 publicKey must surface as a typed
   // StoreError, not escape as a raw Error from base64ToBytes — route it

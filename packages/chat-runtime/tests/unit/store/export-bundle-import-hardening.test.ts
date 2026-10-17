@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { generateAtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
+import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import {
   decryptAtRest,
   deriveKeyFromPassphrase,
@@ -28,6 +29,7 @@ import {
   ARGON2_MEMORY_MAX_BYTES,
   ARGON2_PARALLELISM_MAX,
   MAX_ENVELOPE_CIPHERTEXT_BYTES,
+  MAX_FINGERPRINT_CHARS,
   MAX_NONCE_BYTES,
   MAX_SALT_BYTES,
 } from "@fuck-eu-chat-control/chat-runtime/store/limits";
@@ -205,6 +207,10 @@ class AppendMessageFlakeWrapper implements ConversationRepository {
 
   async getMessages(id: ConversationId): Promise<ConversationMessage[]> {
     return await this.inner.getMessages(id);
+  }
+
+  async listMessageIds(id: ConversationId): Promise<string[]> {
+    return await this.inner.listMessageIds(id);
   }
 
   async storePeerIdentity(
@@ -671,6 +677,156 @@ describe("import bundle — message id uniqueness within the payload and against
     expect(merged.map((m) => m.text)).toEqual(["local-only", "fresh"]);
     expect(merged.map((m) => m.id)).not.toContain("shared-message-id");
     expect((await target.getMessages(owner)).map((m) => m.id)).toEqual(["shared-message-id"]);
+  });
+});
+
+describe("import bundle — R8/F3 envelope salt/nonce floors", () => {
+  it("rejects a kdf.salt shorter than 8 bytes with MalformedBundle (not a raw KDF error)", async () => {
+    const envelope = await singleConversationEnvelope();
+    envelope.kdf.salt = bytesToBase64(new Uint8Array(4));
+    await expectMalformedBundle(JSON.stringify(envelope));
+  });
+
+  it("rejects an aead.nonce that is not exactly 12 bytes with MalformedBundle (not CryptoError)", async () => {
+    const envelope = await singleConversationEnvelope();
+    // 16 bytes is under the MAX_NONCE_BYTES ceiling but is not a valid GCM
+    // nonce — pre-fix this escaped decryptAtRest as CryptoError(InvalidArgument).
+    envelope.aead.nonce = bytesToBase64(new Uint8Array(16));
+    await expectMalformedBundle(JSON.stringify(envelope));
+  });
+});
+
+describe("import bundle — R8/F4 peer fingerprint validation", () => {
+  let envelope: EnvelopeObject;
+
+  beforeAll(async () => {
+    const source = freshRepo();
+    await seedConversation(source, 1, 1000, { peerSeed: 5 });
+    envelope = parseEnvelopeObject(await exportBundle(PASSPHRASE, source));
+  });
+
+  it("rejects a non-string peer fingerprint with MalformedBundle", async () => {
+    await expectMalformedBundle(
+      await withMutatedPayload(envelope, (payload) => {
+        (conversationAt(payload)["peer"] as Record<string, unknown>)["fingerprint"] = 42;
+      }),
+    );
+  });
+
+  it("rejects a fingerprint longer than MAX_FINGERPRINT_CHARS with MalformedBundle", async () => {
+    await expectMalformedBundle(
+      await withMutatedPayload(envelope, (payload) => {
+        (conversationAt(payload)["peer"] as Record<string, unknown>)["fingerprint"] = "f".repeat(
+          MAX_FINGERPRINT_CHARS + 1,
+        );
+      }),
+    );
+  });
+});
+
+describe("import bundle — R8/F5 device identity decodes before merge mutations", () => {
+  it("a malformed identity aborts a Merge BEFORE any conversation is persisted", async () => {
+    const envelope = await singleConversationEnvelope();
+    const hostile = await withMutatedPayload(envelope, (payload) => {
+      payload["identity"] = "not!base64";
+    });
+    const target = freshRepo();
+    await expect(importBundle(PASSPHRASE, hostile, target, ImportMode.Merge)).rejects.toMatchObject(
+      { code: StoreErrorCode.MalformedBundle },
+    );
+    // Pre-fix decodeIdentity ran inside the return literal — after the merge
+    // loop had already committed the conversation — so the import threw
+    // post-mutation and left a half-imported repo.
+    expect(await target.listConversations()).toEqual([]);
+  });
+});
+
+describe("import bundle — R8/F6 merge dedup reads cleartext ids, not decrypted rows", () => {
+  /**
+   * Corrupt a repo's stored ciphertext through a serialize/tamper/reload
+   * round-trip: the row remains stored under its cleartext id but can no
+   * longer be opened, so getMessages surfaces WrongPassphrase.
+   */
+  async function corruptFirstStoredRow(repo: InMemoryConversationRepository): Promise<void> {
+    const key = repoKeyFor(repo);
+    const state = repo.serialize();
+    const tampered = {
+      conversations: state.conversations,
+      messages: state.messages.map((group) => ({
+        ...group,
+        messages: group.messages.map((m, index) =>
+          index === 0 ? { ...m, ciphertext: bytesToBase64(new Uint8Array(48)) } : m,
+        ),
+      })),
+    };
+    await repo.reload(key, tampered);
+  }
+
+  const repoKeys = new WeakMap<InMemoryConversationRepository, AtRestKey>();
+  function keyedRepo(): InMemoryConversationRepository {
+    const key = generateAtRestKey();
+    const repo = new InMemoryConversationRepository(key);
+    repoKeys.set(repo, key);
+    return repo;
+  }
+  function repoKeyFor(repo: InMemoryConversationRepository): AtRestKey {
+    const key = repoKeys.get(repo);
+    if (key === undefined) throw new Error("test bug: repo was not built by keyedRepo()");
+    return key;
+  }
+
+  it("merge succeeds and dedups a new conversation when a stored row's ciphertext is corrupt", async () => {
+    const target = keyedRepo();
+    const owner = conversationId(1);
+    await target.createConversation(owner, 1000);
+    await target.appendMessage(owner, "stored", "sent", 1100, { id: "corrupt-row-id" });
+    await corruptFirstStoredRow(target);
+    await expect(target.getMessages(owner)).rejects.toMatchObject({
+      code: StoreErrorCode.WrongPassphrase,
+    });
+
+    const source = freshRepo();
+    const incoming = conversationId(2);
+    await source.createConversation(incoming, 2000);
+    await source.appendMessage(incoming, "dup", "received", 2100, { id: "corrupt-row-id" });
+    await source.appendMessage(incoming, "fresh", "received", 2200, { id: "fresh-id" });
+
+    // Pre-fix the dedup scan used getMessages, so the corrupt row aborted the
+    // whole import as WrongPassphrase.
+    const result = await importBundle(
+      PASSPHRASE,
+      await exportBundle(PASSPHRASE, source),
+      target,
+      ImportMode.Merge,
+    );
+    expect(result.conversationsAdded).toBe(1);
+    expect(result.messagesImported).toBe(1);
+    expect(await target.listMessageIds(incoming)).toEqual(["fresh-id"]);
+    expect(await target.listMessageIds(owner)).toEqual(["corrupt-row-id"]);
+  });
+
+  it("merge into an existing conversation succeeds despite a corrupt stored row", async () => {
+    const target = keyedRepo();
+    const shared = conversationId(3);
+    await target.createConversation(shared, 1000);
+    await target.appendMessage(shared, "corrupt", "sent", 1100, { id: "row-1" });
+    await corruptFirstStoredRow(target);
+
+    const source = freshRepo();
+    await source.createConversation(shared, 1000);
+    await source.appendMessage(shared, "new", "received", 1200, { id: "row-2" });
+
+    // Pre-fix the existingIds dedup read through getMessages and surfaced the
+    // corrupt row as WrongPassphrase mid-merge.
+    const result = await importBundle(
+      PASSPHRASE,
+      await exportBundle(PASSPHRASE, source),
+      target,
+      ImportMode.Merge,
+    );
+    expect(result.conversationsMerged).toBe(1);
+    expect(result.messagesImported).toBe(1);
+    expect((await target.listMessageIds(shared)).sort()).toEqual(["row-1", "row-2"]);
   });
 });
 
