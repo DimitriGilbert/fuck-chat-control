@@ -217,6 +217,7 @@ function assertProtocolVersion(value: number): void {
 
 function assertAadFields(aad: FrameAad): void {
   assertProtocolVersion(aad.protocolVersion);
+  assertExactLength(aad.senderSessionId, SESSION_ID_BYTES, "sender session id");
   assertUint32(aad.senderSequence, "sender sequence");
   assertUint32(aad.transferId, "transfer id");
   assertUint32(aad.chunkId, "chunk id");
@@ -302,6 +303,13 @@ export function encodeTranscript(t: Transcript): Uint8Array {
   }
   assertProtocolVersion(t.protocolVersion);
   assertAuthMode(t.authMode);
+  assertExactLength(t.conversationId, CONVERSATION_ID_BYTES, "conversation id");
+  assertExactLength(t.initiatorIdentityKey, PUBLIC_KEY_BYTES, "initiator identity key");
+  assertExactLength(t.responderIdentityKey, PUBLIC_KEY_BYTES, "responder identity key");
+  assertExactLength(t.initiatorEphemeralKey, PUBLIC_KEY_BYTES, "initiator ephemeral key");
+  assertExactLength(t.responderEphemeralKey, PUBLIC_KEY_BYTES, "responder ephemeral key");
+  assertExactLength(t.initiatorSessionId, SESSION_ID_BYTES, "initiator session id");
+  assertExactLength(t.responderSessionId, SESSION_ID_BYTES, "responder session id");
   const out = new Uint8Array(TRANSCRIPT_BYTES);
   let offset = 0;
   out[offset++] = t.transcriptVersion;
@@ -381,6 +389,8 @@ function compareBytes(a: Uint8Array, b: Uint8Array): number {
 }
 
 export function deriveRole(localIdentityKey: PublicKey, remoteIdentityKey: PublicKey): Role {
+  assertExactLength(localIdentityKey, PUBLIC_KEY_BYTES, "local identity key");
+  assertExactLength(remoteIdentityKey, PUBLIC_KEY_BYTES, "remote identity key");
   const cmp = compareBytes(localIdentityKey, remoteIdentityKey);
   if (cmp === 0) {
     throw new ProtocolError(
@@ -422,6 +432,7 @@ export function decodeTransferCancelPayload(payload: Uint8Array): number {
 }
 
 export function deriveNonce(senderSessionId: SessionId, sequence: number): Uint8Array {
+  assertExactLength(senderSessionId, SESSION_ID_BYTES, "sender session id");
   assertUint32(sequence, "sequence");
   const nonce = new Uint8Array(GCM_NONCE_BYTES);
   nonce.set(senderSessionId.subarray(0, GCM_NONCE_BYTES));

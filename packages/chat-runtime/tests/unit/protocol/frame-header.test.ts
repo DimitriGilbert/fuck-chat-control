@@ -80,6 +80,23 @@ describe("encodeFrameHeader / decodeFrameHeader (50 bytes)", () => {
     expect(decoded.chunkId).toBe(0);
   });
 
+  // ADR 002: chunkId is a 0-based index, so `0` is the legitimate id of the
+  // first chunk of every transfer — not an absent-marker — for chunk frames.
+  // Pin this so a future "hardening" change cannot reject it.
+  it("round-trips a file-chunk header with chunkId 0 (first chunk, 0-based index)", () => {
+    const header = baseHeader({
+      frameType: FrameType.FileChunk,
+      transferId: 0x1234,
+      chunkId: 0,
+      ciphertextLength: MAX_CHUNK_BYTES,
+    });
+    const decoded = decodeFrameHeader(encodeFrameHeader(header));
+    expect(decoded.frameType).toBe(FrameType.FileChunk);
+    expect(decoded.transferId).toBe(0x1234);
+    expect(decoded.chunkId).toBe(0);
+    expect(decoded.ciphertextLength).toBe(MAX_CHUNK_BYTES);
+  });
+
   it("round-trips a control header", () => {
     const header = baseHeader({
       frameType: FrameType.Control,

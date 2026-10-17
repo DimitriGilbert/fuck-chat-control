@@ -6,6 +6,7 @@ import {
   ProtocolError,
   ProtocolErrorCode,
 } from "@fuck-eu-chat-control/chat-runtime/protocol/errors";
+import { PUBLIC_KEY_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { Role, type PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 function pubKey(seed: number): PublicKey {
@@ -32,6 +33,25 @@ describe("deriveRole (smaller identity key bytes is initiator)", () => {
     const aRole = deriveRole(a, b);
     const bRole = deriveRole(b, a);
     expect(aRole).not.toBe(bRole);
+  });
+
+  it("rejects identity keys that are not exactly PUBLIC_KEY_BYTES", () => {
+    const a = pubKey(7);
+    const short = new Uint8Array(PUBLIC_KEY_BYTES - 1) as unknown as PublicKey;
+    const long = new Uint8Array(PUBLIC_KEY_BYTES + 1) as unknown as PublicKey;
+    for (const [local, remote] of [
+      [short, a],
+      [a, short],
+      [long, a],
+      [a, long],
+    ] as const) {
+      try {
+        deriveRole(local, remote);
+        throw new Error("expected throw");
+      } catch (err) {
+        expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+      }
+    }
   });
 
   it("throws RoleIndeterminable when identity keys are identical", () => {

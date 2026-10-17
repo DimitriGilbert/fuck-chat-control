@@ -132,6 +132,26 @@ describe("encodeAad / decodeAad (46 bytes, canonical order)", () => {
       expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidFieldRelation);
     }
   });
+
+  it("rejects a short sender session id on encode", () => {
+    const short = new Uint8Array(SESSION_ID_BYTES - 1) as unknown as SessionId;
+    try {
+      encodeAad(baseAad({ senderSessionId: short }));
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+    }
+  });
+
+  it("rejects an oversized sender session id on encode", () => {
+    const long = new Uint8Array(SESSION_ID_BYTES + 1) as unknown as SessionId;
+    try {
+      encodeAad(baseAad({ senderSessionId: long }));
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+    }
+  });
 });
 
 describe("decodeAad malformed-input rejection", () => {

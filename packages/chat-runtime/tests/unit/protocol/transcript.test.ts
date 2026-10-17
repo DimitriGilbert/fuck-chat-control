@@ -134,6 +134,45 @@ describe("encodeTranscript / decodeTranscript (343 bytes, canonical order)", () 
     }
   });
 
+  it("rejects a short conversation id on encode", () => {
+    const t = sampleTranscript();
+    (t as { conversationId: ConversationId }).conversationId = new Uint8Array(
+      CONVERSATION_ID_BYTES - 1,
+    ) as unknown as ConversationId;
+    try {
+      encodeTranscript(t);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+    }
+  });
+
+  it("rejects an oversized identity key on encode", () => {
+    const t = sampleTranscript();
+    (t as { initiatorIdentityKey: PublicKey }).initiatorIdentityKey = new Uint8Array(
+      PUBLIC_KEY_BYTES + 1,
+    ) as unknown as PublicKey;
+    try {
+      encodeTranscript(t);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+    }
+  });
+
+  it("rejects a short session id on encode", () => {
+    const t = sampleTranscript();
+    (t as { responderSessionId: SessionId }).responderSessionId = new Uint8Array(
+      SESSION_ID_BYTES - 1,
+    ) as unknown as SessionId;
+    try {
+      encodeTranscript(t);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+    }
+  });
+
   it("rejects a malformed transcript buffer (wrong length)", () => {
     try {
       decodeTranscript(new Uint8Array(TRANSCRIPT_BYTES - 1));

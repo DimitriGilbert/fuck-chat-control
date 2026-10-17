@@ -277,15 +277,15 @@ data (AAD) for AES-GCM is the FrameHeader without the trailing
 
 FrameHeader fields, in canonical order:
 
-| Width (B) | Field             | Encoding / notes                                         |
-| --------- | ----------------- | -------------------------------------------------------- |
-| 1         | protocol version  | `0x01`                                                   |
-| 32        | sender session ID | raw, identifies the sender's nonce/replay space          |
-| 4         | sender sequence   | uint32 BE, monotonically increasing within the session   |
-| 1         | frame type        | enum (§9)                                                |
-| 4         | transfer ID       | uint32 BE, `0` when the frame is not part of a transfer  |
-| 4         | chunk ID          | uint32 BE, `0` when the frame is not a chunk             |
-| 4         | ciphertext length | uint32 BE, length of the `ciphertext` field that follows |
+| Width (B) | Field             | Encoding / notes                                                                             |
+| --------- | ----------------- | -------------------------------------------------------------------------------------------- |
+| 1         | protocol version  | `0x01`                                                                                       |
+| 32        | sender session ID | raw, identifies the sender's nonce/replay space                                              |
+| 4         | sender sequence   | uint32 BE, monotonically increasing within the session                                       |
+| 1         | frame type        | enum (§9)                                                                                    |
+| 4         | transfer ID       | uint32 BE, `0` when the frame is not part of a transfer                                      |
+| 4         | chunk ID          | uint32 BE, 0-based index of the chunk within the transfer; `0` when the frame is not a chunk |
+| 4         | ciphertext length | uint32 BE, length of the `ciphertext` field that follows                                     |
 
 FrameHeader size: **50 bytes**. AAD size: **46 bytes** (everything but
 `ciphertextLength`).
@@ -297,14 +297,20 @@ ciphertext buffer is allocated.
 
 ### 8.2 Frame type enum
 
-| Value  | Name             | Transfer/Chunk IDs         | Ciphertext payload cap                         |
-| ------ | ---------------- | -------------------------- | ---------------------------------------------- |
-| `0x01` | `text`           | both `0`                   | `MAX_TEXT_FRAME_BYTES` (16384)                 |
-| `0x02` | `file_manifest`  | transfer ID set, chunk `0` | `MAX_TEXT_FRAME_BYTES` (manifest envelope cap) |
-| `0x03` | `file_chunk`     | transfer + chunk IDs set   | `MAX_CHUNK_BYTES` (16384)                      |
-| `0x04` | `control`        | both `0`                   | `MAX_TEXT_FRAME_BYTES` (control envelope cap)  |
-| `0x05` | `media_manifest` | transfer ID set, chunk `0` | reserved, not implemented                      |
-| `0x06` | `media_chunk`    | transfer + chunk IDs set   | reserved, not implemented                      |
+| Value  | Name             | Transfer/Chunk IDs                        | Ciphertext payload cap                         |
+| ------ | ---------------- | ----------------------------------------- | ---------------------------------------------- |
+| `0x01` | `text`           | both `0`                                  | `MAX_TEXT_FRAME_BYTES` (16384)                 |
+| `0x02` | `file_manifest`  | transfer ID set, chunk `0`                | `MAX_TEXT_FRAME_BYTES` (manifest envelope cap) |
+| `0x03` | `file_chunk`     | transfer ID set, chunk ID = 0-based index | `MAX_CHUNK_BYTES` (16384)                      |
+| `0x04` | `control`        | both `0`                                  | `MAX_TEXT_FRAME_BYTES` (control envelope cap)  |
+| `0x05` | `media_manifest` | transfer ID set, chunk `0`                | reserved, not implemented                      |
+| `0x06` | `media_chunk`    | transfer ID set, chunk ID = 0-based index | reserved, not implemented                      |
+
+For `file_chunk`/`media_chunk`, `chunk ID` is a 0-based index into the
+transfer's chunks: the first chunk of every transfer legitimately carries
+`chunk ID = 0`. `0` is the absent-marker only for frame types that are not
+chunks — `text`, `control`, and the manifest types, where it means "no chunk".
+See [ADR 002](../adr/002-chunkid-indexing.md).
 
 Any other frame type value is a terminal protocol error. The media types are
 typed so future work does not need to break the enum; they are rejected by the

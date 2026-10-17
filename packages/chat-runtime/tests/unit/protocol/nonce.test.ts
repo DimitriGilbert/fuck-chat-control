@@ -55,6 +55,19 @@ describe("deriveNonce (session-id-prefix XOR sequence)", () => {
     expect(nonce[11]).toBe(sid[11] ^ 0xff);
   });
 
+  it("rejects a session id that is not exactly SESSION_ID_BYTES", () => {
+    const short = new Uint8Array(SESSION_ID_BYTES - 1) as unknown as SessionId;
+    const long = new Uint8Array(SESSION_ID_BYTES + 1) as unknown as SessionId;
+    for (const bad of [short, long]) {
+      try {
+        deriveNonce(bad, 0);
+        throw new Error("expected throw");
+      } catch (err) {
+        expect((err as ProtocolError).code).toBe(ProtocolErrorCode.InvalidLength);
+      }
+    }
+  });
+
   it("rejects a negative sequence", () => {
     try {
       deriveNonce(sessionId(0), -1);

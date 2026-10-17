@@ -10,6 +10,7 @@ import {
   resolveGlare,
 } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { deriveRole } from "@fuck-eu-chat-control/chat-runtime/protocol/codec";
+import { PUBLIC_KEY_BYTES } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import { Role, type PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 
 describe("ConnectionStateMachine — valid transitions", () => {
@@ -183,7 +184,7 @@ describe("deriveGlareRole — local-key parity rule (R7/F5)", () => {
 describe("deriveResumeGlareRole — §3 two-key derivation (R3F4)", () => {
   /** Hand-built SEC1 key: 0x04 prefix, chosen first X byte, chosen fill. */
   function key(firstX: number, fill: number): PublicKey {
-    const bytes = new Uint8Array(33);
+    const bytes = new Uint8Array(PUBLIC_KEY_BYTES);
     bytes[0] = 0x04;
     bytes[1] = firstX;
     bytes.fill(fill, 2);
