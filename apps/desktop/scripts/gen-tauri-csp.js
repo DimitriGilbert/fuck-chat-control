@@ -17,16 +17,17 @@
  * origin. When FCK_BROKER_URL is unset or set-but-empty (dev), the
  * localhost-only directive is kept verbatim.
  *
- * R9/F4 — script-src: the template ships 'unsafe-inline' only because the
- * built shell (apps/web/.output/public/_shell.html) contains two deterministic
- * inline scripts — TanStack Router's tsr-scroll-restoration bootstrap and the
- * $tsr-stream-barrier hydration script. 'unsafe-inline' would let ANY injected
- * inline script run with full page authority, the XSS shape an E2E chat UI
- * must not ship; deleting it outright would break hydration. Instead this
- * script pins the two scripts with 'sha256-<base64>' CSP hash-sources computed
- * over the exact body the browser hashes (leading/trailing HTML whitespace
- * stripped, per CSP3). 'wasm-unsafe-eval' is kept — hash-wasm compiles WASM at
- * runtime. Tauri continues to nonce its own injected scripts automatically.
+ * R9/F4 — script-src: the committed template ships a FAIL-CLOSED script-src
+ * ('self' + 'wasm-unsafe-eval', NO 'unsafe-inline') so a bare `tauri build`
+ * without this overlay can never grant injected inline scripts full page
+ * authority — the XSS shape an E2E chat UI must not ship. The built shell
+ * (apps/web/.output/public/_shell.html) contains two deterministic inline
+ * scripts — TanStack Router's tsr-scroll-restoration bootstrap and the
+ * $tsr-stream-barrier hydration script — which this script pins by
+ * INSERTING 'sha256-<base64>' CSP hash-sources computed over the exact body
+ * the browser hashes (leading/trailing HTML whitespace stripped, per CSP3).
+ * 'wasm-unsafe-eval' is kept — hash-wasm compiles WASM at runtime. Tauri
+ * continues to nonce its own injected scripts automatically.
  *
  * Fail-loudly contract: if either expected inline script is missing, appears
  * more than once, or an unexpected third inline script appears, this script
@@ -110,11 +111,15 @@ function findDirective(directives, name, source) {
  * Resolve the broker origin (scheme://host[:port]) from FCK_BROKER_URL.
  * Whitespace-only counts as unset, mirroring the Rust-side fallback
  * (broker_url_is_set's trim-aware guard on option_env!("FCK_BROKER_URL") in
- * src-tauri/src/lib.rs). Userinfo (user:pass@host) is rejected here even
- * though `new URL` accepts it — the WebSocket constructor does not, so a
- * URL the shipped binary could never dial must fail the build instead.
+ * src-tauri/src/lib.rs). Userinfo (user:pass@host) and '#' fragments are
+ * rejected here even though `new URL` accepts them — the WebSocket
+ * constructor does not (fragments throw SyntaxError), so a URL the shipped
+ * binary could never dial must fail the build instead. Plaintext ws:// is
+ * likewise rejected for non-loopback hosts outside --dev mode; the same
+ * guards are mirrored in src-tauri/src/lib.rs's BROKER_URL bake path since
+ * this script can be bypassed by a bare `tauri build`.
  */
-function brokerOrigin() {
+function brokerOrigin(devMode) {
   const raw = (process.env.FCK_BROKER_URL ?? "").trim();
   if (raw === "") {
     return null;
@@ -130,6 +135,12 @@ function brokerOrigin() {
       `FCK_BROKER_URL must use ws:// or wss:// — browsers only accept WebSocket schemes when dialing the broker: ${raw}`,
     );
   }
+  if (url.hash !== "") {
+    return fail(
+      `FCK_BROKER_URL must not contain a '#' fragment — the WebSocket constructor ` +
+        `throws SyntaxError on fragment-bearing URLs: ${raw}`,
+    );
+  }
   if (url.username !== "" || url.password !== "") {
     return fail(
       `FCK_BROKER_URL must not embed userinfo (user:pass@host) — the WebSocket ` +
@@ -138,6 +149,16 @@ function brokerOrigin() {
   }
   if (url.hostname === "") {
     return fail(`FCK_BROKER_URL must include a host: ${raw}`);
+  }
+  // URL.hostname normalizes case and keeps the brackets on IPv6 literals.
+  const isLoopback =
+    url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if (!devMode && url.protocol === "ws:" && !isLoopback) {
+    return fail(
+      `FCK_BROKER_URL uses plaintext ws:// for a non-localhost host in a release build — ` +
+        `use wss:// for remote brokers (ws:// stays allowed for localhost/127.0.0.1/[::1] ` +
+        `and in --dev mode): ${raw}`,
+    );
   }
   // url.host lowercases the host and keeps the port only when non-default for
   // the scheme — exactly the origin form CSP host-sources expect.
@@ -209,7 +230,7 @@ const security = conf?.app?.security;
 if (!security || typeof security.csp !== "string" || typeof security.devCsp !== "string") {
   fail("tauri.conf.json template must define app.security.csp and app.security.devCsp strings.");
 }
-const origin = brokerOrigin();
+const origin = brokerOrigin(devMode);
 
 let overlay;
 if (devMode) {
@@ -227,11 +248,11 @@ if (devMode) {
   if (!scriptSrc[1].includes("'wasm-unsafe-eval'")) {
     fail("csp script-src must keep 'wasm-unsafe-eval' — hash-wasm compiles WASM at runtime.");
   }
-  const unsafeInlineIndex = scriptSrc[1].indexOf("'unsafe-inline'");
-  if (unsafeInlineIndex === -1) {
+  if (scriptSrc[1].includes("'unsafe-inline'")) {
     fail(
-      "csp script-src no longer contains 'unsafe-inline' — it is expected to be replaced with " +
-        "per-build sha256 hashes here; update tauri.conf.json and this script together.",
+      "csp script-src must NOT contain 'unsafe-inline' in the committed template — a bare " +
+        "`tauri build` (no overlay) would ship it. The template stays fail-closed and this " +
+        "script inserts the per-build hashes; update tauri.conf.json and this script together.",
     );
   }
   const hashes = inlineScriptHashes(
@@ -240,7 +261,7 @@ if (devMode) {
       'Run "pnpm --filter web build" first (package.json build:desktop does).',
     ),
   );
-  scriptSrc[1].splice(unsafeInlineIndex, 1, ...hashes);
+  scriptSrc[1].push(...hashes);
 
   const connectSrc = findDirective(directives, "connect-src", "csp");
   if (origin) {
@@ -256,6 +277,18 @@ if (devMode) {
     app: { security: { csp: serializeCsp(directives) } },
     build: { beforeBuildCommand: "node scripts/copy-shell.js" },
   };
+  // Fail-closed assertion: however the directives above were edited, the
+  // effective script-src must never ship 'unsafe-inline'. (style-src
+  // legitimately keeps it, so the check targets the script-src tokens, not
+  // the whole CSP string.)
+  const effectiveScriptSrc = findDirective(
+    parseCsp(overlay.app.security.csp),
+    "script-src",
+    "effective csp",
+  );
+  if (effectiveScriptSrc[1].includes("'unsafe-inline'")) {
+    fail("refusing to write an overlay whose effective script-src contains 'unsafe-inline'.");
+  }
   console.log(`[gen-tauri-csp] script-src hashes: ${hashes.join(" ")}`);
   console.log(`[gen-tauri-csp] connect-src broker origin: ${origin ?? "(unset — localhost-only)"}`);
   console.log(`[gen-tauri-csp] effective csp: ${overlay.app.security.csp}`);

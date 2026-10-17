@@ -11,10 +11,12 @@
 //! The broker URL is compile-time config, resolved here in priority order:
 //!   1. `FCK_BROKER_URL` env var — the deployed broker, e.g.
 //!      `wss://chat.example.com/ws`. A value that is unset, empty, or
-//!      whitespace-only counts as unset (the same rule as `FCK_ICE_SERVERS`
-//!      below, checked after trimming), so a CI shape like `FCK_BROKER_URL=`
-//!      — or one holding only padding — cannot bake a blank URL into the SPA
-//!      config. A set value bakes verbatim (untrimmed): WHATWG URL parsing,
+//!      whitespace-only counts as unset (`FCK_ICE_SERVERS` below uses only
+//!      the narrower `is_empty()` check — a whitespace-only ICE value fails
+//!      JSON parsing and degrades to `[]` anyway), so a CI shape like
+//!      `FCK_BROKER_URL=` — or one holding only padding — cannot bake a
+//!      blank URL into the SPA config. A set value bakes verbatim
+//!      (untrimmed): WHATWG URL parsing,
 //!      used by both the SPA's `new WebSocket()` and gen-tauri-csp.js's
 //!      `new URL()`, strips surrounding ASCII whitespace, so the dialed URL
 //!      and the CSP origin match the JS seam either way.
@@ -67,6 +69,83 @@ const fn broker_url_is_set(url: &str) -> bool {
     !url.trim_ascii().is_empty()
 }
 
+/// True when `url` contains a `#` fragment delimiter. The `WebSocket`
+/// constructor throws `SyntaxError` on fragment-bearing URLs — mirrored from
+/// gen-tauri-csp.js `brokerOrigin()`'s `url.hash` rejection (the CSP script
+/// is a build-time overlay a bare `tauri build` can bypass, so the guard
+/// lives in the bake path too).
+const fn url_has_fragment(url: &str) -> bool {
+    let bytes = url.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Case-insensitive ASCII prefix check. `b | 0x20` folds ASCII letter case
+/// pairs; for the prefixes matched here (`ws://`, `localhost`, `127.0.0.1`,
+/// `[::1]`) the fold can only produce false positives against bytes outside
+/// the ASCII printable range, which cannot appear in a dialable URL anyway.
+const fn starts_with_ascii_ci(s: &[u8], prefix: &[u8]) -> bool {
+    if s.len() < prefix.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < prefix.len() {
+        if s[i] | 0x20 != prefix[i] | 0x20 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// True when the bytes of `url` starting at `start` equal `token` AND are
+/// immediately followed by a host terminator (end of string, `:` port,
+/// `/` path, `?` query, or `#` fragment). `@` is deliberately NOT a
+/// terminator: in `ws://localhost@evil.com` the real host is `evil.com`, so
+/// ending the host token at `@` would misclassify a remote origin as
+/// loopback. Without the terminator check, `localhost.evil.com` would
+/// wrongly match `localhost` too.
+const fn host_token_eq(url: &str, start: usize, token: &[u8]) -> bool {
+    let bytes = url.as_bytes();
+    if bytes.len() < start + token.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < token.len() {
+        if bytes[start + i] | 0x20 != token[i] | 0x20 {
+            return false;
+        }
+        i += 1;
+    }
+    let next = start + token.len();
+    if next == bytes.len() {
+        return true;
+    }
+    matches!(bytes[next], b':' | b'/' | b'?' | b'#')
+}
+
+/// True when `url` dials a remote host over plaintext `ws://` — forbidden in
+/// release builds (mirrored from gen-tauri-csp.js `brokerOrigin()`). `ws://`
+/// stays allowed for loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) so
+/// dev/CI builds keep working with the local dev broker; every other scheme
+/// (`wss://` included) is untouched — scheme validation proper happens in
+/// gen-tauri-csp.js and in the SPA's `new WebSocket()`.
+const fn is_plaintext_remote_ws(url: &str) -> bool {
+    if !starts_with_ascii_ci(url.as_bytes(), b"ws://") {
+        return false;
+    }
+    // The host token starts right after the 5-byte `ws://` scheme prefix.
+    !(host_token_eq(url, 5, b"localhost")
+        || host_token_eq(url, 5, b"127.0.0.1")
+        || host_token_eq(url, 5, b"[::1]"))
+}
+
 /// The broker URL the desktop app dials. See the module docs for the resolution
 /// rules. Inline so a `const` (not a `String`) — it is interpolated into the
 /// init script as a JSON string literal via `serde_json` to avoid ad-hoc
@@ -86,8 +165,31 @@ const fn broker_url_is_set(url: &str) -> bool {
 /// `build_init_script`, so the panic aborts COMPILATION. The guard is
 /// structural — the dev URL is unrepresentable in a release binary, not
 /// merely discouraged at runtime.
+///
+/// Two more bake-time guards mirror gen-tauri-csp.js `brokerOrigin()` (that
+/// script is a build overlay and can be bypassed): a `#` fragment aborts
+/// compilation in EVERY profile (`new WebSocket()` throws `SyntaxError` on
+/// fragments, so the value could never be dialed), and in release builds a
+/// plaintext `ws://` URL for a non-loopback host aborts compilation too —
+/// `ws://` stays allowed for localhost/127.0.0.1/[::1] and in debug builds.
 const BROKER_URL: &str = match option_env!("FCK_BROKER_URL") {
-    Some(url) if broker_url_is_set(url) => url,
+    Some(url) if broker_url_is_set(url) => {
+        if url_has_fragment(url) {
+            panic!(
+                "FCK_BROKER_URL contains a '#' fragment — the WebSocket constructor \
+                 throws SyntaxError on fragment-bearing URLs, so the baked value \
+                 could never be dialed"
+            );
+        }
+        if !cfg!(debug_assertions) && is_plaintext_remote_ws(url) {
+            panic!(
+                "FCK_BROKER_URL uses plaintext ws:// for a non-localhost host in a \
+                 release build — use wss:// for remote brokers (ws:// stays allowed \
+                 for localhost/127.0.0.1/[::1])"
+            );
+        }
+        url
+    }
     _ => {
         if cfg!(debug_assertions) {
             "ws://localhost:3001/ws"
@@ -122,7 +224,11 @@ const PUBLIC_BASE_URL: &str = BASE_URL;
 /// Operator-configured ICE servers as a JSON array string, read from
 /// `FCK_ICE_SERVERS` at compile time. Defaults to `"[]"` so loopback/LAN/CI
 /// builds keep working with host-candidate-only WebRTC. See the module docs
-/// for why this is baked in rather than fetched at runtime.
+/// for why this is baked in rather than fetched at runtime. `build.rs`
+/// re-validates the value before the lib compiles — panicking the build
+/// script on malformed JSON in release builds (`cargo:warning` in debug) —
+/// so the runtime parse in `build_init_script` below is a defense-in-depth
+/// fallback rather than the only gate.
 const ICE_SERVERS_JSON: &str = match option_env!("FCK_ICE_SERVERS") {
     Some(s) if !s.is_empty() => s,
     _ => "[]",
@@ -182,6 +288,14 @@ struct IceServer {
 /// on every launch from `tauri::Builder::setup`, so a malformed env value must
 /// degrade to the same loopback-only posture as the unset case (see the
 /// module-level docs) instead of bricking the binary.
+///
+/// The emitted script DEEP-freezes the injected config: `writable: false`
+/// on the `defineProperty` descriptor only locks the `window.__FCK_CONFIG__`
+/// binding — `getFckConfig()` (fck-config.ts) returns the live object
+/// reference, so an unfrozen value would let page code mutate `brokerUrl`
+/// or rewrite `iceServers`, persisting across provider remounts. The
+/// recursive freeze covers the config object, the `iceServers` array, each
+/// entry, and any nested `urls` arrays.
 fn build_init_script() -> String {
     let broker_url = serde_json::to_string(BROKER_URL).expect("broker URL is a finite string");
     let base_url = serde_json::to_string(BASE_URL).expect("base URL is a finite string");
@@ -219,13 +333,26 @@ fn build_init_script() -> String {
     let ice_servers = serde_json::to_string(&ice_servers).expect(
         "IceServer only contains serializable primitives (String/Option<String>/Vec<String>)",
     );
+    // The deepFreeze IIFE runs before defineProperty so the published value
+    // is already frozen end-to-end; `configurable/writable: false` then lock
+    // the binding itself against redefinition or reassignment.
     format!(
-        "Object.defineProperty(window, '__FCK_CONFIG__', {{\n  \
-           value: {{ brokerUrl: {broker}, baseUrl: {base}, publicBaseUrl: {pbase}, iceServers: {ice} }},\n  \
-           configurable: false,\n  \
-           writable: false,\n  \
-           enumerable: true\n  \
-         }});\n",
+        concat!(
+            "(() => {{",
+            "const deepFreeze = (v) => {{",
+            "if (v !== null && typeof v === 'object' && !Object.isFrozen(v)) {{",
+            "for (const k of Object.keys(v)) deepFreeze(v[k]);",
+            "Object.freeze(v);",
+            "}}",
+            "return v;",
+            "}};",
+            "Object.defineProperty(window, '__FCK_CONFIG__', {{",
+            "value: deepFreeze({{ brokerUrl: {broker}, baseUrl: {base}, ",
+            "publicBaseUrl: {pbase}, iceServers: {ice} }}),",
+            "configurable: false, writable: false, enumerable: true",
+            "}});",
+            "}})();\n"
+        ),
         broker = broker_url,
         base = base_url,
         pbase = public_base_url,
@@ -271,7 +398,7 @@ mod tests {
     // compilation itself — without a set (non-blank) FCK_BROKER_URL a
     // release build fails at BROKER_URL's const panic, so there is no binary
     // to test in that configuration.
-    use super::{broker_url_is_set, BROKER_URL};
+    use super::{broker_url_is_set, is_plaintext_remote_ws, url_has_fragment, BROKER_URL};
 
     #[test]
     fn broker_url_resolution_matches_env() {
@@ -290,5 +417,33 @@ mod tests {
         // The guard trims only to classify: a padded real URL stays set and
         // BROKER_URL bakes the verbatim (untrimmed) value.
         assert!(broker_url_is_set(" wss://chat.example.com/ws "));
+    }
+
+    #[test]
+    fn fragment_detection_matches_websocket_rejection() {
+        assert!(url_has_fragment("wss://chat.example.com/ws#frag"));
+        assert!(url_has_fragment("ws://localhost:3001/ws#"));
+        assert!(!url_has_fragment("wss://chat.example.com/ws"));
+        assert!(!url_has_fragment("ws://localhost:3001/ws?x=1"));
+    }
+
+    #[test]
+    fn plaintext_ws_only_flags_remote_hosts() {
+        // Remote plaintext ws:// — rejected in release builds.
+        assert!(is_plaintext_remote_ws("ws://chat.example.com/ws"));
+        assert!(is_plaintext_remote_ws("WS://10.0.0.2:3001/ws"));
+        // Host-token edge cases must NOT pass as loopback: suffix tricks and
+        // userinfo still mean a remote host.
+        assert!(is_plaintext_remote_ws("ws://localhost.evil.com/ws"));
+        assert!(is_plaintext_remote_ws("ws://localhost@evil.com/ws"));
+        assert!(is_plaintext_remote_ws("ws://127.0.0.1.evil.com/ws"));
+        // Loopback plaintext stays allowed (dev/CI parity with the CSP script).
+        assert!(!is_plaintext_remote_ws("ws://localhost:3001/ws"));
+        assert!(!is_plaintext_remote_ws("ws://LOCALHOST/ws"));
+        assert!(!is_plaintext_remote_ws("ws://127.0.0.1:3001/ws"));
+        assert!(!is_plaintext_remote_ws("ws://[::1]:3001/ws"));
+        // Other schemes are untouched by this guard.
+        assert!(!is_plaintext_remote_ws("wss://chat.example.com/ws"));
+        assert!(!is_plaintext_remote_ws("https://chat.example.com/ws"));
     }
 }

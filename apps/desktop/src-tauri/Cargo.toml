@@ -12,6 +12,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# serde + serde_json also back build.rs's build-time FCK_ICE_SERVERS
+# validation (the IceServer shape is duplicated there — build scripts cannot
+# import the lib crate).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = [] }
