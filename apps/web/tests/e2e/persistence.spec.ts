@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { CONNECTION_STATE_TEXT, establishPeerPair } from "./_helpers";
+import { connectionStatePill, establishPeerPair } from "./_helpers";
 
 /**
  * Persistence e2e: proves the OPFS-backed SQLite store (TanStack DB +
@@ -20,9 +20,7 @@ test.describe("persistence across reload", () => {
     try {
       // Reach Connected so the channel is real, then send a message whose
       // text we will look for after reloading.
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 60_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 60_000 });
 
       const marker = `persistence-marker-${Date.now()}`;
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });

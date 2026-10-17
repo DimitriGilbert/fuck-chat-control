@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { CONNECTION_STATE_TEXT, establishPeerPair } from "./_helpers";
+import { CONNECTION_STATE_TEXT, connectionStatePill, establishPeerPair } from "./_helpers";
 
 /**
  * Scenario 7 (conversation list + resume/history) and scenario 8
@@ -16,11 +16,7 @@ test.describe("conversation management", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, {
-          exact: true,
-        }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
 
       // Exchange at least one message so the conversation has persisted
       // content (the list shows conversations created via start/resume).
@@ -53,17 +49,13 @@ test.describe("conversation management", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, {
-          exact: true,
-        }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
 
       // B leaves (returns to its own landing). A observes the drop: its
       // ChatView flips to Disconnected and exposes a Retry affordance.
       await pair.pageB.getByRole("button", { name: "Leave" }).click();
       await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.disconnected, {
+        connectionStatePill(pair.pageA).getByText(CONNECTION_STATE_TEXT.disconnected, {
           exact: true,
         }),
       ).toBeVisible({ timeout: 15_000 });

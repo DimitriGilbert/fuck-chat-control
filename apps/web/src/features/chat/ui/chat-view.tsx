@@ -12,8 +12,6 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from "@fuck-eu-chat-control/ui/components/input-group";
-import { Input } from "@fuck-eu-chat-control/ui/components/input";
-import { Label } from "@fuck-eu-chat-control/ui/components/label";
 import { Marker, MarkerContent } from "@fuck-eu-chat-control/ui/components/marker";
 import { Message, MessageContent } from "@fuck-eu-chat-control/ui/components/message";
 import {
@@ -30,16 +28,18 @@ import {
   TooltipTrigger,
 } from "@fuck-eu-chat-control/ui/components/tooltip";
 import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
-import { CopyIcon, PaperclipIcon, SendIcon, ShieldIcon } from "lucide-react";
+import { PaperclipIcon, SendIcon, ShieldIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { conversationIdToHex } from "@fuck-eu-chat-control/chat-runtime/orchestrator/invitation";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { MessageDirection } from "@fuck-eu-chat-control/chat-runtime/store";
 import type { ConversationMessage } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { TransferState } from "@fuck-eu-chat-control/chat-runtime/runtime/transfer-state";
+import type { ChatController } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
+import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import {
   CONNECTION_STATE_LABELS,
   CONNECTION_STATE_VARIANTS,
@@ -47,13 +47,17 @@ import {
   formatTime,
 } from "@/features/chat/ui/chat-status";
 import type { ConnectionStateVariant } from "@/features/chat/ui/chat-status";
+import { authModeDataValue, authModeGlyphLabel, authModeLabel } from "@/features/chat/ui/auth-mode";
+import { shouldRestoreDraft } from "@/features/chat/ui/draft-restore";
 import { FileTransferCard } from "@/features/chat/ui/file-transfer-card";
+import { InvitationBanner } from "@/features/chat/ui/invitation-banner";
 import { SafetyNumberDialog } from "@/features/chat/ui/safety-number-dialog";
+import { TESTIDS } from "@/features/chat/ui/testids";
 
 /**
  * The active conversation view. Rendered whenever the controller has a
- * conversation id. Composes the transcript, composer, status bar, and the
- * safety-number dialog.
+ * conversation id. Composes the transcript, composer, status header, the
+ * invitation panel (while waiting), and the verify affordance.
  */
 export function ChatView(): React.ReactElement {
   const { controller, state } = useChat();
@@ -89,22 +93,10 @@ export function ChatView(): React.ReactElement {
     const text = draft;
     controller.setDraft(activeId, "");
     void controller.sendText(activeId, text).catch((err: unknown) => {
-      // R7/F5 (Phase 12): restore only into an EMPTY draft. sendText makes a
-      // network round-trip; resetting to `text` unconditionally would clobber
-      // whatever the user typed while the send was in flight. Read the LIVE
-      // snapshot inside the catch — the `state` this closure captured at
-      // render time is stale by then.
-      //
-      // R10F2 (Phase 9): with per-session drafts the restore additionally
-      // gates on the send's target still being the ACTIVE conversation —
-      // restoring into a different session's composer would leak the failed
-      // text across conversations, the exact bug per-session drafts fix.
-      const live = controller.getState();
-      if (
-        live.active !== null &&
-        conversationIdToHex(live.active.id) === conversationIdToHex(activeId) &&
-        live.active.draft === ""
-      ) {
+      // Restore into an EMPTY draft on the still-active conversation only
+      // (see shouldRestoreDraft): the user may have typed more while the
+      // send was in flight, or switched conversations.
+      if (shouldRestoreDraft(controller.getState(), activeId)) {
         controller.setDraft(activeId, text);
       }
       toast.error("Send failed", {
@@ -136,7 +128,7 @@ export function ChatView(): React.ReactElement {
    * the same failure). The only recovery path is to start a fresh, uncoded
    * conversation. The failed session is left FIRST (R7/F8, Phase 12):
    * startConversation only swaps the active id, so without the leave every
-   * recovery click strands the dead session as a Disconnected sidebar row.
+   * recovery click strands the dead session as a Disconnected list row.
    * The orchestrator's `start()` then allocates a new conversation id and the
    * InvitationBanner takes over to surface the new link.
    */
@@ -248,7 +240,7 @@ export function ChatView(): React.ReactElement {
         )}
       >
         {state.messages.length === 0 && transfers.length === 0 ? (
-          <NoMessages />
+          <NoMessages connectionState={state.connectionState} />
         ) : (
           <MessageScrollerProvider>
             <MessageScroller className="h-full">
@@ -282,7 +274,7 @@ export function ChatView(): React.ReactElement {
         )}
         {isDragOver && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <span className="bg-background text-foreground border-border rounded-none border px-3 py-1.5 text-xs">
+            <span className="bg-background text-foreground border-border rounded-md border px-3 py-1.5 text-xs shadow-sm">
               Drop files to send end-to-end encrypted
             </span>
           </div>
@@ -374,13 +366,9 @@ export function ChatView(): React.ReactElement {
  * warning.
  */
 function TransfersSection(props: {
-  readonly transfers: readonly import("@fuck-eu-chat-control/chat-runtime/runtime/transfer-state").TransferState[];
-  readonly controller:
-    | import("@fuck-eu-chat-control/chat-runtime/runtime/chat-controller").ChatController
-    | null;
-  readonly activeId:
-    | import("@fuck-eu-chat-control/chat-runtime/protocol/types").ConversationId
-    | null;
+  readonly transfers: readonly TransferState[];
+  readonly controller: ChatController | null;
+  readonly activeId: ConversationId | null;
 }): React.ReactElement {
   const { transfers, controller, activeId } = props;
   return (
@@ -453,38 +441,10 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
   } = props;
   const variant = CONNECTION_STATE_VARIANTS[connectionState];
   const label = CONNECTION_STATE_LABELS[connectionState];
-  // SEC-4: label the session's auth provenance. PAKE sessions surface the
-  // stronger guarantee; safety-number sessions read as such so the user can
-  // tell which conversations are only verified post-hoc.
-  //
-  // R10F5 (Phase 9): label, styling, data-auth-mode, and aria-label all key
-  // on `authMode` alone. Previously the label alone keyed on `connected &&`,
-  // so a waiting/handshaking PAKE session rendered "Safety number" text on
-  // PAKE styling — an inconsistent pill that claimed the WEAKER guarantee
-  // while wearing the stronger one's colors. A not-yet-connected PAKE
-  // session now reads "PAKE (pending)" so all four signals agree.
-  const connected = connectionState === ConnectionState.Connected;
-  const authLabel =
-    authMode === AuthMode.Pake ? (connected ? "PAKE" : "PAKE (pending)") : "Safety number";
   return (
-    <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
+    <div className="flex min-h-11 flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-1.5">
       <StatusPill variant={variant} label={label} />
-      <span
-        data-slot="auth-mode-pill"
-        data-auth-mode={authMode === AuthMode.Pake ? "pake" : "safety-number"}
-        className={cn(
-          "inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium",
-          authMode === AuthMode.Pake
-            ? "bg-primary/10 text-primary"
-            : "bg-secondary text-secondary-foreground",
-        )}
-      >
-        <ShieldIcon
-          className="size-3"
-          aria-label={authMode === AuthMode.Pake ? "PAKE-authenticated" : "Safety number only"}
-        />
-        {authLabel}
-      </span>
+      <AuthPill authMode={authMode} connectionState={connectionState} />
       {safetyNumber !== null && (
         <SafetyNumberDialog safetyNumber={safetyNumber} verified={safetyNumberVerified} />
       )}
@@ -511,7 +471,7 @@ function StatusBar(props: StatusBarProps): React.ReactElement {
             Create a fresh invitation
           </Button>
         )}
-        <Button variant="outline" size="sm" onClick={onLeave}>
+        <Button variant="ghost" size="sm" onClick={onLeave}>
           Leave
         </Button>
       </div>
@@ -528,359 +488,64 @@ function StatusPill({ variant, label }: StatusPillProps): React.ReactElement {
   return (
     <span
       data-variant={variant}
-      className="bg-secondary text-secondary-foreground inline-flex items-center gap-1 rounded-none px-2 py-0.5 text-xs font-medium"
+      data-testid={TESTIDS.connectionState}
+      className={cn(
+        "bg-secondary text-secondary-foreground inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium",
+        variant === "destructive" && "bg-destructive/10 text-destructive",
+        variant === "default" && "bg-primary/10 text-primary",
+      )}
     >
-      <span className="size-1.5 rounded-none bg-current opacity-70" aria-hidden="true" />
+      <span className="size-1.5 rounded-full bg-current opacity-70" aria-hidden="true" />
       {label}
     </span>
   );
 }
 
 /**
- * While the initiator waits for a peer, the route has already flipped to
- * ChatView (because `state.conversationId` is set as soon as the conversation
- * is created). Without this banner the inviter has no way to copy the link they
- * just generated. Shows the invitation link plus a Copy button until the peer
- * connects.
- *
- * Phase 10 — PAKE affordance: a "Protect with PAKE" control lets the inviter
- * attach a 6-digit code to the invitation. Selecting it tears down the current
- * (uncoded) conversation and starts a fresh one with a CSPRNG-generated code;
- * the new invitation link carries `~<code>` in the hash so the responder's
- * `parseInvitation` runs SPAKE2 against it. The code is also shown on its own
- * line with explicit "share out-of-band" copy: an attacker who intercepts the
- * link gets the code too, so for full MITM protection the code should travel
- * a different channel than the link.
+ * The handshake-authentication pill. Plain words: "Extra code" when the
+ * handshake was code-authenticated, "Link only" otherwise. Label, styling,
+ * data-auth-mode, and glyph label all key on `authMode` alone (R10F5).
  */
-function InvitationBanner(): React.ReactElement | null {
-  const { state, controller } = useChat();
-  // Local input lets the inviter type a custom code (6 digits). Empty means
-  // we will generate a fresh CSPRNG code on toggle. Held in component state so
-  // the typing experience stays responsive independent of the controller's
-  // snapshot cadence.
-  const [codeDraft, setCodeDraft] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-
-  const invitation = state.invitation;
-  // Pull the active code out of the invitation BEFORE any early return so the
-  // useEffect below always sees the right value (no conditional hooks).
-  const hashIndex = invitation?.lastIndexOf("#") ?? -1;
-  const bare = hashIndex >= 0 ? (invitation as string).slice(hashIndex + 1) : (invitation ?? "");
-  const tildeIdx = bare.indexOf("~");
-  const activeCode = tildeIdx >= 0 ? bare.slice(tildeIdx + 1) : null;
-
-  // R10F1 (Phase 9): the checkbox is DERIVED from the active invitation's
-  // shape rather than held in local state. A failed toggle-on used to leave
-  // the box checked over an uncoded invitation (the sync effect only refires
-  // when activeCode CHANGES, and a rejected startConversation leaves it
-  // null). Deriving means the checkbox can never lie: checked iff the live
-  // invitation actually carries a code.
-  const pakeEnabled = activeCode !== null;
-
-  // Sync the custom-code input to whatever the active invitation carries.
-  // This keeps the banner honest if the conversation is replaced externally.
-  React.useEffect(() => {
-    if (activeCode !== null) setCodeDraft(activeCode);
-  }, [activeCode]);
-
-  if (invitation === null) return null;
-  // Hide once the peer is connected or the session has dropped.
-  if (
-    state.connectionState === ConnectionState.Connected ||
-    state.connectionState === ConnectionState.Disconnected
-  ) {
-    return null;
-  }
-  // After the null/hidden guards above, `invitation` is non-null and the
-  // session is still waiting/handshaking. Bind a narrowed alias so the
-  // closure handlers below get a `string` type.
-  const activeInvitation: string = invitation;
-
-  async function handleCopy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(activeInvitation);
-      toast.success("Invitation link copied");
-    } catch {
-      toast.error("Clipboard unavailable", {
-        description: "Copy the link from the address bar or select it manually.",
-      });
-    }
-  }
-
-  async function copyCode(code: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(code);
-      toast.success("PAKE code copied");
-    } catch {
-      // Non-fatal: the code is short enough to type by hand.
-    }
-  }
-
-  /**
-   * Apply the user's PAKE choice: leave the current uncoded conversation and
-   * start a fresh one with the chosen code. The orchestrator's `start()`
-   * requires the code up front (PAKE state must be ready before the peer
-   * arrives), so we cannot mutate the existing invitation in place.
-   *
-   * Removing PAKE reverses the flow: leave the coded conversation and start
-   * a fresh uncoded one.
-   *
-   * Phase 3b (CR-4): the 6-digit code is generated by the controller's
-   * `generatePakeCode()` so the CSPRNG sampling + modular reduction live in
-   * the security-relevant runtime, not the render layer.
-   *
-   * `explicitCode` (R10F1, Phase 9) lets the caller hand in a code that was
-   * JUST generated. Without it the code came from `codeDraft` — but
-   * `setCodeDraft` is asynchronous, so a regenerate that set state and called
-   * this in the same tick applied the STALE draft and silently re-issued the
-   * old code.
-   */
-  async function applyPakeChoice(next: boolean, explicitCode?: string): Promise<void> {
-    if (controller === null || busy) return;
-    setBusy(true);
-    try {
-      const currentId = state.activeConversationId;
-      if (currentId !== null) {
-        controller.leaveConversation(currentId);
-      }
-      if (next) {
-        const code =
-          explicitCode ??
-          (codeDraft.trim().length === 6 ? codeDraft.trim() : controller.generatePakeCode());
-        setCodeDraft(code);
-        await controller.startConversation({ code });
-        toast.success("PAKE-protected invitation ready", {
-          description: "Share the code with your peer out-of-band.",
-        });
-      } else {
-        await controller.startConversation();
-        toast.success("Invitation ready");
-      }
-    } catch (err: unknown) {
-      toast.error("Could not update invitation", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function handleTogglePake(): void {
-    // No local resync needed: `pakeEnabled` derives from the invitation, so a
-    // failed apply leaves the checkbox reflecting reality (unchecked when no
-    // coded invitation exists).
-    void applyPakeChoice(!pakeEnabled);
-  }
-
-  function handleRegeneratePakeCode(): void {
-    if (busy || controller === null) return;
-    const fresh = controller.generatePakeCode();
-    setCodeDraft(fresh);
-    // Apply immediately so the invitation reflects the new code. The fresh
-    // code MUST be passed explicitly — `applyPakeChoice` cannot see the
-    // `setCodeDraft` above within this same tick (R10F1).
-    void applyPakeChoice(true, fresh);
-  }
-
-  function handleCodeDraftChange(e: React.ChangeEvent<HTMLInputElement>): void {
-    // Accept only digits, cap at 6.
-    const cleaned = e.target.value.replace(/\D/g, "").slice(0, 6);
-    setCodeDraft(cleaned);
-  }
-
-  function handleApplyCustomCode(): void {
-    if (busy) return;
-    if (codeDraft.length !== 6) {
-      toast.error("Code must be 6 digits");
-      return;
-    }
-    void applyPakeChoice(true);
-  }
-
+function AuthPill({
+  authMode,
+  connectionState,
+}: {
+  readonly authMode: AuthMode;
+  readonly connectionState: ConnectionState;
+}): React.ReactElement {
   return (
-    <div className="border-b border-border px-3 py-2">
-      <p className="text-muted-foreground mb-1 text-xs">
-        Share this link with your peer. The <code>#</code> fragment stays in their URL bar and is
-        never sent to the server.
-      </p>
-      <div className="flex items-stretch gap-2">
-        <input
-          readOnly
-          value={activeInvitation}
-          onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select()}
-          className="min-w-0 flex-1 rounded-none border border-input bg-background px-2 py-1 font-mono text-xs"
-          aria-label="Invitation link"
-        />
-        <Button variant="outline" size="sm" onClick={() => void handleCopy()}>
-          <CopyIcon className="size-4" />
-          Copy link
-        </Button>
-      </div>
-
-      <PakeControl
-        enabled={pakeEnabled}
-        activeCode={activeCode}
-        codeDraft={codeDraft}
-        busy={busy}
-        onToggle={handleTogglePake}
-        onRegenerate={handleRegeneratePakeCode}
-        onCodeDraftChange={handleCodeDraftChange}
-        onApplyCustomCode={handleApplyCustomCode}
-        onCopyCode={copyCode}
-      />
-    </div>
-  );
-}
-
-interface PakeControlProps {
-  readonly enabled: boolean;
-  readonly activeCode: string | null;
-  readonly codeDraft: string;
-  readonly busy: boolean;
-  readonly onToggle: () => void;
-  readonly onRegenerate: () => void;
-  readonly onCodeDraftChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  readonly onApplyCustomCode: () => void;
-  readonly onCopyCode: (code: string) => void;
-}
-
-/**
- * The PAKE-protection affordance. Renders as a single inline strip below the
- * invitation input, matching the existing borderless quiet-UI register: a
- * checkbox + label, and a collapsible detail row that exposes the code,
- * regenerate / custom-apply actions, and the out-of-band sharing note.
- *
- * Visual language follows the Lantern design system: the saffron-gold accent
- * (bg-primary/text-primary) is reserved for the protected state's badge and
- * the checkbox's checked fill. No teal/red-brown/green.
- */
-function PakeControl(props: PakeControlProps): React.ReactElement {
-  const {
-    enabled,
-    activeCode,
-    codeDraft,
-    busy,
-    onToggle,
-    onRegenerate,
-    onCodeDraftChange,
-    onApplyCustomCode,
-    onCopyCode,
-  } = props;
-
-  // The 6-digit code currently carrying PAKE protection (displayed verbatim
-  // so the user can read/type it to their peer).
-  const displayCode = enabled ? (activeCode ?? codeDraft) : "";
-
-  return (
-    <div className="mt-2 flex flex-col gap-1.5">
-      <label className="flex cursor-pointer items-start gap-2 text-xs">
-        <input
-          type="checkbox"
-          checked={enabled}
-          onChange={onToggle}
-          disabled={busy}
-          aria-label="Protect this conversation with a 6-digit PAKE code"
-          className="mt-0.5 size-3.5 accent-primary disabled:opacity-50"
-        />
-        <span className="flex flex-col gap-0.5">
-          <span className="text-foreground inline-flex items-center gap-1 font-medium">
-            <ShieldIcon className="text-primary size-3.5" aria-hidden="true" />
-            Protect with a 6-digit code (PAKE)
-          </span>
-          <span className="text-muted-foreground leading-4">
-            Authenticates the handshake against a malicious broker. An attacker who intercepts the
-            link also gets the code — share it out-of-band for full protection.
-          </span>
-        </span>
-      </label>
-
-      {enabled && (
-        <div
-          className="bg-primary/5 border-primary/30 rounded-none border px-2 py-1.5"
-          data-slot="pake-code"
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-muted-foreground text-[10px] font-medium uppercase tracking-wide">
-              PAKE code
-            </span>
-            {displayCode.length === 6 ? (
-              <code
-                className="text-primary text-sm font-semibold tabular-nums"
-                aria-label="PAKE code"
-              >
-                {displayCode}
-              </code>
-            ) : (
-              <span className="text-muted-foreground text-xs tabular-nums">generating…</span>
-            )}
-            {displayCode.length === 6 && (
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() => onCopyCode(displayCode)}
-                disabled={busy}
-                aria-label="Copy PAKE code"
-              >
-                <CopyIcon className="size-3" />
-                Copy code
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="xs"
-              onClick={onRegenerate}
-              disabled={busy}
-              className="ml-auto"
-              aria-label="Regenerate PAKE code"
-            >
-              Regenerate
-            </Button>
-          </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <Label
-              htmlFor="pake-code-input"
-              className="text-muted-foreground text-[10px] font-medium uppercase tracking-wide"
-            >
-              Custom code
-            </Label>
-            <Input
-              id="pake-code-input"
-              type="text"
-              inputMode="numeric"
-              pattern="\d{6}"
-              maxLength={6}
-              value={codeDraft}
-              onChange={onCodeDraftChange}
-              disabled={busy}
-              placeholder="6 digits"
-              className="h-6 w-24 font-mono text-xs tabular-nums"
-              aria-label="Custom PAKE code"
-            />
-            <Button
-              variant="outline"
-              size="xs"
-              onClick={onApplyCustomCode}
-              disabled={busy || codeDraft.length !== 6}
-            >
-              Apply
-            </Button>
-          </div>
-        </div>
+    <span
+      data-slot="auth-mode-pill"
+      data-auth-mode={authModeDataValue(authMode)}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium",
+        authMode === AuthMode.Pake
+          ? "bg-primary/10 text-primary"
+          : "bg-secondary text-secondary-foreground",
       )}
-    </div>
+    >
+      <ShieldIcon className="size-3" aria-label={authModeGlyphLabel(authMode)} />
+      {authModeLabel(authMode, connectionState)}
+    </span>
   );
 }
 
-function NoMessages(): React.ReactElement {
+function NoMessages({
+  connectionState,
+}: {
+  readonly connectionState: ConnectionState;
+}): React.ReactElement {
+  const waiting = connectionState !== ConnectionState.Connected;
   return (
     <Empty>
       <EmptyHeader>
-        <EmptyTitle>No messages yet</EmptyTitle>
+        <EmptyTitle>{waiting ? "Nothing here yet" : "No messages yet"}</EmptyTitle>
       </EmptyHeader>
       <EmptyContent>
         <p className="text-muted-foreground text-sm">
-          Once the peer connects, your messages will appear here end-to-end encrypted. The server
-          never sees the content.
+          {waiting
+            ? "The conversation starts when your peer opens the link. Everything that follows is end-to-end encrypted — the server never sees the content."
+            : "Say hello. Everything you send is end-to-end encrypted — the server never sees the content."}
         </p>
       </EmptyContent>
     </Empty>

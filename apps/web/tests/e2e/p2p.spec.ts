@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { CONNECTION_STATE_TEXT, establishPeerPair } from "./_helpers";
+import { connectionStatePill, establishPeerPair, TID } from "./_helpers";
 
 /**
  * Scenarios 4, 5, 6: the real two-browser P2P conversation. Two isolated
@@ -25,12 +25,8 @@ test.describe("two-context P2P", () => {
     try {
       // Both peers should reach Connected. This is THE proof the handshake
       // completed over a real RTCPeerConnection.
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
-      await expect(
-        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageB)).toBeVisible({ timeout: 45_000 });
     } finally {
       await pair.close();
     }
@@ -43,17 +39,13 @@ test.describe("two-context P2P", () => {
     try {
       // Wait for connected first; the safety number only appears after the
       // handshake completes.
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
-      await expect(
-        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageB)).toBeVisible({ timeout: 45_000 });
 
       // Each side renders a compact "Unverified" badge that opens the safety
       // number dialog. Open both so the full number is readable in the DOM.
-      await pair.pageA.getByRole("button", { name: "Review safety number" }).click();
-      await pair.pageB.getByRole("button", { name: "Review safety number" }).click();
+      await pair.pageA.getByTestId(TID.verifyPeer).click();
+      await pair.pageB.getByTestId(TID.verifyPeer).click();
 
       // The safety number is grouped digit pairs (XX XX XX ...).
       const safetyPattern = /^\d{2} \d{2} \d{2}.*\d{2}$/;
@@ -71,8 +63,8 @@ test.describe("two-context P2P", () => {
       // Closing the dialog without confirming must not block chat. The dialog
       // also renders an icon close button (X) with an sr-only "Close" name, so
       // target the explicit footer Close button via the DialogFooter.
-      const safetyDialogA = pair.pageA.getByRole("dialog", { name: "Safety number" });
-      const safetyDialogB = pair.pageB.getByRole("dialog", { name: "Safety number" });
+      const safetyDialogA = pair.pageA.getByRole("dialog", { name: "Verify it's really them" });
+      const safetyDialogB = pair.pageB.getByRole("dialog", { name: "Verify it's really them" });
       await safetyDialogA.getByRole("button", { name: "Close", exact: true }).last().click();
       await safetyDialogB.getByRole("button", { name: "Close", exact: true }).last().click();
     } finally {
@@ -87,12 +79,8 @@ test.describe("two-context P2P", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
-      await expect(
-        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageB)).toBeVisible({ timeout: 45_000 });
 
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });
 
@@ -146,9 +134,7 @@ test.describe("two-context P2P", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
 
       // Drive a file send through a synthetic drop on the chat drop zone. The
       // native file picker is hard to drive from Playwright, so we dispatch a
@@ -196,9 +182,7 @@ test.describe("two-context P2P", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 45_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
 
       // 1x1 PNG bytes.
       const pngBase64 =

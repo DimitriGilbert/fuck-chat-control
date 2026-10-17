@@ -1,8 +1,10 @@
 import { Toaster } from "@fuck-eu-chat-control/ui/components/sonner";
 import { HeadContent, Outlet, Scripts, createRootRouteWithContext } from "@tanstack/react-router";
+import { ThemeProvider } from "next-themes";
 import * as React from "react";
 
 import { ChatProvider } from "@/features/chat/runtime/chat-provider";
+import { THEME_INIT_SCRIPT, THEME_STORAGE_KEY } from "@/features/chat/ui/theme";
 
 import appCss from "../index.css?url";
 
@@ -66,6 +68,16 @@ export const Route = createRootRouteWithContext<RouterAppContext>()({
       {
         rel: "apple-touch-icon",
         href: "/icon.png",
+      },
+    ],
+    scripts: [
+      {
+        // Blocking pre-paint theme bootstrap: resolves the stored/system
+        // preference and sets the `dark`/`light` class on <html> BEFORE the
+        // first paint so neither theme flashes the other and hydration sees
+        // the class the user actually gets. No CSP ships with this app, so
+        // an inline script is permitted; it is the only inline script.
+        children: THEME_INIT_SCRIPT,
       },
     ],
   }),
@@ -163,22 +175,34 @@ function DevToolsGate(): React.ReactElement | null {
 
 function RootDocument() {
   return (
-    <html lang="en" className="dark">
+    // suppressHydrationWarning: the pre-paint script and next-themes both
+    // write class + color-scheme onto <html> before hydration; the SSR
+    // render cannot know the resolved theme, so attribute mismatches here
+    // are expected and intentional.
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>
       <body>
-        <ChatProvider>
-          {/* The shell (routes/index.tsx) and the docs routes each own their
-              own full-viewport layout; the root just provides the outlet. No
-              wrapping chrome here, or docs pages would inherit a chat sidebar. */}
-          <Outlet />
-        </ChatProvider>
-        <Toaster richColors />
-        {/* bottom-right so the devtools bubble does not overlap the sidebar's
-            bottom-left Settings entry. Dev-only — excluded from prod bundle. */}
-        <DevToolsGate />
-        <Scripts />
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+          storageKey={THEME_STORAGE_KEY}
+        >
+          <ChatProvider>
+            {/* The shell (routes/index.tsx) and the docs routes each own their
+                own full-viewport layout; the root just provides the outlet. No
+                wrapping chrome here, or docs pages would inherit a chat sidebar. */}
+            <Outlet />
+          </ChatProvider>
+          <Toaster richColors />
+          {/* bottom-right so the devtools bubble does not overlap the sidebar's
+              bottom-left Settings entry. Dev-only — excluded from prod bundle. */}
+          <DevToolsGate />
+          <Scripts />
+        </ThemeProvider>
       </body>
     </html>
   );

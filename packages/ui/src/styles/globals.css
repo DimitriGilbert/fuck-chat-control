@@ -18,9 +18,10 @@
  *
  * Contrast targets: foreground-on-background clears 7:1 (AAA body) in both
  * modes; primary-on-foreground and foreground-on-primary clear AA easily.
- * The app hard-codes `<html className="dark">` (see routes/__root.tsx); the
- * light token block is correct and tested so a future light mode just flips
- * the class.
+ * The shell runs a tri-state theme (system | light | dark): next-themes
+ * toggles the `light`/`dark` class on <html> from the stored preference
+ * (see features/chat/ui/theme.ts), with a blocking pre-paint script in the
+ * head resolving the class before first paint.
  */
 
 :root {

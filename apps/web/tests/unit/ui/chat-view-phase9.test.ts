@@ -258,13 +258,13 @@ describe("ChatView PAKE controls (R10F1)", () => {
 
     render(React.createElement(ChatView));
     const box = screen.getByRole("checkbox", {
-      name: "Protect this conversation with a 6-digit PAKE code",
+      name: "Require an extra 6-digit code to join",
     }) as HTMLInputElement;
     // The checkbox is derived from the live invitation — coded, so checked.
     expect(box.checked).toBe(true);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Regenerate PAKE code" }));
+      fireEvent.click(screen.getByRole("button", { name: "Generate a different extra code" }));
     });
 
     // The stale-closure bug applied the OLD codeDraft ("111111"). The fresh
@@ -283,7 +283,7 @@ describe("ChatView PAKE controls (R10F1)", () => {
 
     render(React.createElement(ChatView));
     const box = screen.getByRole("checkbox", {
-      name: "Protect this conversation with a 6-digit PAKE code",
+      name: "Require an extra 6-digit code to join",
     }) as HTMLInputElement;
     expect(box.checked).toBe(false);
 
@@ -308,7 +308,7 @@ describe("ChatView PAKE controls (R10F1)", () => {
 
     render(React.createElement(ChatView));
     const box = screen.getByRole("checkbox", {
-      name: "Protect this conversation with a 6-digit PAKE code",
+      name: "Require an extra 6-digit code to join",
     }) as HTMLInputElement;
 
     await act(async () => {
@@ -371,21 +371,21 @@ describe("ChatView auth pill (R10F5)", () => {
     return text;
   }
 
-  it("a waiting PAKE session reads PAKE (pending), not 'Safety number'", () => {
+  it("a waiting extra-code session reads Extra code (pending), not 'Link only'", () => {
     const text = pillText(ConnectionState.Waiting, AuthMode.Pake);
-    expect(text).toContain("PAKE");
+    expect(text).toContain("Extra code");
     expect(text).toContain("pending");
   });
 
-  it("a connected PAKE session reads PAKE", () => {
+  it("a connected extra-code session reads Extra code", () => {
     const text = pillText(ConnectionState.Connected, AuthMode.Pake);
-    expect(text).toContain("PAKE");
+    expect(text).toContain("Extra code");
     expect(text).not.toContain("pending");
-    expect(text).not.toContain("Safety number");
+    expect(text).not.toContain("Link only");
   });
 
-  it("a connected safety-number session reads 'Safety number'", () => {
+  it("a connected link-only session reads 'Link only'", () => {
     const text = pillText(ConnectionState.Connected, AuthMode.SafetyNumberOnly);
-    expect(text).toContain("Safety number");
+    expect(text).toContain("Link only");
   });
 });

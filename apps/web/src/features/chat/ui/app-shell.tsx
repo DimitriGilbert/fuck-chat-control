@@ -1,91 +1,105 @@
 import { Button } from "@fuck-eu-chat-control/ui/components/button";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from "@fuck-eu-chat-control/ui/components/sheet";
-import { MenuIcon } from "lucide-react";
+import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
+import { ChevronLeftIcon } from "lucide-react";
 import * as React from "react";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { ChatView } from "@/features/chat/ui/chat-view";
-import { EmptyState } from "@/features/chat/ui/empty-state";
+import { EmptyState, SecurityStory } from "@/features/chat/ui/empty-state";
 import { Sidebar } from "@/features/chat/ui/sidebar";
+import { TESTIDS } from "@/features/chat/ui/testids";
 
 /**
- * The application shell: a persistent left sidebar on desktop (>=768px) and
- * a main pane that shows either the active chat or an empty state.
+ * The application shell, in two responsive modes:
  *
- * Layout strategy:
- *   - The shell fills the viewport (`h-svh`) and uses a flex row so the
- *     sidebar and main pane each own their own scroll.
- *   - Desktop (md+): the sidebar is rendered inline at a fixed comfortable
- *     width (300px). No horizontal overflow: the main pane is `flex-1
- *     min-w-0`.
- *   - Mobile (<md): the sidebar lives inside a Sheet drawer. A slim top bar
- *     in the main pane carries the hamburger toggle. The drawer's SheetContent
- *     takes the sidebar's full width on small screens.
+ *   - Desktop (md+): a persistent left sidebar plus a main pane that shows
+ *     the active chat or the empty state.
+ *   - Mobile (<md): conversation list FIRST — the full-width sidebar rail is
+ *     the home surface (brand, CTA, list, settings). Opening a conversation
+ *     pushes the chat pane over it as a fixed overlay; a "Chats" back button
+ *     returns to the list WITHOUT leaving the session (it stays connected
+ *     and keeps accruing unread).
  *
- * The shell itself does NOT switch on route; it reads `state.active` /
+ * The main pane is a SINGLE mounted element in both modes (CSS repositions
+ * it): on desktop it sits in flow; on mobile it is `hidden` until a chat is
+ * open, then becomes `fixed inset-0` over the list. Keeping one mount means
+ * the composer, scroll position, and drag-drop handlers exist exactly once
+ * per breakpoint class.
+ *
+ * The shell itself does NOT switch on route; it reads
  * `state.activeConversationId` to decide between {@link ChatView} and
- * {@link EmptyState}. Invitation-hash joining stays in `routes/index.tsx`.
+ * {@link EmptyState}. Invitation-hash joining stays in routes/index.tsx.
  */
 export function AppShell(): React.ReactElement {
   const { state } = useChat();
-  const [mobileOpen, setMobileOpen] = React.useState(false);
-
-  // Close the mobile drawer whenever the active conversation changes so
-  // selecting a chat from the drawer shows it immediately in the main pane.
   const activeId = state.activeConversationId;
-  const lastActiveRef = React.useRef<unknown>(activeId);
+
+  // Mobile overlay dismissal. `chatHidden` only affects <md: the back button
+  // sets it (list visible, session stays live); any activeId change clears
+  // it so joining/opening a conversation always reveals the chat. Selecting
+  // a row also clears it via the sidebar's onSessionOpen.
+  const [chatHidden, setChatHidden] = React.useState(false);
+  const lastActiveRef = React.useRef(activeId);
   React.useEffect(() => {
     if (lastActiveRef.current !== activeId) {
       lastActiveRef.current = activeId;
-      setMobileOpen(false);
+      setChatHidden(false);
     }
   }, [activeId]);
 
+  const mobileChatOpen = activeId !== null && !chatHidden;
+
   return (
-    <div className="flex h-svh w-full min-w-0 overflow-hidden bg-background text-foreground">
-      {/* Desktop sidebar: persistent, md+ only. Renders its own settings trigger. */}
+    <div className="relative flex h-svh w-full min-w-0 overflow-hidden bg-background text-foreground">
+      {/* Desktop sidebar: persistent rail, md+ only. */}
       <div className="hidden md:flex md:w-[300px] md:shrink-0 md:basis-[300px]">
         <Sidebar className="w-full" />
       </div>
 
-      {/* Mobile sidebar: Sheet drawer, controlled by the top-bar hamburger.
-          The Sheet itself renders no trigger; we drive it via `open`. */}
-      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
-        <SheetContent side="left" className="w-[85vw] max-w-[320px] p-0">
-          <SheetHeader className="sr-only">
-            <SheetTitle>Conversations</SheetTitle>
-            <SheetDescription>Browse, start, and switch conversations.</SheetDescription>
-          </SheetHeader>
-          {/* The mobile drawer's sidebar hides its own settings trigger so the
-              desktop instance stays the single source of truth for the sheet.
-              The drawer is closed at desktop widths anyway. */}
-          <Sidebar hideSettingsEntry />
-        </SheetContent>
-      </Sheet>
+      {/* Mobile home: the conversation list IS the first screen. Same Sidebar
+          composition as the rail — one list implementation — with the
+          first-run security story in its empty slot and a labeled settings
+          entry. */}
+      <div className="flex min-w-0 flex-1 md:hidden">
+        <Sidebar
+          className="border-r-0"
+          startTestId={TESTIDS.startConversationMobile}
+          listTestId={TESTIDS.conversationList}
+          settingsLabel
+          onSessionOpen={() => setChatHidden(false)}
+          emptyContent={
+            <div className="px-1 py-4">
+              <SecurityStory align="start" />
+            </div>
+          }
+        />
+      </div>
 
-      {/* Main pane: owns its own scroll, never overflows horizontally */}
-      <main className="flex min-w-0 flex-1 flex-col">
-        {/* Mobile top bar: only rendered below md. Slender so the chat keeps
-            the room. The desktop sidebar already owns brand + actions. */}
-        <div className="flex h-12 items-center gap-2 border-b border-border px-2 md:hidden">
+      {/* Main pane: in-flow on desktop; on mobile a fixed overlay that pushes
+          over the list while a chat is open. `hidden md:flex` when closed
+          keeps it mounted (transfers/state stay warm) but offscreen.
+          The slide-in animation re-runs whenever the pane flips from
+          display:none to rendered — the "push over" effect, free. */}
+      <main
+        className={cn(
+          "min-w-0 flex-col bg-background",
+          mobileChatOpen
+            ? "motion-safe:animate-in motion-safe:slide-in-from-right motion-safe:duration-200 fixed inset-0 z-30 flex md:static md:z-auto md:flex-1"
+            : "hidden md:flex md:flex-1",
+        )}
+      >
+        {/* Mobile back bar: returns to the list, does NOT leave the session. */}
+        <div className="flex h-12 items-center gap-1 border-b border-border px-2 md:hidden">
           <Button
             variant="ghost"
-            size="icon"
-            aria-label="Open conversations"
-            className="text-foreground hover:bg-muted"
-            onClick={() => setMobileOpen(true)}
+            size="sm"
+            onClick={() => setChatHidden(true)}
+            data-testid={TESTIDS.backToConversations}
+            aria-label="Back to conversations"
           >
-            <MenuIcon />
+            <ChevronLeftIcon />
+            Chats
           </Button>
-          <span className="text-foreground text-sm font-medium tracking-tight">
-            {activeId === null ? "fuck-chat-control" : "Conversation"}
-          </span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-hidden">

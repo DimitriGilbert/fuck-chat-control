@@ -5,18 +5,20 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@fuck-eu-chat-control/ui/components/empty";
-import { PlusIcon } from "lucide-react";
+import { LockIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useChat } from "@/features/chat/runtime/chat-provider";
-import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
+import { useChat } from "@/features/chat/runtime/chat-provider";
+import { StartConversationButton } from "@/features/chat/ui/session-list";
+import { TESTIDS } from "@/features/chat/ui/testids";
+import { conversationIdKey } from "@/features/chat/ui/unified-sessions";
 
 /**
  * Shown when no conversation is active. A quiet, on-brand prompt: one short
  * stance line, one primary action, one security footnote. Deliberately NOT
- * the old centered marketing wall, NOT a hero, NOT three feature cards.
+ * a centered marketing wall, NOT a hero, NOT three feature cards.
  *
  * If persisted conversations exist in the repository, a compact list offers
  * to resume each one. This lists persisted records; the sidebar additionally
@@ -24,12 +26,12 @@ import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/stor
  * surfaces can disagree only in that one direction.
  */
 export function EmptyState(): React.ReactElement {
-  const { state, controller, ready } = useChat();
+  const { state, controller } = useChat();
   // Show every persisted conversation. Rows with a live background session
   // additionally offer the non-destructive Leave (teardown only); there is
   // nothing to leave on a persisted-only row, so no Leave is rendered there.
   const resumable = state.conversations;
-  const liveKeys = new Set(state.sessions.map((s) => resumeKey(s.id)));
+  const liveKeys = new Set(state.sessions.map((s) => conversationIdKey(s.id)));
 
   function handleResume(record: ConversationRecord): void {
     if (controller === null) return;
@@ -45,21 +47,12 @@ export function EmptyState(): React.ReactElement {
     // R7/F3: Leave is NON-destructive. leaveConversation tears down the live
     // session (signaling socket, peer connection, in-memory snapshot) and
     // KEEPS the persisted record — the same semantics as the identically
-    // labeled sidebar Leave. It does NOT delete anything: the destructive
-    // action is the sidebar's separately-labeled, confirmed "Delete
+    // labeled list Leave. It does NOT delete anything: the destructive
+    // action is the list's separately-labeled, confirmed "Delete
     // conversation". Previously this called clearConversation, which deleted
     // the record while the session stayed live and connected — an orphaned,
     // invisible background session.
     controller.leaveConversation(record.id);
-  }
-
-  function handleStart(): void {
-    if (controller === null) return;
-    void controller.startConversation().catch((err: unknown) => {
-      toast.error("Could not start", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    });
   }
 
   return (
@@ -68,54 +61,16 @@ export function EmptyState(): React.ReactElement {
           and primary CTA. Turns the surrounding negative space into deliberate
           framing instead of a void, without clustering the pane with cards. */}
       <div className="bg-card border-border mx-auto flex w-full max-w-[480px] flex-col items-center gap-5 rounded-xl border p-8 text-center shadow-sm">
-        <EmptyHeader className="max-w-none gap-2">
-          <EmptyTitle className="text-foreground text-2xl font-semibold tracking-tight">
-            Private chat, no account.
-          </EmptyTitle>
-        </EmptyHeader>
-        <EmptyContent className="max-w-[40ch] gap-3">
-          <p className="text-muted-foreground text-sm leading-6">
-            Start a 1:1 conversation and share the link. End-to-end encrypted; the server only
-            relays the handshake.
-          </p>
-          <p className="text-muted-foreground text-xs leading-5">
-            Read the{" "}
-            <a
-              href="/docs/security"
-              className="text-primary underline underline-offset-4 hover:opacity-80"
-            >
-              security notes
-            </a>{" "}
-            before relying on it for anything sensitive.
-          </p>
-          <p className="text-muted-foreground text-xs leading-5">
-            Fully open source &mdash;{" "}
-            <a
-              href="https://github.com/DimitriGilbert/fuck-chat-control"
-              target="_blank"
-              rel="noreferrer noopener"
-              className="text-primary underline underline-offset-4 hover:opacity-80"
-            >
-              read the code
-            </a>
-            , audit it, fork it, or run it yourself. No binary you have to trust on faith.
-          </p>
-        </EmptyContent>
+        <SecurityStory align="center" />
 
         {/* Primary CTA. Visible at all sizes: the empty state is the home base
             and should invite action everywhere. Starts the conversation
             directly — same action as the sidebar's Start button, so both
             buttons with the same label do the same thing. */}
-        <Button
-          variant="default"
-          size="default"
-          className="mt-1 w-full"
-          onClick={handleStart}
-          disabled={!ready}
-        >
-          <PlusIcon />
-          Start a conversation
-        </Button>
+        <StartConversationButton
+          testId={TESTIDS.startConversationEmpty}
+          className="h-8 justify-center"
+        />
       </div>
 
       {resumable.length > 0 && (
@@ -125,10 +80,10 @@ export function EmptyState(): React.ReactElement {
           </h2>
           <ul className="flex flex-col gap-1">
             {resumable.map((record) => (
-              <li key={resumeKey(record.id)}>
+              <li key={conversationIdKey(record.id)}>
                 <ResumeRow
                   record={record}
-                  live={liveKeys.has(resumeKey(record.id))}
+                  live={liveKeys.has(conversationIdKey(record.id))}
                   onResume={() => handleResume(record)}
                   onLeave={() => handleLeave(record)}
                 />
@@ -138,6 +93,75 @@ export function EmptyState(): React.ReactElement {
         </div>
       )}
     </Empty>
+  );
+}
+
+interface SecurityStoryProps {
+  readonly align?: "center" | "start";
+}
+
+/**
+ * The plain-words security story, shared by the desktop empty state and the
+ * mobile list-first home. No jargon: what the product does, who sees what,
+ * and the two honest caveats (peers must be online together; read the
+ * security notes before relying on it).
+ */
+export function SecurityStory({ align = "center" }: SecurityStoryProps): React.ReactElement {
+  const centered = align === "center";
+  return (
+    <>
+      <EmptyHeader className={centered ? "max-w-none gap-2" : "max-w-none items-start gap-2"}>
+        <div
+          className={
+            centered
+              ? "bg-primary/10 text-primary mb-1 flex size-10 items-center justify-center rounded-lg"
+              : "bg-primary/10 text-primary mb-1 flex size-9 items-center justify-center rounded-lg"
+          }
+        >
+          <LockIcon className="size-5" aria-hidden="true" />
+        </div>
+        <EmptyTitle
+          className={
+            centered
+              ? "text-foreground text-2xl font-semibold tracking-tight"
+              : "text-foreground text-xl font-semibold tracking-tight"
+          }
+        >
+          Private chat, no account.
+        </EmptyTitle>
+      </EmptyHeader>
+      <EmptyContent
+        className={centered ? "max-w-[40ch] gap-3" : "max-w-none items-start gap-2.5 text-left"}
+      >
+        <p className="text-muted-foreground text-sm leading-6">
+          Start a 1:1 conversation and share the link. Both of you must be online at the same time —
+          there is no server holding messages for later. Once connected, everything is end-to-end
+          encrypted and the server only ever relays the handshake.
+        </p>
+        <p className="text-muted-foreground text-xs leading-5">
+          Read the{" "}
+          <a
+            href="/docs/security"
+            className="text-primary underline underline-offset-4 hover:opacity-80"
+          >
+            security notes
+          </a>{" "}
+          before relying on it for anything sensitive.
+        </p>
+        <p className="text-muted-foreground text-xs leading-5">
+          Fully open source &mdash;{" "}
+          <a
+            href="https://github.com/DimitriGilbert/fuck-chat-control"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-primary underline underline-offset-4 hover:opacity-80"
+          >
+            read the code
+          </a>
+          , audit it, fork it, or run it yourself. No binary you have to trust on faith.
+        </p>
+      </EmptyContent>
+    </>
   );
 }
 
@@ -170,14 +194,4 @@ function ResumeRow({ record, live, onResume, onLeave }: ResumeRowProps): React.R
       )}
     </div>
   );
-}
-
-function resumeKey(id: ConversationId): string {
-  // ConversationId is a Uint8Array; convert to hex for React keys and live
-  // lookups (same normalization as the sidebar's sessionKey).
-  let hex = "";
-  for (let i = 0; i < id.length; i++) {
-    hex += id[i].toString(16).padStart(2, "0");
-  }
-  return hex;
 }

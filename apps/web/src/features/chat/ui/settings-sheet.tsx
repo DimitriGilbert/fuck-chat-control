@@ -17,19 +17,42 @@ import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ImportResult } from "@fuck-eu-chat-control/chat-runtime/store";
 import { ExportBundleDialog } from "@/features/chat/ui/export-bundle-dialog";
 import { ImportBundleDialog } from "@/features/chat/ui/import-bundle-dialog";
+import { ThemeControl } from "@/features/chat/ui/theme-control";
 import { WipeDataAlertDialog } from "@/features/chat/ui/wipe-data-dialog";
 
 /**
- * The trigger button in the chat status bar. Owns the Sheet's open state so
- * the sheet can be opened from a single anchor and closed by any action.
+ * The settings entry. Owns the Sheet's open state so the sheet can be
+ * opened from a single anchor and closed by any action. `withLabel` renders
+ * a full-width labeled row (the mobile rail's settings entry) instead of
+ * the compact icon button.
  */
-export function SettingsSheetTrigger(): React.ReactElement {
+export function SettingsSheetTrigger({
+  withLabel = false,
+}: {
+  readonly withLabel?: boolean;
+}): React.ReactElement {
   const [open, setOpen] = React.useState(false);
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Open settings" />}>
-        <Settings2Icon />
-      </SheetTrigger>
+      {withLabel ? (
+        <SheetTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Open settings"
+              className="w-full justify-start"
+            />
+          }
+        >
+          <Settings2Icon />
+          Settings
+        </SheetTrigger>
+      ) : (
+        <SheetTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Open settings" />}>
+          <Settings2Icon />
+        </SheetTrigger>
+      )}
       <SettingsSheetContent onClose={() => setOpen(false)} />
     </Sheet>
   );
@@ -56,6 +79,7 @@ function SettingsSheetContent({ onClose }: SettingsSheetContentProps): React.Rea
       <Tabs defaultValue="security" className="flex-1 overflow-hidden px-4 pb-4">
         <TabsList>
           <TabsTrigger value="security">Security</TabsTrigger>
+          <TabsTrigger value="appearance">Appearance</TabsTrigger>
           <TabsTrigger value="data">Data</TabsTrigger>
         </TabsList>
 
@@ -65,6 +89,17 @@ function SettingsSheetContent({ onClose }: SettingsSheetContentProps): React.Rea
             verified={state.safetyNumberVerified}
             authMode={state.active?.authMode ?? AuthMode.SafetyNumberOnly}
           />
+        </TabsContent>
+
+        <TabsContent value="appearance" className="mt-4 space-y-4">
+          <div className="space-y-2">
+            <h3 className="text-sm font-medium">Theme</h3>
+            <p className="text-muted-foreground text-xs">
+              System follows your device setting and flips automatically. The choice is kept in this
+              browser only.
+            </p>
+            <ThemeControl />
+          </div>
         </TabsContent>
 
         <TabsContent value="data" className="mt-4 space-y-4">
@@ -163,7 +198,7 @@ function SecuritySection({
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <h3 className="text-sm font-medium">Conversation safety number</h3>
+        <h3 className="text-sm font-medium">Verify it's really them</h3>
         {safetyNumber === null ? (
           <p className="text-muted-foreground text-xs">
             No active conversation. A safety number is generated for each conversation once the
@@ -171,13 +206,13 @@ function SecuritySection({
           </p>
         ) : (
           <>
-            <pre className="bg-muted break-all rounded-none p-2 font-mono text-xs">
+            <pre className="bg-muted break-all rounded-md p-2 font-mono text-xs">
               {safetyNumber}
             </pre>
             <p className="text-muted-foreground text-xs">
               {verified
-                ? "You marked this safety number as verified."
-                : "Unverified — compare with your peer out-of-band and verify it in the chat view."}
+                ? "You marked this peer as verified."
+                : "Unverified — compare this safety number with your peer over a trusted channel, then use the verify button in the chat."}
             </p>
           </>
         )}
@@ -186,24 +221,25 @@ function SecuritySection({
       <div className="space-y-2">
         <h3 className="text-sm font-medium">Handshake authentication</h3>
         {/* SEC-4: surface the live negotiated auth mode rather than a static
-            PAKE blurb. A PAKE session carries the stronger guarantee (the
-            handshake was authenticated against a malicious broker); a safety-
-            number session relies on post-hoc comparison. */}
+            blurb. An extra-code session carries the stronger guarantee (the
+            handshake was authenticated against a malicious broker); a
+            link-only session relies on post-hoc comparison. */}
         {authMode === AuthMode.Pake ? (
           <p className="text-xs">
-            <span className="text-primary font-medium">PAKE-protected.</span>{" "}
+            <span className="text-primary font-medium">Extra code.</span>{" "}
             <span className="text-muted-foreground">
-              This session authenticated the handshake with a SPAKE2 password exchange keyed by the
-              6-digit code shared out-of-band. The broker could not mount a MITM attack without
-              knowing the code.
+              This session authenticated the handshake with a PAKE (SPAKE2) password exchange keyed
+              by the 6-digit code shared on a different channel. The broker could not mount a MITM
+              attack without knowing the code.
             </span>
           </p>
         ) : (
           <p className="text-xs">
-            <span className="text-foreground font-medium">Safety number only.</span>{" "}
+            <span className="text-foreground font-medium">Link only.</span>{" "}
             <span className="text-muted-foreground">
               The handshake was not password-authenticated. Compare the safety number with your peer
-              out-of-band to detect a man-in-the-middle; if it matches, the channel is secure.
+              over a trusted channel to detect a man-in-the-middle; if it matches, the channel is
+              secure.
             </span>
           </p>
         )}

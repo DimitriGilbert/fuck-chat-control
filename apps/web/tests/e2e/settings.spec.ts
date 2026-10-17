@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { establishPeerPair } from "./_helpers";
+import { connectionStatePill, establishPeerPair } from "./_helpers";
 
 /**
  * Scenario 9: settings sheet — export/import bundle round-trip with a
@@ -17,9 +17,7 @@ test.describe("settings sheet", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText("Connected", { exact: true }),
-      ).toBeVisible({
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({
         timeout: 45_000,
       });
       // Send a message so "clear current conversation" has something to clear.
@@ -67,9 +65,7 @@ test.describe("settings sheet", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(
-        pair.pageA.getByRole("main").getByText("Connected", { exact: true }),
-      ).toBeVisible({
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({
         timeout: 45_000,
       });
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });

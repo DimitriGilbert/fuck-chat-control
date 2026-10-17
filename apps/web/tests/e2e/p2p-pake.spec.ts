@@ -1,6 +1,15 @@
 import { expect, test } from "@playwright/test";
 
-import { CONNECTION_STATE_TEXT, establishPeerPair, withPakeCode, type PeerPair } from "./_helpers";
+import {
+  CONNECTION_STATE_TEXT,
+  connectionStatePill,
+  establishPeerPair,
+  invitationLinkInput,
+  startConversationButton,
+  TID,
+  withPakeCode,
+  type PeerPair,
+} from "./_helpers";
 
 /**
  * Phase 10 PAKE e2e: a coded invitation triggers SPAKE2 over the data
@@ -33,12 +42,8 @@ test.describe("PAKE-coded invitation", () => {
       expect(pair.invitation).toMatch(/~\d{1,6}$/);
 
       // Both peers reach Connected: PAKE succeeded against the same code.
-      await expect(
-        pair.pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 60_000 });
-      await expect(
-        pair.pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
-      ).toBeVisible({ timeout: 60_000 });
+      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 60_000 });
+      await expect(connectionStatePill(pair.pageB)).toBeVisible({ timeout: 60_000 });
 
       // Exchange a message end-to-end to prove the encrypted channel is up.
       const composer = pair.pageA.getByRole("textbox", { name: "Message" });
@@ -64,21 +69,14 @@ test.describe("PAKE-coded invitation", () => {
 
     try {
       await pageA.goto("/");
-      await pageA
-        .getByRole("complementary")
-        .getByRole("button", { name: /Start a conversation/ })
-        .click();
-      await pageA
-        .getByRole("checkbox", {
-          name: /Protect this conversation with a 6-digit PAKE code/,
-        })
-        .check();
-      await pageA.getByLabel("PAKE code", { exact: true }).waitFor({ state: "visible" });
+      await startConversationButton(pageA).click();
+      await pageA.getByTestId(TID.extraCodeToggle).check();
+      await pageA.getByTestId(TID.extraCodeValue).waitFor({ state: "visible" });
 
-      const realCode = (await pageA.getByLabel("PAKE code", { exact: true }).textContent()) ?? "";
+      const realCode = (await pageA.getByTestId(TID.extraCodeValue).textContent()) ?? "";
       expect(realCode.length).toBe(6);
 
-      const codedInvitation = (await pageA.getByLabel("Invitation link").inputValue()) as string;
+      const codedInvitation = (await invitationLinkInput(pageA).inputValue()) as string;
       // Tamper with the code so the responder's PAKE state is derived from a
       // different password than the initiator's.
       const tamperedCode = realCode === "000000" ? "999999" : "000000";
@@ -96,12 +94,10 @@ test.describe("PAKE-coded invitation", () => {
       // Two-minute hard ceiling; in practice the abort fires in seconds.
       const deadline = Date.now() + 90_000;
       while (Date.now() < deadline) {
-        const aConnected = await pageA
-          .getByRole("main")
+        const aConnected = await connectionStatePill(pageA)
           .getByText(CONNECTION_STATE_TEXT.connected, { exact: true })
           .count();
-        const bConnected = await pageB
-          .getByRole("main")
+        const bConnected = await connectionStatePill(pageB)
           .getByText(CONNECTION_STATE_TEXT.connected, { exact: true })
           .count();
         if (aConnected === 0 && bConnected === 0) {
@@ -113,10 +109,10 @@ test.describe("PAKE-coded invitation", () => {
 
       // Final assertion: neither side reached Connected.
       await expect(
-        pageA.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        connectionStatePill(pageA).getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toHaveCount(0);
       await expect(
-        pageB.getByRole("main").getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
+        connectionStatePill(pageB).getByText(CONNECTION_STATE_TEXT.connected, { exact: true }),
       ).toHaveCount(0);
     } finally {
       await contextA.close();

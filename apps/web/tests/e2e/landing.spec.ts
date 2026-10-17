@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { invitationHex } from "./_helpers";
+import { invitationHex, TID, startConversationButton, invitationLinkInput } from "./_helpers";
 
 /**
  * Landing shell scenarios. The old centered marketing wall is gone; these
@@ -22,7 +22,7 @@ test.describe("landing shell", () => {
     // the button's first paint past the default 5s `toBeVisible` timeout on a
     // loaded/CI machine, so allow the same 10s the fragment tests below grant
     // for the identical selector. Dev mode renders in ~2s and is unaffected.
-    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+    await expect(startConversationButton(page)).toBeVisible({
       timeout: 10_000,
     });
   });
@@ -49,48 +49,41 @@ test.describe("landing shell", () => {
     expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
   });
 
-  test("mobile drawer toggle opens the conversation sidebar", async ({ page }) => {
-    // At 390px the desktop sidebar is hidden; the hamburger in the top bar
-    // opens the Sheet drawer that hosts the same Sidebar component.
+  test("mobile is list-first and the chat pushes over it", async ({ page }) => {
+    // At 390px the conversation list is the home surface — no drawer, no
+    // hamburger. Starting a conversation pushes the chat pane over the list;
+    // the back button returns to the list.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
 
-    // The hamburger button is labeled "Open conversations".
-    // Same React #419 cold-client-render caveat as the shell test above: the
-    // mobile top bar (hamburger included) only mounts after the client-render
-    // recovery completes, which can exceed the default 5s on a loaded machine.
-    const toggle = page.getByRole("button", { name: "Open conversations" });
-    await expect(toggle).toBeVisible({ timeout: 10_000 });
+    // The mobile home renders the same sidebar component inline, with its own
+    // start affordance (distinct test id from the desktop rail's).
+    const start = page.getByTestId(TID.startConversationMobile);
+    await expect(start).toBeVisible({ timeout: 10_000 });
+    await start.click();
 
-    // The empty state also exposes a Start affordance on mobile, so scope the
-    // drawer-open assertion to the Sheet's content, which only mounts when the
-    // drawer is actually open. The first tap can land during React hydration
-    // and be swallowed (a known Playwright/hydration race, not a component
-    // bug); retry the tap until the drawer content appears, mirroring what a
-    // user does when a tap doesn't take.
-    await expect(async () => {
-      if ((await page.locator('[data-slot="sheet-content"]').count()) === 0) {
-        await toggle.click();
-      }
-      await expect(page.locator('[data-slot="sheet-content"]')).toBeVisible({ timeout: 1_000 });
-    }).toPass({ timeout: 8_000 });
+    // The chat pushes over: the invitation link input appears inside the
+    // covering main pane, and the back affordance is present.
+    await expect(invitationLinkInput(page)).toBeVisible({ timeout: 10_000 });
+    const back = page.getByTestId(TID.backToConversations);
+    await expect(back).toBeVisible();
 
-    // The drawer surfaces the sidebar component. Both the desktop sidebar
-    // (hidden at this viewport via `hidden md:flex`) and the drawer-mounted
-    // sidebar are in the DOM; assert the drawer's instance is the visible one.
-    await expect(page.locator('[data-slot="sheet-content"] [data-slot="sidebar"]')).toBeVisible();
+    // Back returns to the list WITHOUT leaving the session — the row is
+    // still there and re-tapping it re-opens the chat.
+    await back.click();
+    const list = page.getByTestId(TID.conversationList);
+    await expect(list).toBeVisible();
+    await list.getByRole("button").first().click();
+    await expect(invitationLinkInput(page)).toBeVisible({ timeout: 10_000 });
   });
 
   test("start conversation produces a 32-hex invitation link in the URL fragment", async ({
     page,
   }) => {
     await page.goto("/");
-    await page
-      .getByRole("button", { name: /Start a conversation/ })
-      .first()
-      .click();
+    await startConversationButton(page).click();
 
-    const invitationInput = page.getByLabel("Invitation link");
+    const invitationInput = invitationLinkInput(page);
     await expect(invitationInput).toBeVisible({ timeout: 10_000 });
     const invitation = (await invitationInput.inputValue()) as string;
 
@@ -113,18 +106,15 @@ test.describe("landing shell", () => {
     }
     await page.goto("/");
 
-    await page
-      .getByRole("button", { name: /Start a conversation/ })
-      .first()
-      .click();
+    await startConversationButton(page).click();
     await page.getByRole("button", { name: /Copy link/ }).click();
 
     if (browserName === "chromium") {
       const clipboard = await page.evaluate(() => navigator.clipboard.readText());
       expect(clipboard).toMatch(/#[0-9a-f]{32}$/);
     } else {
-      // The toast confirms writeText resolved without throwing.
-      await expect(page.getByText("Invitation link copied")).toBeVisible({ timeout: 5_000 });
+      // The button admits "Copied" — writeText resolved without throwing.
+      await expect(page.getByRole("button", { name: "Copied" })).toBeVisible({ timeout: 5_000 });
     }
   });
 
@@ -144,7 +134,7 @@ test.describe("landing shell", () => {
 
     // The browser landed on the index route and rendered the shell. The
     // hamburger or the New conversation button is present.
-    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+    await expect(startConversationButton(page)).toBeVisible({
       timeout: 10_000,
     });
 
@@ -184,7 +174,7 @@ test.describe("landing shell", () => {
 
     // The shell rendered; the join flow parsed the coded invitation from the
     // fragment client-side.
-    await expect(page.getByRole("button", { name: /Start a conversation/ }).first()).toBeVisible({
+    await expect(startConversationButton(page)).toBeVisible({
       timeout: 10_000,
     });
 
@@ -210,11 +200,11 @@ test.describe("landing shell", () => {
     await page.goto("/");
 
     // Start two conversations. Each renders a row in the sidebar list.
-    const startButton = page.getByRole("button", { name: /Start a conversation/ }).first();
+    const startButton = startConversationButton(page);
     await startButton.click();
     // The first start flips the active id; the InvitationBanner shows in the
     // main pane. Wait for the invitation input so we know the session is up.
-    await expect(page.getByLabel("Invitation link")).toBeVisible({ timeout: 10_000 });
+    await expect(invitationLinkInput(page)).toBeVisible({ timeout: 10_000 });
 
     // The active conversation row gets `data-active="true"`.
     const rows = page.getByRole("button").filter({ hasText: /New chat|Conversation/ });

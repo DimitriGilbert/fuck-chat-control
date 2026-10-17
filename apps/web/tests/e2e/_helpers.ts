@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, Page } from "@playwright/test";
+import type { Browser, BrowserContext, Locator, Page } from "@playwright/test";
 
 /**
  * Connection-state labels rendered in the status pill (see
@@ -16,6 +16,40 @@ export const CONNECTION_STATE_TEXT = {
 } as const;
 
 /**
+ * Stable `data-testid` anchors, mirroring src/features/chat/ui/testids.ts.
+ * Duplicated here (not imported) because the e2e suite runs outside the app
+ * bundle — keep the two files in sync.
+ */
+export const TID = {
+  startConversation: "start-conversation",
+  startConversationMobile: "start-conversation-mobile",
+  startConversationEmpty: "start-conversation-empty",
+  extraCodeToggle: "extra-code-toggle",
+  extraCodeInput: "extra-code-input",
+  extraCodeValue: "extra-code-value",
+  invitationLinkInput: "invitation-link-input",
+  connectionState: "connection-state",
+  verifyPeer: "verify-peer",
+  backToConversations: "back-to-conversations",
+  conversationList: "conversation-list",
+} as const;
+
+/** The connection-state pill in the chat header. */
+export function connectionStatePill(page: Page): Locator {
+  return page.getByTestId(TID.connectionState);
+}
+
+/** The desktop sidebar's start-conversation CTA. */
+export function startConversationButton(page: Page): Locator {
+  return page.getByTestId(TID.startConversation);
+}
+
+/** The read-only invitation link input. */
+export function invitationLinkInput(page: Page): Locator {
+  return page.getByTestId(TID.invitationLinkInput);
+}
+
+/**
  * A two-peer P2P harness: two isolated browser contexts (separate
  * localStorage / cookies / identity) that establish a real WebRTC session
  * through the in-process broker. Caller is responsible for `close()`.
@@ -31,7 +65,7 @@ export interface PeerPair {
   readonly contextB: BrowserContext;
   readonly invitation: string;
   /**
-   * The 6-digit PAKE code when {@link establishPeerPair} was called with
+   * The 6-digit extra code when {@link establishPeerPair} was called with
    * `coded: true`; null otherwise. Test specs assert against this to confirm
    * the link carried a code and to drive a wrong-code negative case by
    * mutating the URL before pageB opens it.
@@ -42,7 +76,7 @@ export interface PeerPair {
 
 export interface EstablishPeerPairOptions {
   /**
-   * When true, pageA's invitation is generated with a 6-digit PAKE code so
+   * When true, pageA's invitation is generated with a 6-digit extra code so
    * the responder (pageB) runs SPAKE2 against it. The invitation link carries
    * `~<code>` in the URL hash; the code itself is exposed on the returned
    * {@link PeerPair.pakeCode} so the test can assert against it.
@@ -60,34 +94,25 @@ export async function establishPeerPair(
   const pageB = await contextB.newPage();
 
   // Wait for the start button to be enabled (controller ready) on A, then
-  // start a conversation and read the generated invitation link. Scope to the
-  // sidebar (<aside> / complementary): the empty state also exposes a Start
-  // affordance on all viewports, so the sidebar's button is the canonical one.
+  // start a conversation and read the generated invitation link. The
+  // data-testid anchor scopes to the desktop sidebar's CTA (the mobile home
+  // and empty state expose their own distinct ids).
   await pageA.goto("/");
-  await pageA
-    .getByRole("complementary")
-    .getByRole("button", { name: /Start a conversation/ })
-    .click();
+  await startConversationButton(pageA).click();
 
   let pakeCode: string | null = null;
   if (options?.coded === true) {
-    // Toggle the "Protect with a 6-digit code (PAKE)" checkbox in the
-    // InvitationBanner. The banner rewrites the invitation link in place to
-    // carry `~<code>`.
-    await pageA
-      .getByRole("checkbox", {
-        name: /Protect this conversation with a 6-digit PAKE code/,
-      })
-      .check();
-    // The banner's "PAKE code" panel renders the 6-digit code in a <code>
-    // element labeled exactly "PAKE code" (the surrounding Copy / Regenerate /
-    // Custom buttons all have distinct aria-labels, but Playwright's
-    // substring match would otherwise pick them up). Use exact to scope.
-    await pageA.getByLabel("PAKE code", { exact: true }).waitFor({ state: "visible" });
-    pakeCode = (await pageA.getByLabel("PAKE code", { exact: true }).textContent()) ?? null;
+    // Toggle the "Require an extra code" checkbox in the invitation panel.
+    // The panel rewrites the invitation link in place to carry `~<code>`.
+    await pageA.getByTestId(TID.extraCodeToggle).check();
+    // The extra-code block renders the 6-digit code in a <code> element with
+    // the extraCodeValue test id.
+    const codeEl = pageA.getByTestId(TID.extraCodeValue);
+    await codeEl.waitFor({ state: "visible" });
+    pakeCode = (await codeEl.textContent()) ?? null;
   }
 
-  const invitation = (await pageA.getByLabel("Invitation link").inputValue()) as string;
+  const invitation = (await invitationLinkInput(pageA).inputValue()) as string;
 
   // B opens the invitation URL fresh (its own context; the hash never reaches
   // the server). This is the real user flow: the peer pastes the link.
@@ -116,13 +141,13 @@ export function invitationHex(url: string): string {
   const hashIndex = url.lastIndexOf("#");
   if (hashIndex < 0) return "";
   const bare = url.slice(hashIndex + 1);
-  // Strip a `~code` suffix if present (PAKE-coded invitations).
+  // Strip a `~code` suffix if present (coded invitations).
   const tildeIdx = bare.indexOf("~");
   return tildeIdx >= 0 ? bare.slice(0, tildeIdx) : bare;
 }
 
 /**
- * Replace the PAKE code in an invitation URL with a different code. Used by
+ * Replace the extra code in an invitation URL with a different code. Used by
  * the wrong-code negative case to drive a guaranteed mismatch without
  * re-running the initiator flow.
  */
