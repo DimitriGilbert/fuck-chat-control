@@ -1690,9 +1690,10 @@ export class ConversationOrchestrator {
     // installed a NEW session, which we must not consume either) and throw
     // PakeError(Cancelled) — the same teardown-driven signal failHandshake's
     // R6F2 suppression already swallows. Without this guard the freed handle
-    // (__wbg_ptr === 0) is dereferenced inside pake_finish, and the thrown
-    // error maps via mapWasmError to a DURABLE auth failure (Mismatch) —
-    // bricking the conversation after a plain leave().
+    // (__wbg_ptr === 0) is dereferenced inside pake_finish, surfacing a
+    // spurious infrastructure fault as an onError after a plain leave()
+    // (pre-R1F2 this mapped via mapWasmError to a DURABLE Mismatch that
+    // bricked the conversation; the guard still prevents the phantom error).
     if (this.pakeSession !== session) {
       throw new PakeError(PakeErrorCode.Cancelled, "PAKE await cancelled: session torn down");
     }

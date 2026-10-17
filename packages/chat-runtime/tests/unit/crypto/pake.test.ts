@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it, beforeAll } from "vitest";
+import { describe, expect, it, beforeAll, vi } from "vitest";
 
 import {
   createPakeSession,
@@ -40,6 +40,17 @@ const PKG_WASM = fileURLToPath(
     import.meta.url,
   ),
 );
+
+// R1F1/R1F2: intercept the platform-split dynamic-import loader so the tests
+// at the bottom of this file can drive loadWasm's fresh-init path with a
+// fake SPAKE2 binding (counting init calls, injecting faults) without a real
+// .wasm fetch or module URL. The mock is inert for every other test here:
+// they all seed the module cache via `__setWasmModuleForTests`, so
+// `dynamicImport` is never reached on the statically-imported graph.
+const dynamicImportMock = vi.hoisted(() => vi.fn<(specifier: string) => Promise<unknown>>());
+vi.mock("@fuck-eu-chat-control/chat-runtime/crypto/pake-loader", () => ({
+  dynamicImport: (specifier: string): Promise<unknown> => dynamicImportMock(specifier),
+}));
 
 // Synchronous init: the browser path uses fetch+WebAssembly.instantiateStreaming
 // via the pkg's default export, which Node cannot do. initSync seeds the same
@@ -368,5 +379,149 @@ describe("derivePakeConfirmationTag (wrong-code abort primitive)", () => {
     const t1 = await derivePakeConfirmationTag(secret, h1, Role.Initiator);
     const t2 = await derivePakeConfirmationTag(secret, h2, Role.Initiator);
     expect(bytesEqual(t1, t2)).toBe(false);
+  });
+});
+
+/**
+ * A fake SPAKE2 binding returned by the mocked `dynamicImport`. `pake_start`
+ * yields a structurally valid {@link PakeStateHandle} (33-byte share + free);
+ * `default` plays the async init — it can be told to throw for its first N
+ * invocations and deliberately parks for a few ms so that a second caller
+ * racing in mid-init would trigger a second import under the old post-await
+ * assignment.
+ */
+function fakeSpake2Module(opts: { failInitTimes?: number; finishError?: unknown } = {}): {
+  module: unknown;
+  initCalls: () => number;
+} {
+  let initCalls = 0;
+  const module = {
+    default: async (): Promise<void> => {
+      initCalls++;
+      if (opts.failInitTimes !== undefined && initCalls <= opts.failInitTimes) {
+        throw new Error("fake spake2 init failure");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    },
+    initSync: (): void => {},
+    pake_start: (role: number): { side: number; outgoing_share: Uint8Array; free(): void } => ({
+      side: role,
+      outgoing_share: new Uint8Array(PAKE_SHARE_BYTES),
+      free(): void {},
+    }),
+    pake_finish: (): Uint8Array => {
+      if (opts.finishError !== undefined) {
+        throw opts.finishError;
+      }
+      return new Uint8Array(32);
+    },
+  };
+  return { module, initCalls: () => initCalls };
+}
+
+describe("loadWasm single-flight & init retry (R1F1)", () => {
+  it("concurrent createPakeSession calls share ONE wasm init", async () => {
+    vi.resetModules();
+    dynamicImportMock.mockReset();
+    const fake = fakeSpake2Module();
+    dynamicImportMock.mockImplementation(async () => fake.module);
+    // A fresh module graph: its `wasmModulePromise` starts null so the real
+    // loadWasm path (mocked loader, real single-flight logic) is exercised.
+    const crypto = await import("@fuck-eu-chat-control/chat-runtime/crypto");
+    const [a, b, c] = await Promise.all([
+      crypto.createPakeSession("123456", Role.Initiator),
+      crypto.createPakeSession("654321", Role.Responder),
+      crypto.createPakeSession("111111", Role.Initiator),
+    ]);
+    expect(a.state).not.toBeNull();
+    expect(b.state).not.toBeNull();
+    expect(c.state).not.toBeNull();
+    expect(fake.initCalls()).toBe(1);
+    expect(dynamicImportMock).toHaveBeenCalledTimes(1);
+    expect(dynamicImportMock).toHaveBeenCalledWith("../../wasm/spake2/pkg/fck_spake2.js");
+  });
+
+  it("a failed init is not cached: concurrent callers share the rejection and the next call retries", async () => {
+    vi.resetModules();
+    dynamicImportMock.mockReset();
+    const fake = fakeSpake2Module({ failInitTimes: 1 });
+    dynamicImportMock.mockImplementation(async () => fake.module);
+    const crypto = await import("@fuck-eu-chat-control/chat-runtime/crypto");
+    const [r1, r2] = await Promise.allSettled([
+      crypto.createPakeSession("123456", Role.Initiator),
+      crypto.createPakeSession("123456", Role.Responder),
+    ]);
+    // Both callers observe the SAME rejection from the shared init.
+    expect(r1.status).toBe("rejected");
+    expect(r2.status).toBe("rejected");
+    if (r1.status === "rejected" && r2.status === "rejected") {
+      expect(r1.reason).toBe(r2.reason);
+      expect((r1.reason as Error).message).toContain("fake spake2 init failure");
+    }
+    expect(fake.initCalls()).toBe(1);
+    // The rejection cleared the slot: the next call re-imports and succeeds
+    // (retry-after-failed-init semantics preserved).
+    const session = await crypto.createPakeSession("123456", Role.Initiator);
+    expect(session.state).not.toBeNull();
+    expect(fake.initCalls()).toBe(2);
+    expect(dynamicImportMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("mapWasmError classification (R1F2)", () => {
+  it("rethrows an unrecognized wasm error UNTYPED so it is not durable-auth-classified", async () => {
+    vi.resetModules();
+    dynamicImportMock.mockReset();
+    const infraFault = new Error("unreachable: null pointer passed to wasm");
+    const fake = fakeSpake2Module({ finishError: infraFault });
+    dynamicImportMock.mockImplementation(async () => fake.module);
+    const crypto = await import("@fuck-eu-chat-control/chat-runtime/crypto");
+    const session = await crypto.createPakeSession("123456", Role.Initiator);
+    let thrown: unknown;
+    try {
+      await crypto.pakeFinish(session, new Uint8Array(PAKE_SHARE_BYTES));
+    } catch (err) {
+      thrown = err;
+    }
+    // The original fault propagates unchanged — crucially NOT as a PakeError.
+    // The orchestrator's isAuthFailureError only classifies `instanceof
+    // PakeError` (minus Cancelled/Timeout) as durable, so an untyped rethrow
+    // cannot brick the conversation over an infrastructure fault.
+    expect(thrown).toBe(infraFault);
+    expect(thrown).not.toBeInstanceOf(PakeError);
+    expect((thrown as Error).name).not.toBe("PakeError");
+  });
+
+  it("a non-Error wasm throw is wrapped in a plain Error (still untyped)", async () => {
+    vi.resetModules();
+    dynamicImportMock.mockReset();
+    const fake = fakeSpake2Module({ finishError: "string fault" });
+    dynamicImportMock.mockImplementation(async () => fake.module);
+    const crypto = await import("@fuck-eu-chat-control/chat-runtime/crypto");
+    const session = await crypto.createPakeSession("123456", Role.Initiator);
+    let thrown: unknown;
+    try {
+      await crypto.pakeFinish(session, new Uint8Array(PAKE_SHARE_BYTES));
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(PakeError);
+    expect((thrown as Error).message).toContain("string fault");
+  });
+
+  it("still maps recognized spake2::Error names to typed PakeError codes", async () => {
+    vi.resetModules();
+    dynamicImportMock.mockReset();
+    const fake = fakeSpake2Module({ finishError: new Error("pake_finish: CorruptMessage") });
+    dynamicImportMock.mockImplementation(async () => fake.module);
+    const crypto = await import("@fuck-eu-chat-control/chat-runtime/crypto");
+    const session = await crypto.createPakeSession("123456", Role.Initiator);
+    await expect(
+      crypto.pakeFinish(session, new Uint8Array(PAKE_SHARE_BYTES)),
+    ).rejects.toMatchObject({
+      name: "PakeError",
+      code: PakeErrorCode.InvalidShare,
+    });
   });
 });

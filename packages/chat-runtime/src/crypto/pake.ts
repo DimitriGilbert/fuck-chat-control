@@ -125,7 +125,7 @@ let wasmModulePromise: Promise<PakeWasmModule> | null = null;
  * {@link PakeWasmModuleBinding} view; the committed `pkg/fck_spake2.d.ts`
  * provides the underlying shapes.
  */
-async function loadWasm(): Promise<PakeWasmModule> {
+function loadWasm(): Promise<PakeWasmModule> {
   if (wasmModulePromise === null) {
     // The dynamic `import(specifier)` goes through the platform-split loader
     // (`./pake-loader`, resolved to `pake-loader.ts` by Vite/Node and to
@@ -144,9 +144,33 @@ async function loadWasm(): Promise<PakeWasmModule> {
     // override URL is the one resolved at runtime. Node tests bypass this
     // entirely via `__setWasmModuleForTests`.
     const specifier = spake2ModuleUrl ?? DEFAULT_SPAKE2_MODULE_SPECIFIER;
-    const mod = (await dynamicImport(specifier)) as unknown as PakeWasmModuleBinding;
-    await mod.default();
-    wasmModulePromise = Promise.resolve(mod as PakeWasmModule);
+    const init = (async (): Promise<PakeWasmModule> => {
+      const mod = (await dynamicImport(specifier)) as unknown as PakeWasmModuleBinding;
+      await mod.default();
+      return mod as PakeWasmModule;
+    })();
+    // R1/F1: assign the in-flight init promise SYNCHRONOUSLY — before any
+    // await — so concurrent `createPakeSession`/`pakeFinish` callers share
+    // this ONE instantiation. The previous code assigned `wasmModulePromise`
+    // only after two awaits, so a second caller entering while the first was
+    // parked re-imported and re-ran `__wbg_init`; its `__wbg_finalize_init`
+    // rebinds the module-scoped `wasm` heap and strands every PakeState
+    // pointer the first instance had handed out (later dereferenced against
+    // the wrong heap).
+    //
+    // The retry-after-failed-init contract is preserved: the cache only
+    // keeps a SUCCESSFUL init. On rejection the slot is cleared inside the
+    // rejection handler — which runs before awaiting callers resume — so the
+    // next call re-imports. The identity check guards the edge where a test
+    // re-seeds the slot via `__setWasmModuleForTests` while a stale init is
+    // still in flight.
+    const tracked = init.catch((err: unknown) => {
+      if (wasmModulePromise === tracked) {
+        wasmModulePromise = null;
+      }
+      throw err;
+    });
+    wasmModulePromise = tracked;
   }
   return wasmModulePromise;
 }
@@ -259,8 +283,11 @@ export function pakeOutgoingShare(session: PakeSession): Uint8Array {
 
 /**
  * Complete the SPAKE2 exchange, returning the 32-byte shared secret. Throws a
- * typed {@link PakeError} on any failure (wrong code → `Mismatch`, malformed
- * peer share → `InvalidShare`, protocol abort → `Abort`).
+ * typed {@link PakeError} for recognized SPAKE2 protocol errors (malformed
+ * peer share → `InvalidShare`, reflected/duplicate state → `Abort`); an
+ * unrecognized wasm failure is rethrown untyped (see {@link mapWasmError}) —
+ * a wrong code is NOT signaled here but detected by the orchestrator's
+ * confirmation-tag comparison (`PakeErrorCode.Mismatch`).
  *
  * After this call the WASM state is consumed; the caller should drop the
  * {@link PakeSession} reference.
@@ -296,14 +323,19 @@ export async function pakeFinish(session: PakeSession, peerShare: Uint8Array): P
  * `pake_finish:` / `pake_start:` prefix in the message to recover the
  * RustCrypto error name. A `BadSide` (reflected message / wrong-side share)
  * indicates a protocol abort; `CorruptMessage` / `WrongLength` indicate a
- * malformed peer share; anything else from `pake_finish` (a successfully
- * completed exchange that produced a different secret because the codes
- * differed) is reported as `Mismatch` — SPAKE2 does not itself detect a wrong
- * password, so the orchestrator detects it by comparing the two sides' derived
- * traffic keys (or, equivalently, a confirmation MAC). This wrapper surfaces
- * the post-hoc mismatch when the peer share was technically valid.
+ * malformed peer share; `AlreadyConsumed` means the one-shot state was
+ * finished twice.
+ *
+ * Anything unrecognized is returned untyped (the original `Error`, or a plain
+ * `Error` for a non-Error throw): SPAKE2 NEVER throws on a wrong code — the
+ * crate completes the exchange and the orchestrator detects divergent
+ * secrets via the confirmation MAC (`PakeErrorCode.Mismatch`) — so the
+ * catch-all can only fire for infrastructure faults (JS-glue errors, a
+ * freed-pointer dereference, OOM). Mapping those to `Mismatch` would mark the
+ * conversation durably auth-failed for a non-cryptographic fault; rethrowing
+ * untyped keeps `isAuthFailureError` false on this path.
  */
-function mapWasmError(err: unknown, where: "pake_start" | "pake_finish"): PakeError {
+function mapWasmError(err: unknown, where: "pake_start" | "pake_finish"): Error {
   const message = err instanceof Error ? err.message : String(err);
   if (message.includes("BadSide")) {
     return new PakeError(PakeErrorCode.Abort, `${where}: bad SPAKE2 side (reflected message)`);
@@ -317,5 +349,10 @@ function mapWasmError(err: unknown, where: "pake_start" | "pake_finish"): PakeEr
   if (message.includes("AlreadyConsumed")) {
     return new PakeError(PakeErrorCode.Abort, `${where}: SPAKE2 state already consumed`);
   }
-  return new PakeError(PakeErrorCode.Mismatch, `${where}: ${message}`);
+  // R1/F2: rethrow the unrecognized failure untyped rather than folding it
+  // into `PakeErrorCode.Mismatch` (durable auth failure).
+  if (err instanceof Error) {
+    return err;
+  }
+  return new Error(`${where}: ${message}`);
 }

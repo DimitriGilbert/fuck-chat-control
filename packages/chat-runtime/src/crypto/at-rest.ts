@@ -198,21 +198,24 @@ export async function wrapKey(passphrase: string, key: AtRestKey): Promise<Wrapp
   const keyBytes = new Uint8Array(key);
   const salt = randomBytes(ARGON2_SALT_BYTES);
   const wrappingKey = await deriveKeyFromPassphrase(passphrase, salt);
-  // R1:F1: same fresh-random-nonce construction as encryptAtRest — one wrap per
-  // passphrase set, so a random nonce makes reload reuse impossible and the
-  // per-record envelope stores it for unwrap.
-  const nonce = nextAtRestNonce();
-  const ciphertext = await aesGcmEncrypt(wrappingKey, nonce, EMPTY_AAD, keyBytes);
-  // R1:F3: the wrapping KEK and the plaintext snapshot are no longer needed
-  // after the single GCM seal above; wipe them so they do not linger on the
-  // heap.
-  zeroize(wrappingKey);
-  zeroize(keyBytes);
-  const out = new Uint8Array(WRAPPED_TOTAL_BYTES);
-  out.set(salt, WRAPPED_SALT_OFFSET);
-  out.set(nonce, WRAPPED_NONCE_OFFSET);
-  out.set(ciphertext, WRAPPED_CIPHERTEXT_OFFSET);
-  return out as unknown as WrappedKey;
+  try {
+    // R1:F1: same fresh-random-nonce construction as encryptAtRest — one wrap
+    // per passphrase set, so a random nonce makes reload reuse impossible and
+    // the per-record envelope stores it for unwrap.
+    const nonce = nextAtRestNonce();
+    const ciphertext = await aesGcmEncrypt(wrappingKey, nonce, EMPTY_AAD, keyBytes);
+    const out = new Uint8Array(WRAPPED_TOTAL_BYTES);
+    out.set(salt, WRAPPED_SALT_OFFSET);
+    out.set(nonce, WRAPPED_NONCE_OFFSET);
+    out.set(ciphertext, WRAPPED_CIPHERTEXT_OFFSET);
+    return out as unknown as WrappedKey;
+  } finally {
+    // R1/F4: wipe the Argon2id KEK and the plaintext snapshot on EVERY path —
+    // an aesGcmEncrypt/importAesGcmKey throw must not leave them on the heap
+    // (mirrors unwrapKey's finally).
+    zeroize(wrappingKey);
+    zeroize(keyBytes);
+  }
 }
 
 export async function unwrapKey(passphrase: string, wrapped: WrappedKey): Promise<AtRestKey> {

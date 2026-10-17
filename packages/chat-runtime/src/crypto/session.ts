@@ -85,18 +85,20 @@ export async function deriveSessionKeys(input: DeriveSessionKeysInput): Promise<
   // password-derived secret without changing the salt/IKM contract.
   const initInfo = buildTrafficKeyInfo(INIT_TO_RESP_LABEL, pakeSecret);
   const respInfo = buildTrafficKeyInfo(RESP_TO_INIT_LABEL, pakeSecret);
-  const initKeyBytes = await hkdfSha256(
-    ecdhSecret,
-    transcriptHash,
-    initInfo,
-    HKDF_TRAFFIC_KEY_BYTES,
-  );
-  const respKeyBytes = await hkdfSha256(
-    ecdhSecret,
-    transcriptHash,
-    respInfo,
-    HKDF_TRAFFIC_KEY_BYTES,
-  );
+  // R1/F3: initInfo/respInfo each embed a FULL COPY of pakeSecret (see
+  // buildTrafficKeyInfo) and would otherwise be dropped unwiped. Wipe them in
+  // a finally so they are cleared even if an hkdfSha256 await throws. Safe to
+  // zero after the awaits: hkdfSha256 copies `info` via toBuffer before
+  // calling deriveBits, so it never reads these buffers again.
+  let initKeyBytes: Uint8Array;
+  let respKeyBytes: Uint8Array;
+  try {
+    initKeyBytes = await hkdfSha256(ecdhSecret, transcriptHash, initInfo, HKDF_TRAFFIC_KEY_BYTES);
+    respKeyBytes = await hkdfSha256(ecdhSecret, transcriptHash, respInfo, HKDF_TRAFFIC_KEY_BYTES);
+  } finally {
+    zeroize(initInfo);
+    zeroize(respInfo);
+  }
 
   // R1/F3: toAESKey copies its input into the AESKey, so wipe both raw HKDF
   // outputs once the copies exist — the same pattern as at-rest.ts
