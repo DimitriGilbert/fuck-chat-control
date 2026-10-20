@@ -78,3 +78,17 @@ export const PAKE_SHARED_SECRET_BYTES = 32 as const;
 export const PAKE_CONFIRM_TAG_BYTES = 32 as const;
 export const PAKE_CONFIRM_MESSAGE_BYTES = 34 as const;
 export const PAKE_CONFIRM_LABEL = "fck-chat-v1/pake-confirm";
+
+/**
+ * Group-conversation limits (docs/architecture/protocol-v2-group.md §7).
+ * `DEFAULT_MAX_GROUP_MEMBERS` is the seat cap a group broker room and a
+ * client-side group session use when the operator does not override it via
+ * the `GROUP_MAX_MEMBERS` env var; `MAX_GROUP_MEMBERS_HARD` is the absolute
+ * ceiling that bounds the env var itself and is the last-resort decoder
+ * limit so no operator setting can mint an unbounded room or member list.
+ * `MAX_MEMBER_DISPLAY_NAME` bounds the `displayName` byte length of a
+ * `group_membership` memberEntry.
+ */
+export const DEFAULT_MAX_GROUP_MEMBERS = 8 as const;
+export const MAX_GROUP_MEMBERS_HARD = 16 as const;
+export const MAX_MEMBER_DISPLAY_NAME = 32 as const;
