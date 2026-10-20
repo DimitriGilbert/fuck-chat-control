@@ -229,3 +229,77 @@ inspection alone does not prove the deployed bytes match source. Self-hosting
 or independently verified/reproducible release artifacts are required for
 users whose threat model includes a malicious operator; this remains outside
 implementation scope.
+
+## Group conversations
+
+Groups ([ADR 003](../adr/003-group-chat.md),
+[protocol-v2-group.md](protocol-v2-group.md)) change the exposure profile in
+specific ways. Everything above still applies to each pairwise link — a
+group is a mesh of ordinary v1 sessions — but the group layer adds its own
+metadata, trust, and lifecycle properties, stated here explicitly.
+
+### Persistent broker seats
+
+In a 1:1 chat both peers vacate the broker room once the data channel opens.
+Group members instead **stay seated** for the life of the group so late
+joiners can be admitted and dropped links can re-signal. The broker
+therefore observes, for as long as a group is active, the room ID (equal to
+the group ID) and the online presence of up to `GROUP_MAX_MEMBERS` sockets,
+with join/leave timing — a real widening of the metadata surface versus the
+pair case. The broker still sees no content and no ciphertext: it relays
+signaling only, and all group traffic is member↔member over DTLS-encrypted
+data channels.
+
+### N−1 peer IP disclosure
+
+The peer-to-peer IP disclosure of the pair case scales with membership: each
+member holds WebRTC connections to every other member and therefore learns
+the IP addresses of **N−1 peers** instead of 1. Every member of a group
+should be treated as able to identify every other member's network address.
+
+### Author-admin trust model
+
+The group author is the sole administrator: only the author identity key can
+mint a membership list, and members adopt the highest-epoch signed list they
+receive. A malicious or compromised author can add anyone, remove anyone,
+and — because it signs the list — **equivocate**: it can deliver different
+signed member lists to different members (a split-view attack). Equivocation
+is detectable but not preventable within this design. The signature makes it
+attributable: a member holding two valid signed lists for conflicting
+contents has cryptographic proof of author misbehavior, and cross-member
+gossip over the pairwise links is expected to surface conflicting signed
+lists to honest members. Prevention would require a consensus or
+transparency mechanism, which is out of scope. Members who do not trust the
+author's list have no in-protocol recourse beyond leaving the group.
+
+### Bearer-link join semantics
+
+Joining a group uses the same bearer-link semantics as 1:1: possession of
+the invitation fragment — the group ID, plus the PAKE code when the group
+has one — is the capability. **Anyone who obtains the link can join the
+group**, take a broker seat, and complete handshakes; there is no
+per-member allow-list on join beyond the author-signed membership list
+itself. The reused group-wide PAKE code authenticates every link but is a
+single shared secret: intercepting the link once yields the code for every
+pairwise handshake in the group.
+
+### No offline delivery, no total ordering
+
+These are accepted limitations, not bugs. A member who is offline misses
+messages — there is no store-and-forward anywhere in the system, so nothing
+buffers ciphertext for later delivery. There is no total ordering across
+senders; per-sender ordering comes from each link's sequence numbers and
+the UI merges streams by timestamp. Neither property weakens
+confidentiality, but both are stated so no reader assumes guarantees the
+system does not make.
+
+### Removed members retain past-epoch keys
+
+Removing a member does not re-key anything: there is no group session key,
+only per-link keys, and a removed member keeps the keys — and therefore
+read access — for every epoch it participated in. Removal is enforced
+forward-only: remaining members close their links to the removed member on
+adopting the newer list, so the removed member loses the ability to read or
+send new traffic on those links but retains read access to all past traffic
+it saw. Users should treat removal as "no new messages", not as revocation
+of history.
