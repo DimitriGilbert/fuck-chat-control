@@ -11,6 +11,10 @@
 export const BrokerErrorCode = {
   /** A socket that is already seated in a room sent a second `join`. */
   AlreadySeated: "AlreadySeated",
+  /** A group join carried a `peerId` already seated in the room. */
+  DuplicatePeerId: "DuplicatePeerId",
+  /** A join's `mode` does not match the mode the room was created with. */
+  RoomModeMismatch: "RoomModeMismatch",
 } as const;
 
 export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
@@ -33,6 +37,8 @@ export class BrokerError extends Error {
  */
 export const BROKER_CLOSE_CODES: Readonly<Record<BrokerErrorCode, number>> = {
   AlreadySeated: 4003,
+  DuplicatePeerId: 4004,
+  RoomModeMismatch: 4005,
 };
 
 /**
@@ -41,4 +47,6 @@ export const BROKER_CLOSE_CODES: Readonly<Record<BrokerErrorCode, number>> = {
  */
 export const BROKER_CLOSE_REASONS: Readonly<Record<BrokerErrorCode, string>> = {
   AlreadySeated: "socket already in a room; leave + reconnect required",
+  DuplicatePeerId: "peerId already seated in this room; choose a fresh peerId",
+  RoomModeMismatch: "join mode does not match the room's mode",
 };

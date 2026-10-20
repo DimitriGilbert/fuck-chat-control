@@ -24,6 +24,7 @@ const SERVER_ENV_VARS = [
   "TURN_TLS_URL",
   "TURN_SHARED_SECRET",
   "TURN_REALM",
+  "GROUP_MAX_MEMBERS",
   "SKIP_ENV_VALIDATION",
 ] as const;
 
@@ -151,6 +152,33 @@ describe("ICE URL schemes — R15:F3 + R9:F1", () => {
     stubServerEnv({ TURN_URL: value });
     const { env } = await importServerEnv();
     expect(env.TURN_URL).toBe(value);
+  });
+});
+
+describe("GROUP_MAX_MEMBERS — protocol-v2-group §7 seat cap", () => {
+  it("stays optional (unset falls back to the registry default of 8)", async () => {
+    stubServerEnv();
+    const { env } = await importServerEnv();
+    expect(env.GROUP_MAX_MEMBERS).toBeUndefined();
+  });
+
+  it.each(["2", "8", "16"] as const)("accepts the integer %s within 2..16", async (value) => {
+    stubServerEnv({ GROUP_MAX_MEMBERS: value });
+    const { env } = await importServerEnv();
+    expect(env.GROUP_MAX_MEMBERS).toBe(Number(value));
+  });
+
+  it.each(["0", "1", "17", "100"] as const)(
+    "rejects %s — outside the 2..16 bounds",
+    async (value) => {
+      stubServerEnv({ GROUP_MAX_MEMBERS: value });
+      await expect(importServerEnv()).rejects.toThrow();
+    },
+  );
+
+  it.each(["abc", "2.5", "8x"] as const)("rejects %s — not an integer", async (value) => {
+    stubServerEnv({ GROUP_MAX_MEMBERS: value });
+    await expect(importServerEnv()).rejects.toThrow();
   });
 });
 

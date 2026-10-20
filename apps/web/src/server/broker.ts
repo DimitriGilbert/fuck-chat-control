@@ -35,7 +35,10 @@ export function shouldRejectConnection(current: number, max: number): boolean {
 // process. crossws hands us a `Peer` per event with a stable `id`, so we key
 // the BrokerConnection by that id; the BrokerSocket wrapper is what the sweep
 // inspects, so we keep a parallel id → socket map for the sweep to iterate.
-const registry = new RoomRegistry();
+// maxGroupPeers is the group-room seat cap (protocol-v2-group §2.2): unset
+// env → the registry's DEFAULT_MAX_GROUP_MEMBERS (8); the env schema bounds
+// the configured value to 2..16 (MAX_GROUP_MEMBERS_HARD).
+const registry = new RoomRegistry({ maxGroupPeers: env.GROUP_MAX_MEMBERS });
 const connections = new Map<string, BrokerConnection>();
 const sockets = new Map<string, BrokerSocket>();
 

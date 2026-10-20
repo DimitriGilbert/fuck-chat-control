@@ -1,32 +1,50 @@
-import { isValidRoomId, type BrokerSocket } from "./room-registry";
+import { isValidPeerId, isValidRoomId, type BrokerSocket, type RoomMode } from "./room-registry";
 
 const TYPE_TAG = "t" as const;
 
 export type BrokerMessageType = "join" | "offer" | "answer" | "ice" | "leave";
 
+/**
+ * protocol-v2-group §2.1: `join` gains optional `mode` (absent/"pair" = the
+ * legacy pair room) and `peerId` — required iff `mode` is `"group"`, absent
+ * otherwise. On the broker→client direction a `join` notification carries
+ * `peerId` naming the member that just seated.
+ */
 export interface JoinMessage {
   readonly kind: "join";
   readonly roomId: string;
+  readonly mode?: RoomMode;
+  readonly peerId?: string;
 }
 
 export interface LeaveMessage {
   readonly kind: "leave";
   readonly roomId: string;
+  /** Broker→client only: the departing member's peerId (group rooms). */
+  readonly peerId?: string;
 }
 
 export interface OfferMessage {
   readonly kind: "offer";
   readonly sdp: unknown;
+  /** Client→broker: target member's peerId (required in group rooms). */
+  readonly to?: string;
+  /** Broker→client: sender's peerId, attached by the relay (group rooms). */
+  readonly from?: string;
 }
 
 export interface AnswerMessage {
   readonly kind: "answer";
   readonly sdp: unknown;
+  readonly to?: string;
+  readonly from?: string;
 }
 
 export interface IceMessage {
   readonly kind: "ice";
   readonly candidate: unknown;
+  readonly to?: string;
+  readonly from?: string;
 }
 
 export type BrokerMessage = JoinMessage | LeaveMessage | OfferMessage | AnswerMessage | IceMessage;
@@ -55,6 +73,22 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * Read an optional peerId-shaped field (`to`, `from`, `peerId`). Returns the
+ * string when present and well-formed, `undefined` when absent, and `null`
+ * when present but malformed — so callers can distinguish "absent" from
+ * "invalid" and reject the whole message on the latter.
+ */
+function readPeerIdField(value: unknown): string | undefined | null {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !isValidPeerId(value)) {
+    return null;
+  }
+  return value;
+}
+
 export function parseMessage(raw: string): BrokerMessage | null {
   if (raw.length === 0 || raw.length > BROKER_MESSAGE_MAX_BYTES) {
     return null;
@@ -73,13 +107,51 @@ export function parseMessage(raw: string): BrokerMessage | null {
     return null;
   }
   switch (tag) {
-    case "join":
+    case "join": {
+      const roomId = parsed["roomId"];
+      if (typeof roomId !== "string" || !isValidRoomId(roomId)) {
+        return null;
+      }
+      const rawMode = parsed["mode"];
+      let mode: RoomMode | undefined;
+      if (rawMode === "pair" || rawMode === "group") {
+        mode = rawMode;
+      } else if (rawMode !== undefined) {
+        return null;
+      }
+      const peerId = readPeerIdField(parsed["peerId"]);
+      if (peerId === null) {
+        return null;
+      }
+      // §2.1: peerId is required iff mode is "group" and must not appear in
+      // pair mode — anything else is a malformed join.
+      if (mode === "group" && peerId === undefined) {
+        return null;
+      }
+      if (mode !== "group" && peerId !== undefined) {
+        return null;
+      }
+      return {
+        kind: "join",
+        roomId,
+        ...(mode !== undefined ? { mode } : {}),
+        ...(peerId !== undefined ? { peerId } : {}),
+      };
+    }
     case "leave": {
       const roomId = parsed["roomId"];
       if (typeof roomId !== "string" || !isValidRoomId(roomId)) {
         return null;
       }
-      return { kind: tag, roomId };
+      const peerId = readPeerIdField(parsed["peerId"]);
+      if (peerId === null) {
+        return null;
+      }
+      return {
+        kind: "leave",
+        roomId,
+        ...(peerId !== undefined ? { peerId } : {}),
+      };
     }
     case "offer":
     case "answer": {
@@ -87,14 +159,34 @@ export function parseMessage(raw: string): BrokerMessage | null {
       if (sdp === undefined) {
         return null;
       }
-      return { kind: tag, sdp };
+      const to = readPeerIdField(parsed["to"]);
+      const from = readPeerIdField(parsed["from"]);
+      if (to === null || from === null) {
+        return null;
+      }
+      return {
+        kind: tag,
+        sdp,
+        ...(to !== undefined ? { to } : {}),
+        ...(from !== undefined ? { from } : {}),
+      };
     }
     case "ice": {
       const candidate = parsed["candidate"];
       if (candidate === undefined) {
         return null;
       }
-      return { kind: tag, candidate };
+      const to = readPeerIdField(parsed["to"]);
+      const from = readPeerIdField(parsed["from"]);
+      if (to === null || from === null) {
+        return null;
+      }
+      return {
+        kind: "ice",
+        candidate,
+        ...(to !== undefined ? { to } : {}),
+        ...(from !== undefined ? { from } : {}),
+      };
     }
     default:
       return null;
@@ -105,15 +197,38 @@ export function formatMessage(message: BrokerMessage): string {
   let raw: Record<string, unknown>;
   switch (message.kind) {
     case "join":
+      raw = { [TYPE_TAG]: message.kind, roomId: message.roomId };
+      if (message.mode !== undefined) {
+        raw["mode"] = message.mode;
+      }
+      if (message.peerId !== undefined) {
+        raw["peerId"] = message.peerId;
+      }
+      break;
     case "leave":
       raw = { [TYPE_TAG]: message.kind, roomId: message.roomId };
+      if (message.peerId !== undefined) {
+        raw["peerId"] = message.peerId;
+      }
       break;
     case "offer":
     case "answer":
       raw = { [TYPE_TAG]: message.kind, sdp: message.sdp };
+      if (message.to !== undefined) {
+        raw["to"] = message.to;
+      }
+      if (message.from !== undefined) {
+        raw["from"] = message.from;
+      }
       break;
     case "ice":
       raw = { [TYPE_TAG]: message.kind, candidate: message.candidate };
+      if (message.to !== undefined) {
+        raw["to"] = message.to;
+      }
+      if (message.from !== undefined) {
+        raw["from"] = message.from;
+      }
       break;
   }
   return JSON.stringify(raw);

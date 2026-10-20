@@ -104,6 +104,14 @@ export const env = createEnv({
     // TURN_REALM: the coturn `realm` directive. Must match the value the
     // server is configured with; some WebRTC stacks surface it in errors.
     TURN_REALM: z.string().optional(),
+    // GROUP_MAX_MEMBERS: seat cap for group-mode broker rooms
+    // (docs/architecture/protocol-v2-group.md §7). Optional — unset means the
+    // registry's DEFAULT_MAX_GROUP_MEMBERS (8). The literal 16 is the spec's
+    // MAX_GROUP_MEMBERS_HARD ceiling: it bounds this var itself so an
+    // operator cannot mint an unbounded room. packages/env is a leaf package
+    // and must not depend on chat-runtime, so the ceiling is duplicated here
+    // as a literal rather than imported.
+    GROUP_MAX_MEMBERS: z.coerce.number().int().min(2).max(16).optional(),
   },
   runtimeEnv: process.env,
   skipValidation: !!process.env.SKIP_ENV_VALIDATION,
