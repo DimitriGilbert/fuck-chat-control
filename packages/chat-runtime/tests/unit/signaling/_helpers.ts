@@ -56,6 +56,10 @@ export class MockSignalingSocket implements SignalingSocket {
 export interface Parsed {
   readonly t: string;
   readonly roomId?: string;
+  readonly mode?: string;
+  readonly peerId?: string;
+  readonly to?: string;
+  readonly from?: string;
   readonly sdp?: unknown;
   readonly candidate?: unknown;
 }

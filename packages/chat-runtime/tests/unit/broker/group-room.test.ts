@@ -155,18 +155,30 @@ describe("group room — join and seat cap", () => {
         JSON.stringify({ t: "join", roomId: id, mode: "group", peerId: "0123456789abcde" }),
       ),
     ).toBeNull();
-    // peerId required iff mode is "group" — and must not appear otherwise.
+    // peerId required when mode is "group", forbidden with an explicit "pair".
     expect(parseMessage(JSON.stringify({ t: "join", roomId: id, mode: "group" }))).toBeNull();
-    expect(parseMessage(JSON.stringify({ t: "join", roomId: id, peerId: peerId(1) }))).toBeNull();
     expect(
       parseMessage(JSON.stringify({ t: "join", roomId: id, mode: "pair", peerId: peerId(1) })),
     ).toBeNull();
+    // {roomId, peerId} with NO mode is the broker→client join-notification
+    // shape (§2.1) and must parse — it is what seated members receive. A
+    // client sending it is rejected at the registry instead: a pair-mode
+    // join carrying a peerId is malformed (no seat, no close).
+    expect(parseMessage(JSON.stringify({ t: "join", roomId: id, peerId: peerId(1) }))).toEqual({
+      kind: "join",
+      roomId: id,
+      peerId: peerId(1),
+    });
 
     // A rejected parse never reaches the registry: no seat, no close.
     const registry = new RoomRegistry();
     const socket = new MockBrokerSocket();
     const conn = new BrokerConnection(socket, registry);
     conn.onMessage(JSON.stringify({ t: "join", roomId: id, mode: "group", peerId: "bad" }));
+    expect(socket.closed).toBe(false);
+    expect(registry.size()).toBe(0);
+    // The notification shape parses but still cannot seat a socket.
+    conn.onMessage(JSON.stringify({ t: "join", roomId: id, peerId: peerId(1) }));
     expect(socket.closed).toBe(false);
     expect(registry.size()).toBe(0);
   });
