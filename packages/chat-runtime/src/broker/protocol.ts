@@ -123,12 +123,18 @@ export function parseMessage(raw: string): BrokerMessage | null {
       if (peerId === null) {
         return null;
       }
-      // §2.1: peerId is required iff mode is "group" and must not appear in
-      // pair mode — anything else is a malformed join.
+      // §2.1: client→broker, peerId is required iff mode is "group" and must
+      // not appear with an explicit "pair" mode. A join carrying peerId with
+      // NO mode is the broker→client NOTIFICATION shape — the broker emits
+      // `{t:"join", roomId, peerId}` to seated members to name the just-seated
+      // peer, so the shared parser must accept it. A client that sends that
+      // shape reaches RoomRegistry.join as a pair-mode join carrying a peerId
+      // and is rejected there as malformed (no seat), so accepting it at
+      // parse time is safe.
       if (mode === "group" && peerId === undefined) {
         return null;
       }
-      if (mode !== "group" && peerId !== undefined) {
+      if (mode === "pair" && peerId !== undefined) {
         return null;
       }
       return {
