@@ -33,19 +33,28 @@ export function derivePublicKeyFromPrivate(privateKey: Uint8Array): PublicKey {
   return encodePublicKey(p256.getPublicKey(privateKey, false));
 }
 
-export async function signTranscript(
-  privateKey: Uint8Array,
-  transcript: Transcript,
-): Promise<Signature> {
-  const digest = await sha256(encodeTranscript(transcript));
+/**
+ * Sign an arbitrary byte string with an identity private key, producing the
+ * 64-byte IEEE P1363 (`r ‖ s`) signature the protocol carries (protocol-v1
+ * §2.2). This is the exact primitive {@link signTranscript} applies to the
+ * encoded transcript — factored out so the group-membership layer can sign
+ * its canonical payload (protocol-v2 §4.1) through the same code path.
+ */
+export async function signMessage(privateKey: Uint8Array, message: Uint8Array): Promise<Signature> {
+  const digest = await sha256(message);
   const signature = p256.sign(digest, privateKey);
   return encodeSignature(signature.toBytes("compact"));
 }
 
-export async function verifyTranscript(
+/**
+ * Verify a {@link signMessage} signature against an identity public key.
+ * Mirrors {@link verifyTranscript}: a wrong-length signature is a usage error
+ * (throws), a well-formed signature that fails verification returns `false`.
+ */
+export async function verifyMessage(
   publicKey: PublicKey,
   signature: Signature,
-  transcript: Transcript,
+  message: Uint8Array,
 ): Promise<boolean> {
   if (signature.length !== SIGNATURE_BYTES) {
     throw new CryptoError(
@@ -53,6 +62,21 @@ export async function verifyTranscript(
       `signature must be ${SIGNATURE_BYTES} bytes, got ${signature.length}`,
     );
   }
-  const digest = await sha256(encodeTranscript(transcript));
+  const digest = await sha256(message);
   return p256.verify(signature, digest, publicKey, { format: "compact" });
+}
+
+export async function signTranscript(
+  privateKey: Uint8Array,
+  transcript: Transcript,
+): Promise<Signature> {
+  return signMessage(privateKey, encodeTranscript(transcript));
+}
+
+export async function verifyTranscript(
+  publicKey: PublicKey,
+  signature: Signature,
+  transcript: Transcript,
+): Promise<boolean> {
+  return verifyMessage(publicKey, signature, encodeTranscript(transcript));
 }

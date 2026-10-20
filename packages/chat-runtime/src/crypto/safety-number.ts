@@ -1,5 +1,7 @@
+import { CONVERSATION_ID_BYTES, PUBLIC_KEY_BYTES } from "../protocol/limits";
 import type { ConversationId, PublicKey } from "../protocol/types";
 
+import { CryptoError, CryptoErrorCode } from "./errors";
 import { sha256 } from "./primitives";
 
 const SAFETY_NUMBER_BITS = 40;
@@ -36,6 +38,16 @@ function formatSafetyNumber(value: number): string {
   return groups.join(" ");
 }
 
+/**
+ * Shared rendering tail for both safety-number flavors: truncate the digest
+ * to its first 40 bits (big-endian), reduce mod 10^12, format as six
+ * space-separated two-digit groups.
+ */
+function renderSafetyNumber(digest: Uint8Array): string {
+  const truncated = digest.subarray(0, SAFETY_NUMBER_BYTES);
+  return formatSafetyNumber(uint40BigEndian(truncated) % SAFETY_NUMBER_MODULUS);
+}
+
 export async function computeSafetyNumber(
   conversationId: ConversationId,
   idPubA: PublicKey,
@@ -47,6 +59,69 @@ export async function computeSafetyNumber(
   material.set(first, conversationId.length);
   material.set(second, conversationId.length + first.length);
   const digest = await sha256(material);
-  const truncated = digest.subarray(0, SAFETY_NUMBER_BYTES);
-  return formatSafetyNumber(uint40BigEndian(truncated) % SAFETY_NUMBER_MODULUS);
+  return renderSafetyNumber(digest);
+}
+
+/**
+ * Group safety number (protocol-v2 §5): a single number covering the whole
+ * member list at one epoch, computed identically on every member's client.
+ *
+ *   material = "fck-group-v1/safety" ‖ groupId(16) ‖ epoch(4BE) ‖ sorted(memberIdPubs)
+ *
+ * `sorted(memberIdPubs)` concatenates all member identity public keys — the
+ * author's included, each 65-byte uncompressed SEC1 — ordered by the same
+ * lexicographic byte comparison as v1. The number changes on every epoch
+ * bump, so an out-of-band comparison authenticates the member list AS OF that
+ * epoch; each pairwise link additionally retains its own v1 safety number.
+ */
+const GROUP_SAFETY_DOMAIN = new TextEncoder().encode("fck-group-v1/safety");
+const UINT32_MAX = 0xffffffff;
+
+export async function computeGroupSafetyNumber(
+  groupId: Uint8Array,
+  epoch: number,
+  memberPubs: readonly Uint8Array[],
+): Promise<string> {
+  if (groupId.length !== CONVERSATION_ID_BYTES) {
+    throw new CryptoError(
+      CryptoErrorCode.InvalidArgument,
+      `group id must be ${CONVERSATION_ID_BYTES} bytes, got ${groupId.length}`,
+    );
+  }
+  if (!Number.isInteger(epoch) || epoch < 0 || epoch > UINT32_MAX) {
+    throw new CryptoError(
+      CryptoErrorCode.InvalidArgument,
+      `epoch must be an unsigned uint32 integer, got ${epoch}`,
+    );
+  }
+  for (const pub of memberPubs) {
+    if (pub.length !== PUBLIC_KEY_BYTES) {
+      throw new CryptoError(
+        CryptoErrorCode.InvalidArgument,
+        `member identity key must be ${PUBLIC_KEY_BYTES} bytes, got ${pub.length}`,
+      );
+    }
+  }
+  const sorted = [...memberPubs].sort(compareBytes);
+  let membersLength = 0;
+  for (const pub of sorted) membersLength += pub.length;
+  const material = new Uint8Array(
+    GROUP_SAFETY_DOMAIN.length + CONVERSATION_ID_BYTES + 4 + membersLength,
+  );
+  let offset = 0;
+  material.set(GROUP_SAFETY_DOMAIN, offset);
+  offset += GROUP_SAFETY_DOMAIN.length;
+  material.set(groupId, offset);
+  offset += CONVERSATION_ID_BYTES;
+  material[offset] = (epoch >>> 24) & 0xff;
+  material[offset + 1] = (epoch >>> 16) & 0xff;
+  material[offset + 2] = (epoch >>> 8) & 0xff;
+  material[offset + 3] = epoch & 0xff;
+  offset += 4;
+  for (const pub of sorted) {
+    material.set(pub, offset);
+    offset += pub.length;
+  }
+  const digest = await sha256(material);
+  return renderSafetyNumber(digest);
 }

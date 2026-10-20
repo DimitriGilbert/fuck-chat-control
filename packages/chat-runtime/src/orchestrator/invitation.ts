@@ -76,6 +76,28 @@ export function formatCodedInvitation(id: ConversationId, baseUrl: string, code:
 }
 
 /**
+ * Format a GROUP invitation link (protocol-v2 §8). The fragment grammar is
+ * byte-for-byte the pair grammar — `#<32 lowercase hex>` carrying the 16-byte
+ * groupId in the same slot a v1 conversation id occupies, plus the optional
+ * `~NNNNNN` SPAKE2 code tail — so this delegates to
+ * {@link hexToConversationId} + {@link formatCodedInvitation} instead of
+ * duplicating the fragment logic. `groupIdHex` is case-normalized like
+ * {@link parseInvitation}; `code` omitted or empty produces a
+ * safety-number-only link.
+ *
+ * A group invitation is indistinguishable from a pair invitation: pair versus
+ * group is decided by WHICH JOIN FLOW the client runs (the broker `mode` it
+ * requests), not by the link bytes. Joining UIs must call the matching entry
+ * point; {@link parseInvitation} parses both.
+ */
+export function formatGroupInvitation(groupIdHex: string, baseUrl: string, code?: string): string {
+  const id = hexToConversationId(groupIdHex.toLowerCase());
+  return code === undefined
+    ? formatInvitation(id, baseUrl)
+    : formatCodedInvitation(id, baseUrl, code);
+}
+
+/**
  * Result of parsing an invitation fragment. The PAKE `code` is null for
  * safety-number-only invitations; non-null when the initiator appended
  * `~<code>` to carry the SPAKE2 password out-of-band alongside the

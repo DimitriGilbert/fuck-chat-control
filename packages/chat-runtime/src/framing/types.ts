@@ -44,6 +44,14 @@ export interface FrameSenderConfig {
    * size. Additive: existing callers that omit it see no change.
    */
   readonly onProgress?: (transferId: number, bytesTransferred: number, total: number) => void;
+  /**
+   * Opt-in group-link mode (protocol-v2 §4.1): when true, `sendControl` also
+   * accepts the group control subtypes in `GROUP_CONTROL_SUBTYPE_VALUES`
+   * (`group_membership` 0x07, `group_membership_request` 0x08). Defaults to
+   * false — a pair-mode v1 link keeps terminal-erroring on them exactly as
+   * before. Additive: callers that omit it see no change.
+   */
+  readonly allowGroupControlSubtypes?: boolean;
 }
 
 export interface FrameReceiverHandlers {
@@ -89,4 +97,13 @@ export interface FrameReceiverConfig extends FrameReceiverHandlers {
    * Each tick walks {@link FrameReceiver#activeTransferCount} entries. CR-5.
    */
   readonly inactivityTickMs?: number;
+  /**
+   * Opt-in group-link mode (protocol-v2 §4.1): when true, the control-subtype
+   * acceptance check also admits `GROUP_CONTROL_SUBTYPE_VALUES`
+   * (`group_membership` 0x07, `group_membership_request` 0x08), routed to the
+   * host via `onControl` like any other subtype. Defaults to false — a
+   * pair-mode v1 link keeps terminal-erroring on them byte-for-byte as
+   * before. Additive: callers that omit it see no change.
+   */
+  readonly allowGroupControlSubtypes?: boolean;
 }
