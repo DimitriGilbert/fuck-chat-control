@@ -24,6 +24,7 @@ import {
   PencilIcon,
   PlusIcon,
   TrashIcon,
+  UsersIcon,
   XIcon,
 } from "lucide-react";
 import * as React from "react";
@@ -32,10 +33,15 @@ import { toast } from "sonner";
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
-import type { SessionSummary } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type {
+  GroupSummary,
+  SessionSummary,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { CONNECTION_STATE_LABELS } from "@/features/chat/ui/chat-status";
+import { TESTIDS } from "@/features/chat/ui/testids";
 import { conversationIdKey } from "@/features/chat/ui/unified-sessions";
+import type { SessionListEntry } from "@/features/chat/ui/unified-sessions";
 
 /**
  * Session list surface extracted from sidebar.tsx so the desktop rail and the
@@ -43,15 +49,18 @@ import { conversationIdKey } from "@/features/chat/ui/unified-sessions";
  * is rendered as tappable rows (label, presence dot, preview, unread badge,
  * per-row actions) plus the "Start a conversation" CTA.
  *
- * Row taps resolve through {@link ConversationList}'s handleSelect, which
+ * Row taps resolve through {@link SessionList}'s handleSelect, which
  * preserves the original semantics: a persisted-only row resumes via
  * `controller.resumeConversation`; a live row selects via
  * `controller.selectConversation`.
  */
 
-export interface ConversationListProps {
-  /** The unified (records ∪ live sessions) sorted list to render. */
-  readonly sessions: readonly SessionSummary[];
+export interface SessionListProps {
+  /**
+   * The unified sorted list to render — conversations AND live groups
+   * interleaved (see {@link buildUnifiedList}).
+   */
+  readonly entries: readonly SessionListEntry[];
   /**
    * Invoked after EVERY row tap (including re-taps of the already-active
    * row). The mobile shell uses it to reveal the pushed-over chat pane —
@@ -63,13 +72,16 @@ export interface ConversationListProps {
   readonly testId?: string;
 }
 
-export function ConversationList({
-  sessions,
+export function SessionList({
+  entries,
   onSessionOpen,
   testId,
-}: ConversationListProps): React.ReactElement {
+}: SessionListProps): React.ReactElement {
   const { controller, state } = useChat();
   const activeId = state.activeConversationId;
+  // Hex of the active group ("" when none) — GroupSummary.groupIdHex is the
+  // same normalization, so row-active comparison stays string-equality.
+  const activeGroupHex = state.activeGroup?.groupIdHex ?? "";
 
   function handleSelect(id: ConversationId): void {
     // The mobile overlay re-opens on ANY row tap, even a no-op select of the
@@ -98,15 +110,39 @@ export function ConversationList({
     }
   }
 
+  function handleSelectGroup(group: GroupSummary): void {
+    // Same contract as handleSelect: the mobile overlay re-opens on ANY row
+    // tap, and the controller-side select throws a typed GroupError for an
+    // unknown group (surfaced like the conversation path).
+    onSessionOpen?.();
+    if (controller === null) return;
+    if (group.groupIdHex === activeGroupHex) return;
+    try {
+      controller.selectGroup(group.groupId);
+    } catch (err: unknown) {
+      toast.error("Could not open", {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   return (
     <ul data-testid={testId} className="flex flex-col gap-0.5">
-      {sessions.map((session) => (
-        <li key={conversationIdKey(session.id)}>
-          <SessionRow
-            session={session}
-            active={conversationIdKey(session.id) === conversationIdKeyOrNull(activeId)}
-            onSelect={() => handleSelect(session.id)}
-          />
+      {entries.map((entry) => (
+        <li key={entry.key}>
+          {entry.kind === "conversation" ? (
+            <SessionRow
+              session={entry.session}
+              active={conversationIdKey(entry.session.id) === conversationIdKeyOrNull(activeId)}
+              onSelect={() => handleSelect(entry.session.id)}
+            />
+          ) : (
+            <GroupRow
+              group={entry.group}
+              active={entry.group.groupIdHex === activeGroupHex}
+              onSelect={() => handleSelectGroup(entry.group)}
+            />
+          )}
         </li>
       ))}
     </ul>
@@ -346,6 +382,123 @@ function SessionRow({ session, active, onSelect }: SessionRowProps): React.React
         conversationId={session.id}
         label={label}
       />
+    </div>
+  );
+}
+
+/**
+ * Clickable row for a live GROUP in the unified list (protocol-v2). Mirrors
+ * {@link SessionRow}'s layout — active rail, label line, subline, trailing
+ * actions — with group-specific content: a users glyph instead of the 1:1
+ * connection dot (a group has no single connection state), the member count
+ * and `k/n connected` link summary in the subline, and a "Leave group"
+ * action (there is no persisted record to delete — groups are runtime-only,
+ * so Leave is the only destructive-ish action; nothing needs a confirm
+ * dialog because no history or record is lost).
+ */
+interface GroupRowProps {
+  readonly group: GroupSummary;
+  readonly active: boolean;
+  readonly onSelect: () => void;
+}
+
+function GroupRow({ group, active, onSelect }: GroupRowProps): React.ReactElement {
+  const { controller } = useChat();
+  const unread = group.unread;
+  // k/n connectivity: the local member holds no link to itself, so the
+  // reachable-peer count is memberCount - 1. For a solo group (nobody else
+  // seated yet) the "0/0" form would read as noise — suppress it.
+  const others = group.memberCount - 1;
+  const memberSummary =
+    others > 0
+      ? `${group.memberCount} member${group.memberCount === 1 ? "" : "s"} · ${group.connectedLinks}/${others} connected`
+      : `${group.memberCount} member`;
+  const preview = group.lastMessagePreview;
+  const timestamp = group.lastMessageAt;
+  const hasConnectedLink = group.connectedLinks > 0;
+
+  function handleLeave(): void {
+    if (controller === null) return;
+    // Non-destructive in the 1:1 sense: leaves the broker seat + links and
+    // evicts the live record. The stored membership snapshot is kept for
+    // pairwise-id masking (chat-controller.leaveGroup).
+    controller.leaveGroup(group.groupId);
+  }
+
+  return (
+    <div
+      data-slot="sidebar-row"
+      data-testid={TESTIDS.groupEntry}
+      data-group-id={group.groupIdHex}
+      data-active={active ? "true" : undefined}
+      className={cn(
+        "group/row relative flex items-stretch rounded-md transition-colors",
+        active
+          ? "bg-primary/10 text-sidebar-accent-foreground"
+          : "hover:bg-sidebar-accent/60 text-sidebar-foreground",
+      )}
+    >
+      {active && (
+        <span
+          aria-hidden="true"
+          className="bg-primary absolute top-1.5 bottom-1.5 left-0 w-[2px] rounded-full"
+        />
+      )}
+      <button
+        type="button"
+        onClick={onSelect}
+        className="flex min-w-0 flex-1 flex-col gap-0.5 px-3 py-2.5 text-left focus-visible:bg-sidebar-accent/60 focus-visible:outline-none"
+        aria-current={active ? "true" : undefined}
+      >
+        <span className="flex items-center gap-1.5">
+          <UsersIcon
+            className={cn(
+              "size-3.5 shrink-0",
+              hasConnectedLink ? "text-primary" : "text-sidebar-foreground/40",
+            )}
+            aria-label={hasConnectedLink ? "Group with connected members" : "Group"}
+          />
+          <span className="truncate text-sm font-medium">{group.label}</span>
+          {unread > 0 && (
+            <span
+              aria-label={`${unread} unread`}
+              className="bg-primary text-primary-foreground ml-auto inline-flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none"
+            >
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )}
+        </span>
+        <span className="flex items-center gap-1.5 text-xs">
+          <span className="text-muted-foreground shrink-0">{memberSummary}</span>
+          {preview !== null && (
+            <span className="text-muted-foreground min-w-0 flex-1 truncate">{preview}</span>
+          )}
+          {preview === null && <span className="flex-1" />}
+          <Timestamp timestamp={timestamp} connected={hasConnectedLink} />
+        </span>
+      </button>
+      <div className="flex items-start pr-1 pt-1.5">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                className="text-sidebar-foreground/70 hover:text-sidebar-foreground"
+                aria-label={`Actions for ${group.label}`}
+              />
+            }
+          >
+            <MoreHorizontalIcon />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-40">
+            <DropdownMenuItem onClick={handleLeave}>
+              <XIcon />
+              Leave group
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   );
 }

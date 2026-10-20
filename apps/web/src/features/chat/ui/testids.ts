@@ -29,6 +29,43 @@ export const TESTIDS = {
   backToConversations: "back-to-conversations",
   /** The mobile conversation list (list-first home). */
   conversationList: "conversation-list",
+  /** Sidebar "New group" affordance — opens the create-group dialog. */
+  newGroup: "new-group",
+  /** The optional local group-name input in the create-group dialog. */
+  groupNameInput: "group-name-input",
+  /** The optional own-display-name input in the create-group dialog. */
+  groupDisplayNameInput: "group-display-name-input",
+  /** The optional 6-digit extra-code input in the create-group dialog. */
+  groupCodeInput: "group-code-input",
+  /** The "Create group" submit action in the create-group dialog. */
+  createGroup: "create-group",
+  /** A group row in the unified session list (row carries data-group-id). */
+  groupEntry: "group-entry",
+  /**
+   * The join-mode decision point (protocol-v2 §8): invitation links carry no
+   * mode bit, so the pending-join dialog offers "join as 1:1" and
+   * "join as group" actions.
+   */
+  joinAsPair: "join-as-pair",
+  joinAsGroup: "join-as-group",
+  /** The main-pane group surface (Phase 7a minimal view). */
+  groupView: "group-view",
+  /** The group header's members-button (opens the members sheet). */
+  groupMembers: "group-members",
+  /** The members sheet's content region. */
+  groupMembersPanel: "group-members-panel",
+  /** One member row inside the members sheet (carries data-member-key). */
+  groupMemberRow: "group-member-row",
+  /** The author-only per-member remove affordance inside the sheet. */
+  groupMemberRemove: "group-member-remove",
+  /** The confirm action inside the remove-member alert dialog. */
+  groupMemberRemoveConfirm: "group-member-remove-confirm",
+  /** The group header's "verify this group" affordance. */
+  verifyGroup: "verify-group",
+  /** The group safety-number dialog content. */
+  groupSafetyDialog: "group-safety-dialog",
+  /** The group safety dialog's confirm ("The numbers match") action. */
+  groupSafetyConfirm: "group-safety-confirm",
 } as const;
 
 export type TestId = (typeof TESTIDS)[keyof typeof TESTIDS];

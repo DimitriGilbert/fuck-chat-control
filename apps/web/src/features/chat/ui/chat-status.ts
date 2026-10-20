@@ -44,15 +44,21 @@ export const CONNECTION_STATE_VARIANTS: ReadonlyRecord<ConnectionState, Connecti
  * Partitions messages by calendar day so the transcript can render a
  * `Marker` separator between days. Uses the local date string so the
  * grouping matches the user's wall clock.
+ *
+ * Generic over the message shape (only `timestamp` is consumed) so both the
+ * 1:1 {@link ConversationMessage} transcript and the group's attributed
+ * {@link GroupChatMessage} transcript (protocol-v2) share the bucketing.
  */
-export interface DayBucket {
+export interface DayBucket<T extends { readonly timestamp: number } = ConversationMessage> {
   readonly key: string;
   readonly label: string;
-  readonly messages: readonly ConversationMessage[];
+  readonly messages: readonly T[];
 }
 
-export function bucketByDay(messages: readonly ConversationMessage[]): readonly DayBucket[] {
-  const buckets: DayBucket[] = [];
+export function bucketByDay<T extends { readonly timestamp: number }>(
+  messages: readonly T[],
+): readonly DayBucket<T>[] {
+  const buckets: DayBucket<T>[] = [];
   for (const message of messages) {
     const key = dayKey(message.timestamp);
     const last = buckets[buckets.length - 1];

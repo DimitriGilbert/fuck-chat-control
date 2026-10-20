@@ -1,7 +1,7 @@
 import type { GroupSession } from "../group/group-session";
 import type { GroupId } from "../group/types";
 import type { AuthMode, ConversationId, PublicKey } from "../protocol/types";
-import type { ConnectionState } from "../signaling/state-machine";
+import { ConnectionState } from "../signaling/state-machine";
 import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
 import type { ConversationMessage, ConversationRecord, MessageDirection } from "../store";
 import type { ReceivedFile } from "../framing";
@@ -369,6 +369,13 @@ export interface GroupSummary {
   readonly label: string;
   readonly epoch: number;
   readonly memberCount: number;
+  /**
+   * Members whose pairwise link is currently {@link ConnectionState.Connected}
+   * — the local member is never counted (it holds no link to itself), so this
+   * tops out at `memberCount - 1`. The sidebar renders it as the "k/n
+   * connected" connectivity summary alongside {@link memberCount}.
+   */
+  readonly connectedLinks: number;
   readonly isAuthor: boolean;
   readonly unread: number;
   readonly lastMessagePreview: string | null;
@@ -418,12 +425,23 @@ function sameKey(a: Uint8Array, b: Uint8Array): boolean {
 /** Build a {@link GroupSummary} view from a live group session record. */
 export function summarizeGroup(group: ChatGroupSession): GroupSummary {
   const memberCount = group.session.memberList.length;
+  // Count member links that are currently Connected. Self is skipped
+  // implicitly: memberLinkState returns null for the local member (it has
+  // no link to itself). Pending/handshaking links count toward the member
+  // total but not toward connected — matching the "k/n connected" contract.
+  let connectedLinks = 0;
+  for (const member of group.session.memberList) {
+    if (group.session.memberLinkState(member.identityPub) === ConnectionState.Connected) {
+      connectedLinks++;
+    }
+  }
   return {
     groupId: group.id,
     groupIdHex: bytesToHexString(group.id),
     label: group.displayName ?? `Group · ${memberCount} member${memberCount === 1 ? "" : "s"}`,
     epoch: group.session.memberEpoch,
     memberCount,
+    connectedLinks,
     isAuthor: group.isAuthor,
     unread: group.unread,
     lastMessagePreview: group.lastMessagePreview,

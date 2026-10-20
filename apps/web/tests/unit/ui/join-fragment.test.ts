@@ -1,32 +1,39 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import * as React from "react";
 
 import type { ConversationId } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { GroupId } from "@fuck-eu-chat-control/chat-runtime/group/types";
 import type {
   ChatController,
   ChatControllerState,
 } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
-import type { ActiveSessionState } from "@fuck-eu-chat-control/chat-runtime/runtime/types";
+import type {
+  ActiveGroupState,
+  ActiveSessionState,
+} from "@fuck-eu-chat-control/chat-runtime/runtime/types";
 import { AuthMode } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 
 import { Route } from "@/routes/index";
+import { TESTIDS } from "@/features/chat/ui/testids";
 
 /**
- * Phase 9.2 pins (R10F6/R11F1 dedup, R11F2):
+ * Phase 7 (protocol-v2 §8) pins: the invitation fragment grammar is identical
+ * for pair and group, so a detected `#<hex>(~<code>)?` becomes a PENDING join
+ * — the {@link JoinModeDialog} asks "1:1 or group" and the user's pick routes
+ * to `joinConversation` vs `joinGroup`. The pre-v2 pins still hold:
  *
- *   - the fragment is consumed AT MOST ONCE per value (a consumed-fragment
- *     ref replaces the old permanent `joinedRef` latch), so a failed join
- *     can be retried by re-pasting and a post-leave paste joins again;
- *   - the credential-laden `#<hex>~<code>` fragment is scrubbed from the URL
- *     IMMEDIATELY after being read — before the async join settles — so a
- *     successful join cannot leave it in the address bar / synced history.
+ *   - the fragment is consumed AT MOST ONCE per value (consumed-fragment ref,
+ *     not a latch), so a failed or dismissed join retries on re-paste;
+ *   - the credential-laden fragment is scrubbed from the URL IMMEDIATELY when
+ *     consumed — before the user even picks a mode;
+ *   - no prompt while a surface (conversation OR group) is active; the link
+ *     still prompts after the surface is left.
  *
  * Renders the REAL HomeComponent (via `Route.options.component`) under jsdom
- * with useChat swapped for a reactive harness (useSyncExternalStore, so
- * `publish()` re-renders like the controller's emit) and AppShell stubbed.
+ * with useChat swapped for a reactive harness and AppShell stubbed.
  */
 
 const CONVERSATION_ID_BYTES = 16;
@@ -35,6 +42,12 @@ function idFromNumber(n: number): ConversationId {
   const bytes = new Uint8Array(CONVERSATION_ID_BYTES);
   new DataView(bytes.buffer).setUint32(12, n);
   return bytes as unknown as ConversationId;
+}
+
+function groupIdFromNumber(n: number): GroupId {
+  const bytes = new Uint8Array(CONVERSATION_ID_BYTES);
+  new DataView(bytes.buffer).setUint32(12, n);
+  return bytes as unknown as GroupId;
 }
 
 const ctx = vi.hoisted(() => ({
@@ -121,6 +134,28 @@ function makeActive(id: ConversationId): ActiveSessionState {
   };
 }
 
+function makeActiveGroup(groupId: GroupId): ActiveGroupState {
+  let groupIdHex = "";
+  for (const b of groupId) groupIdHex += b.toString(16).padStart(2, "0");
+  return {
+    groupId,
+    groupIdHex,
+    isAuthor: false,
+    epoch: 1,
+    members: [],
+    safetyNumber: null,
+    safetyNumberVerified: false,
+    authMode: AuthMode.SafetyNumberOnly,
+    displayName: null,
+    messages: [],
+    invitation: null,
+    unread: 0,
+    draft: "",
+    lastMessagePreview: null,
+    lastMessageAt: null,
+  };
+}
+
 const FRAGMENT_A = "a".repeat(32);
 const FRAGMENT_B = `${"b".repeat(32)}~654321`;
 
@@ -133,7 +168,21 @@ function fireHashChange(): void {
   window.dispatchEvent(new Event("hashchange"));
 }
 
-describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
+function makeController(): {
+  controller: ChatController;
+  joinConversation: ReturnType<typeof vi.fn>;
+  joinGroup: ReturnType<typeof vi.fn>;
+} {
+  const joinConversation = vi.fn().mockResolvedValue(undefined);
+  const joinGroup = vi.fn().mockResolvedValue(undefined);
+  return {
+    controller: { joinConversation, joinGroup } as unknown as ChatController,
+    joinConversation,
+    joinGroup,
+  };
+}
+
+describe("invitation-fragment join-mode choice (protocol-v2 §8)", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/");
     toasts.error.mockClear();
@@ -142,44 +191,76 @@ describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
 
   afterEach(cleanup);
 
-  it("joins a well-formed fragment and scrubs the hash BEFORE the join settles", () => {
-    let settle: () => void = () => {};
-    const joinConversation = vi.fn().mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          settle = resolve;
-        }),
-    );
-    ctx.controller = { joinConversation } as unknown as ChatController;
+  it("a detected fragment opens the mode dialog and scrubs the hash BEFORE any join runs", () => {
+    const { controller, joinConversation, joinGroup } = makeController();
+    ctx.controller = controller;
     ctx.state = makeState({});
     setHashFragment(FRAGMENT_A);
 
     render(React.createElement(HomeComponent));
 
-    // The join is in flight (never resolved) — yet the hash is already gone:
-    // the scrub must not wait for the async join's outcome.
-    expect(joinConversation).toHaveBeenCalledTimes(1);
-    expect(joinConversation).toHaveBeenCalledWith(FRAGMENT_A);
+    // No join fires until the user picks a mode — but the hash is already
+    // gone (the credential tail must not sit in the address bar while the
+    // decision is pending).
+    expect(screen.getByTestId(TESTIDS.joinAsPair)).toBeTruthy();
+    expect(screen.getByTestId(TESTIDS.joinAsGroup)).toBeTruthy();
+    expect(joinConversation).not.toHaveBeenCalled();
+    expect(joinGroup).not.toHaveBeenCalled();
     expect(window.location.hash).toBe("");
-
-    return act(async () => {
-      settle();
-    });
   });
 
-  it("a failed join un-consumes the fragment: re-pasting the same link retries", async () => {
+  it('"Join as 1:1 conversation" routes to joinConversation with the bare fragment', async () => {
+    const { controller, joinConversation, joinGroup } = makeController();
+    ctx.controller = controller;
+    ctx.state = makeState({});
+    setHashFragment(FRAGMENT_B);
+
+    render(React.createElement(HomeComponent));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsPair));
+    });
+
+    expect(joinConversation).toHaveBeenCalledTimes(1);
+    expect(joinConversation).toHaveBeenCalledWith(FRAGMENT_B);
+    expect(joinGroup).not.toHaveBeenCalled();
+    // The dialog closes once the join resolves.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId(TESTIDS.joinAsPair)).toBeNull();
+  });
+
+  it('"Join as group" routes to joinGroup with the same fragment', async () => {
+    const { controller, joinConversation, joinGroup } = makeController();
+    ctx.controller = controller;
+    ctx.state = makeState({});
+    setHashFragment(FRAGMENT_A);
+
+    render(React.createElement(HomeComponent));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsGroup));
+    });
+
+    expect(joinGroup).toHaveBeenCalledTimes(1);
+    expect(joinGroup).toHaveBeenCalledWith(FRAGMENT_A);
+    expect(joinConversation).not.toHaveBeenCalled();
+  });
+
+  it("a failed join un-consumes the fragment and keeps the prompt open — re-pasting retries", async () => {
     const joinConversation = vi
       .fn()
       .mockRejectedValueOnce(new Error("dial failed"))
       .mockResolvedValueOnce(undefined);
-    ctx.controller = { joinConversation } as unknown as ChatController;
+    const joinGroup = vi.fn().mockResolvedValue(undefined);
+    ctx.controller = { joinConversation, joinGroup } as unknown as ChatController;
     ctx.state = makeState({});
     setHashFragment(FRAGMENT_A);
 
     render(React.createElement(HomeComponent));
-    expect(joinConversation).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsPair));
+    });
 
-    // Wait for the rejection path (toast + un-consume).
     await act(async () => {
       await vi.waitFor(() => {
         expect(toasts.error).toHaveBeenCalledWith(
@@ -189,22 +270,24 @@ describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
       });
     });
 
-    // Re-pasting the SAME link must retry — the permanent joinedRef latch
-    // used to kill this for the page's lifetime.
+    // The prompt stays open after a failure so the other mode is one click
+    // away; the un-consumed fragment means a re-paste re-prompts too.
     setHashFragment(FRAGMENT_A);
     act(() => {
       fireHashChange();
     });
-
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsPair));
+    });
     expect(joinConversation).toHaveBeenCalledTimes(2);
     expect(joinConversation).toHaveBeenLastCalledWith(FRAGMENT_A);
     expect(window.location.hash).toBe("");
   });
 
-  it("does not join while a conversation is already active", () => {
+  it("does not prompt while a conversation is already active", () => {
     const id = idFromNumber(50);
-    const joinConversation = vi.fn().mockResolvedValue(undefined);
-    ctx.controller = { joinConversation } as unknown as ChatController;
+    const { controller, joinConversation } = makeController();
+    ctx.controller = controller;
     ctx.state = makeState({ activeConversationId: id, active: makeActive(id) });
     setHashFragment(FRAGMENT_A);
 
@@ -213,17 +296,40 @@ describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
       fireHashChange();
     });
 
+    expect(screen.queryByTestId(TESTIDS.joinAsPair)).toBeNull();
     expect(joinConversation).not.toHaveBeenCalled();
+    // The unconsumed fragment stays in the URL so leaving the active surface
+    // can still surface the prompt (same contract as the pre-v2 hook).
+    expect(window.location.hash).toBe(`#${FRAGMENT_A}`);
   });
 
-  it("after leaving the joined conversation, re-pasting the SAME link joins again", async () => {
+  it("does not prompt while a group is already active", () => {
+    const groupId = groupIdFromNumber(60);
+    const { controller, joinGroup } = makeController();
+    ctx.controller = controller;
+    ctx.state = makeState({ activeGroupId: groupId, activeGroup: makeActiveGroup(groupId) });
+    setHashFragment(FRAGMENT_A);
+
+    render(React.createElement(HomeComponent));
+    act(() => {
+      fireHashChange();
+    });
+
+    expect(screen.queryByTestId(TESTIDS.joinAsGroup)).toBeNull();
+    expect(joinGroup).not.toHaveBeenCalled();
+  });
+
+  it("after leaving the joined conversation, re-pasting the SAME link prompts again", async () => {
     const id = idFromNumber(51);
-    const joinConversation = vi.fn().mockResolvedValue(undefined);
-    ctx.controller = { joinConversation } as unknown as ChatController;
+    const { controller, joinConversation } = makeController();
+    ctx.controller = controller;
     ctx.state = makeState({});
     setHashFragment(FRAGMENT_A);
 
     render(React.createElement(HomeComponent));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsPair));
+    });
     expect(joinConversation).toHaveBeenCalledTimes(1);
     await act(async () => {
       await Promise.resolve();
@@ -233,7 +339,7 @@ describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
     act(() => {
       publish(makeState({ activeConversationId: id, active: makeActive(id) }));
     });
-    // ...and the user later leaves it (activeId → null transition un-consumes).
+    // ...and the user later leaves it (active → none transition un-consumes).
     act(() => {
       publish(makeState({}));
     });
@@ -242,30 +348,51 @@ describe("invitation-fragment joining (R10F6/R11F1/R11F2)", () => {
     act(() => {
       fireHashChange();
     });
-
-    // The old boolean latch skipped this join for the page's whole lifetime.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsPair));
+    });
     expect(joinConversation).toHaveBeenCalledTimes(2);
     expect(joinConversation).toHaveBeenLastCalledWith(FRAGMENT_A);
   });
 
-  it("a different fragment pasted later joins on its own", () => {
-    const joinConversation = vi.fn().mockResolvedValue(undefined);
-    ctx.controller = { joinConversation } as unknown as ChatController;
+  it("a different fragment pasted while a prompt is open replaces it", async () => {
+    const { controller, joinGroup } = makeController();
+    ctx.controller = controller;
     ctx.state = makeState({});
     setHashFragment(FRAGMENT_A);
 
     render(React.createElement(HomeComponent));
-    expect(joinConversation).toHaveBeenCalledWith(FRAGMENT_A);
+    expect(screen.getByTestId(TESTIDS.joinAsGroup)).toBeTruthy();
 
-    // The first join failed to produce an active session (still null): a
-    // DIFFERENT fragment is not the "same consumed fragment" and joins.
     setHashFragment(FRAGMENT_B);
     act(() => {
       fireHashChange();
     });
-
-    expect(joinConversation).toHaveBeenCalledTimes(2);
-    expect(joinConversation).toHaveBeenLastCalledWith(FRAGMENT_B);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(TESTIDS.joinAsGroup));
+    });
+    expect(joinGroup).toHaveBeenLastCalledWith(FRAGMENT_B);
     expect(window.location.hash).toBe("");
+  });
+
+  it("dismissing the prompt un-consumes the fragment so a re-paste re-prompts", async () => {
+    const { controller, joinConversation } = makeController();
+    ctx.controller = controller;
+    ctx.state = makeState({});
+    setHashFragment(FRAGMENT_A);
+
+    render(React.createElement(HomeComponent));
+    // The dialog's close affordance (X) dismisses without joining.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    });
+    expect(screen.queryByTestId(TESTIDS.joinAsPair)).toBeNull();
+    expect(joinConversation).not.toHaveBeenCalled();
+
+    setHashFragment(FRAGMENT_A);
+    act(() => {
+      fireHashChange();
+    });
+    expect(screen.getByTestId(TESTIDS.joinAsPair)).toBeTruthy();
   });
 });

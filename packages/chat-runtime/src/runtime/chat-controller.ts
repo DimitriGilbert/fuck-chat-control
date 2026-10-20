@@ -86,7 +86,12 @@ export { ImportMode };
  * flat fields keep the existing screens compiling and rendering.
  */
 export interface ChatControllerState {
-  /** Active session id, or null when the controller is in the empty state. */
+  /**
+   * Active session id, or null when no conversation is selected. Mutually
+   * exclusive with {@link activeGroupId}: the shell renders exactly one
+   * active main pane, so selecting a conversation clears the active group
+   * (and selecting a group clears this).
+   */
   readonly activeConversationId: ConversationId | null;
   /** Sidebar summaries; one entry per live session. */
   readonly sessions: readonly SessionSummary[];
@@ -99,7 +104,10 @@ export interface ChatControllerState {
    * group counterpart of {@link sessions}.
    */
   readonly groups: readonly GroupSummary[];
-  /** Active group id, or null when no group is selected. */
+  /**
+   * Active group id, or null when no group is selected. Mutually exclusive
+   * with {@link activeConversationId} — see its doc.
+   */
   readonly activeGroupId: GroupId | null;
   /** Full snapshot of the active group, or null when none is selected. */
   readonly activeGroup: ActiveGroupState | null;
@@ -831,9 +839,29 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     };
   }
 
+  /**
+   * Phase 7 (protocol-v2 UI): the shell renders exactly ONE active main pane,
+   * keyed off {@link ChatControllerState.activeConversationId} /
+   * {@link ChatControllerState.activeGroupId}, so the two selections are
+   * mutually exclusive — activating a conversation clears the active group
+   * and vice versa. The deselected side stays live in the background (its
+   * bridge/manager keeps running and its unread counting falls into the
+   * non-active branch automatically); selection is a pointer swap, never a
+   * teardown.
+   */
+  function activateConversation(id: ConversationId): void {
+    activeConversationId = id;
+    activeGroupId = null;
+  }
+
+  function activateGroup(id: GroupId): void {
+    activeGroupId = id;
+    activeConversationId = null;
+  }
+
   function registerSession(session: ChatSession): void {
     sessions.set(keyOf(session.id), session);
-    activeConversationId = session.id;
+    activateConversation(session.id);
     syncActiveReadMarker(session);
   }
 
@@ -1045,7 +1073,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       invitation: null,
     });
     groupSessions.set(key, group);
-    activeGroupId = group.id;
+    activateGroup(group.id);
     syncGroupReadMarker(group);
     await persistGroupRecord(group, null);
     // The awaits above can straddle a leaveGroup/leaveAll/dispose: when the
@@ -1119,7 +1147,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // do — the caller asked for THIS conversation, and returning it
       // unselected left the UI pointing at whatever was active before (plus
       // a stale read marker and a stuck detached gate after a clear).
-      activeConversationId = prior.id;
+      activateConversation(prior.id);
       syncActiveReadMarker(prior);
       prior.detached = false;
       return { session: prior, invitation };
@@ -1530,7 +1558,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       if (existing !== undefined) {
         // Already live; just select it (same contract as resumeConversation's
         // live branch — R3F2: store the SESSION's own id reference).
-        activeConversationId = existing.id;
+        activateConversation(existing.id);
         syncActiveReadMarker(existing);
         // Re-arm inbound handlers: re-joining a cleared conversation
         // re-opens it for live frames.
@@ -1560,7 +1588,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         }
         const landed = sessions.get(joinKey);
         if (landed !== undefined) {
-          activeConversationId = landed.id;
+          activateConversation(landed.id);
           syncActiveReadMarker(landed);
           landed.detached = false;
           emit(null);
@@ -1587,7 +1615,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         // mirroring the cross-map await → re-check → fall-through above.
         const landed = sessions.get(joinKey);
         if (landed !== undefined) {
-          activeConversationId = landed.id;
+          activateConversation(landed.id);
           syncActiveReadMarker(landed);
           landed.detached = false;
           emit(null);
@@ -1623,7 +1651,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         // deserialized arrays, and a foreign reference here used to flip
         // onSessionChange into the background branch (see the keyOf
         // comparison there).
-        activeConversationId = existing.id;
+        activateConversation(existing.id);
         syncActiveReadMarker(existing);
         // Re-arm inbound handlers on resume.
         existing.detached = false;
@@ -1670,7 +1698,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
           if (sessions.get(resumeKey) === landed && !landed.detached) {
             seedSessionFromHistory(landed, record, history);
             recomputeUnread(landed);
-            activeConversationId = landed.id;
+            activateConversation(landed.id);
             syncActiveReadMarker(landed);
             landed.detached = false;
             emit(null);
@@ -1701,7 +1729,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         // mirroring the cross-map await → re-check → fall-through above.
         const landed = sessions.get(resumeKey);
         if (landed !== undefined) {
-          activeConversationId = landed.id;
+          activateConversation(landed.id);
           syncActiveReadMarker(landed);
           landed.detached = false;
           emit(null);
@@ -1724,7 +1752,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       // Cheap swap: no re-handshake. Clear unread + advance the read marker.
       // R3F2 (Phase 3): normalize to the session's own id reference (see the
       // resumeConversation already-live branch).
-      activeConversationId = session.id;
+      activateConversation(session.id);
       syncActiveReadMarker(session);
       // Re-arm inbound handlers: selecting a cleared conversation re-opens it
       // for live frames.
@@ -2062,7 +2090,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       });
       const key = keyOf(groupId);
       groupSessions.set(key, group);
-      activeGroupId = group.id;
+      activateGroup(group.id);
       syncGroupReadMarker(group);
       await persistGroupRecord(group, options?.name ?? null);
       if (disposed || groupSessions.get(key) !== group) {
@@ -2099,7 +2127,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       if (existing !== undefined) {
         // Already seated — just select it (mirrors joinConversation's
         // already-live branch).
-        activeGroupId = existing.id;
+        activateGroup(existing.id);
         syncGroupReadMarker(existing);
         existing.detached = false;
         emit(null);
@@ -2114,7 +2142,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         }
         const landed = groupSessions.get(key);
         if (landed !== undefined) {
-          activeGroupId = landed.id;
+          activateGroup(landed.id);
           syncGroupReadMarker(landed);
           landed.detached = false;
           emit(null);
@@ -2137,7 +2165,7 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
           `cannot select unknown group ${groupId}`,
         );
       }
-      activeGroupId = group.id;
+      activateGroup(group.id);
       syncGroupReadMarker(group);
       group.detached = false;
       emit(null);
