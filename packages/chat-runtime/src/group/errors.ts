@@ -13,7 +13,9 @@
  * seat-cap semantics. `NoEstablishedLink` is the caller-facing code for
  * addressing a `peerId` that has no live link — distinct from
  * `UnknownLinkIdentity`, which describes a connected link whose authenticated
- * peer is not a member.
+ * peer is not a member. `GroupNotFound` is the controller-facing code for
+ * addressing a group id that has no live session — the runtime analogue of
+ * the store-level `StoreErrorCode.GroupNotFound` (missing group record).
  */
 export const GroupErrorCode = {
   Malformed: "Malformed",
@@ -23,6 +25,7 @@ export const GroupErrorCode = {
   UnknownLinkIdentity: "UnknownLinkIdentity",
   MembershipInvalid: "MembershipInvalid",
   NoEstablishedLink: "NoEstablishedLink",
+  GroupNotFound: "GroupNotFound",
 } as const;
 
 export type GroupErrorCode = (typeof GroupErrorCode)[keyof typeof GroupErrorCode];

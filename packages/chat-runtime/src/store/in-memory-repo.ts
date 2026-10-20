@@ -2,6 +2,8 @@ import { decryptAtRest, encryptAtRest } from "../crypto/at-rest";
 import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "../crypto/errors";
 import type { AtRestKey } from "../crypto/types";
+import { encodeGroupId } from "../group/types";
+import type { GroupId, GroupMember } from "../group/types";
 import { encodeConversationId, encodePublicKey } from "../protocol/codec";
 import { CONVERSATION_ID_BYTES, PUBLIC_KEY_BYTES } from "../protocol/limits";
 import type { ConversationId, PublicKey } from "../protocol/types";
@@ -13,6 +15,7 @@ import type {
   AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
+  GroupRecord,
   PeerIdentityRecord,
   RawStoredMessage,
   ReloadableConversationRepository,
@@ -39,10 +42,27 @@ interface InternalMessage {
   ciphertext: Uint8Array;
 }
 
+/** Mutable stored form of {@link GroupRecord}; members are stored cloned. */
+interface InternalGroup {
+  epoch: number;
+  authorIdentityPub: PublicKey | null;
+  members: GroupMember[];
+  displayName: string | null;
+  createdAt: number;
+}
+
 export class InMemoryConversationRepository implements ReloadableConversationRepository {
   private readonly conversations = new Map<string, InternalConversation>();
   private readonly messages = new Map<string, InternalMessage[]>();
   private readonly keyById = new Map<string, ConversationId>();
+  /**
+   * Group records (protocol-v2), keyed by group-id hex. Runtime-only state —
+   * deliberately NOT part of {@link serialize}/{@link reload} (the export
+   * bundle stays v1): group rooms cease when empty and membership is
+   * re-derived from the author's signed list on rejoin.
+   */
+  private readonly groups = new Map<string, InternalGroup>();
+  private readonly groupIdByKey = new Map<string, GroupId>();
   private atRestKey: AtRestKey | null;
 
   constructor(atRestKey: AtRestKey) {
@@ -349,6 +369,87 @@ export class InMemoryConversationRepository implements ReloadableConversationRep
     this.conversations.clear();
     this.messages.clear();
     this.keyById.clear();
+    this.groups.clear();
+    this.groupIdByKey.clear();
+  }
+
+  // --- Group records (runtime-only; not serialized — see {@link GroupRecord}) ---
+
+  async storeGroup(record: GroupRecord): Promise<GroupRecord> {
+    const key = groupKey(record.groupId);
+    const existing = this.groups.get(key);
+    // Create-or-replace: a rejoin of the same group id keeps the original
+    // createdAt and overwrites the membership/epoch/label fields.
+    const internal: InternalGroup = {
+      epoch: record.epoch,
+      authorIdentityPub:
+        record.authorIdentityPub === null ? null : clonePublicKey(record.authorIdentityPub),
+      members: cloneGroupMembers(record.members),
+      displayName: record.displayName,
+      createdAt: existing?.createdAt ?? record.createdAt,
+    };
+    this.groups.set(key, internal);
+    if (!this.groupIdByKey.has(key)) {
+      this.groupIdByKey.set(key, encodeGroupId(record.groupId));
+    }
+    return toGroupRecord(encodeGroupId(record.groupId), internal);
+  }
+
+  async getGroup(groupId: GroupId): Promise<GroupRecord | null> {
+    const internal = this.groups.get(groupKey(groupId));
+    if (internal === undefined) return null;
+    return toGroupRecord(encodeGroupId(groupId), internal);
+  }
+
+  async updateGroupMembership(
+    groupId: GroupId,
+    epoch: number,
+    members: readonly GroupMember[],
+  ): Promise<GroupRecord> {
+    const internal = this.groups.get(groupKey(groupId));
+    if (internal === undefined) {
+      throw new StoreError(
+        StoreErrorCode.GroupNotFound,
+        "cannot update membership for a group that does not exist",
+      );
+    }
+    internal.epoch = epoch;
+    internal.members = cloneGroupMembers(members);
+    // The canonical list carries exactly one author-flagged entry (codec
+    // invariant); adopt its key as the record's author identity.
+    const author = members.find((m) => m.isAuthor);
+    if (author !== undefined) {
+      internal.authorIdentityPub = clonePublicKey(author.identityPub);
+    }
+    return toGroupRecord(encodeGroupId(groupId), internal);
+  }
+
+  async setGroupDisplayName(groupId: GroupId, name: string | null): Promise<void> {
+    const internal = this.groups.get(groupKey(groupId));
+    if (internal === undefined) {
+      throw new StoreError(
+        StoreErrorCode.GroupNotFound,
+        "cannot set a display name for a group that does not exist",
+      );
+    }
+    internal.displayName = name;
+  }
+
+  async removeGroup(groupId: GroupId): Promise<void> {
+    const key = groupKey(groupId);
+    this.groups.delete(key);
+    this.groupIdByKey.delete(key);
+  }
+
+  async listGroups(): Promise<GroupRecord[]> {
+    const records: GroupRecord[] = [];
+    for (const [key, internal] of this.groups) {
+      const id = this.groupIdByKey.get(key);
+      if (id === undefined) continue;
+      records.push(toGroupRecord(id, internal));
+    }
+    records.sort((a, b) => a.createdAt - b.createdAt || groupKeyCompare(a.groupId, b.groupId));
+    return records;
   }
 
   serialize(): SerializedState {
@@ -485,6 +586,35 @@ function cloneConversationId(id: ConversationId): ConversationId {
 
 function clonePublicKey(key: PublicKey): PublicKey {
   return encodePublicKey(copyBytes(key, PUBLIC_KEY_BYTES));
+}
+
+function groupKey(id: GroupId): string {
+  return bytesToHex(id);
+}
+
+function groupKeyCompare(a: GroupId, b: GroupId): number {
+  return bytesToHex(a).localeCompare(bytesToHex(b));
+}
+
+/** Defensive copy of a member list: each identity key is cloned and re-branded. */
+function cloneGroupMembers(members: readonly GroupMember[]): GroupMember[] {
+  return members.map((m) => ({
+    identityPub: clonePublicKey(m.identityPub),
+    isAuthor: m.isAuthor,
+    displayName: m.displayName,
+  }));
+}
+
+function toGroupRecord(id: GroupId, internal: InternalGroup): GroupRecord {
+  return {
+    groupId: encodeGroupId(id),
+    epoch: internal.epoch,
+    authorIdentityPub:
+      internal.authorIdentityPub === null ? null : clonePublicKey(internal.authorIdentityPub),
+    members: cloneGroupMembers(internal.members),
+    displayName: internal.displayName,
+    createdAt: internal.createdAt,
+  };
 }
 
 function copyBytes(source: Uint8Array, length: number): Uint8Array {

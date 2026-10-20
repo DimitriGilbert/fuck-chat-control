@@ -1,6 +1,8 @@
 import type { H3Event } from "nitro/h3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_MAX_GROUP_MEMBERS } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
+
 import { buildIceServers, mintTurnCredentials } from "@/server/ice-config";
 
 /**
@@ -207,6 +209,24 @@ describe("half-set TURN env — startup warning", () => {
  * assertions below would observe 200s instead.
  */
 describe("rate limiting — socket-peer keying + LRU-bounded table (R5:F2)", () => {
+  it("the 200 response always carries groupMaxMembers (default when GROUP_MAX_MEMBERS unset)", async () => {
+    const route = await importFreshRoute();
+    const r = respond(route.default, "203.0.113.9");
+    expect(r.status).toBe(200);
+    expect(r.body.groupMaxMembers).toBe(DEFAULT_MAX_GROUP_MEMBERS);
+  });
+
+  it("the 429 body still carries groupMaxMembers", async () => {
+    const route = await importFreshRoute();
+    const peer = "203.0.113.10";
+    for (let i = 0; i < 20; i += 1) {
+      respond(route.default, peer);
+    }
+    const limited = respond(route.default, peer);
+    expect(limited.status).toBe(429);
+    expect(limited.body.groupMaxMembers).toBe(DEFAULT_MAX_GROUP_MEMBERS);
+  });
+
   interface FakeResponse {
     status: number;
     headers: Headers;
@@ -259,7 +279,13 @@ describe("rate limiting — socket-peer keying + LRU-bounded table (R5:F2)", () 
     // is a 429 carrying the empty-list body and a no-store cache directive.
     const limited = respond(route.default, peer, "192.0.2.222");
     expect(limited.status).toBe(429);
-    expect(limited.body).toEqual({ iceServers: [] });
+    // The 429 body carries groupMaxMembers too — the Phase 6 group cap is
+    // emitted on every response shape so a limited fetch never leaves the
+    // client without the configured cap.
+    expect(limited.body).toEqual({
+      iceServers: [],
+      groupMaxMembers: DEFAULT_MAX_GROUP_MEMBERS,
+    });
     expect(limited.res.headers.get("cache-control")).toBe("no-store");
   });
 

@@ -1,4 +1,5 @@
 import type { AtRestKey } from "../crypto/types";
+import type { GroupId, GroupMember } from "../group/types";
 import type { ConversationId, PublicKey } from "../protocol/types";
 
 export const MessageDirection = {
@@ -47,6 +48,43 @@ export interface IdentityConflict {
   readonly incoming: PeerIdentityRecord;
 }
 
+/**
+ * A group conversation's durable record (protocol-v2-group). Groups are
+ * RUNTIME-ONLY state: the broker room ceases to exist when empty, so a group
+ * record cannot outlive participation — there is no "resume group" flow, and
+ * membership is re-derived from the author's signed list on rejoin. That is
+ * why the export-bundle format stays v1 (no group rows): nothing here is
+ * meaningful to a device that is not seated in the room.
+ *
+ * What the record IS for: it lets the host/controller (a) keep the group's
+ * local display-name label, and (b) recognize the group-scoped id namespace
+ * and the DERIVED pairwise conversation ids ({@link derivePairwiseConvId})
+ * the group's per-link orchestrators resolve internally, so rows written by
+ * earlier builds (or re-imported from a bundle) stay out of the sidebar's
+ * resumable-conversation list. The current build persists no such rows —
+ * link orchestrators run on a non-persisting repository decorator and the
+ * group transcript is in-memory — so this masking is defense-in-depth.
+ *
+ * `authorIdentityPub` is the group author's identity key — the sole list
+ * signer. A joiner does not know it until it adopts its first signed list, so
+ * it is `null` until then; {@link ConversationRepository.updateGroupMembership}
+ * populates it from the member entry flagged `isAuthor`.
+ */
+export interface GroupRecord {
+  /** The 16-byte group id (= the broker room id, protocol-v2 §1). */
+  readonly groupId: GroupId;
+  /** Latest known membership epoch (0 until a non-author adopts a list). */
+  readonly epoch: number;
+  /** The group author's identity public key; null while unknown to a joiner. */
+  readonly authorIdentityPub: PublicKey | null;
+  /** Latest known canonical member list (empty for a pre-list joiner). */
+  readonly members: readonly GroupMember[];
+  /** Local label for the sidebar; null when the user never named the group. */
+  readonly displayName: string | null;
+  /** Epoch-ms when the record was created locally. */
+  readonly createdAt: number;
+}
+
 export interface ImportResult {
   readonly conversationsAdded: number;
   readonly conversationsMerged: number;
@@ -82,6 +120,11 @@ export const StoreErrorCode = {
    * (see {@link ./limits.ts}) on the import path.
    */
   InvalidKdfParams: "invalid_kdf_params",
+  /**
+   * A group-store call named a group id with no stored record. Mirrors the
+   * {@link ConversationNotFound} contract for the group store.
+   */
+  GroupNotFound: "group_not_found",
 } as const;
 
 export type StoreErrorCode = (typeof StoreErrorCode)[keyof typeof StoreErrorCode];
@@ -222,6 +265,35 @@ export interface ConversationRepository {
   getAuthFailed(id: ConversationId): Promise<boolean>;
   clearConversation(id: ConversationId): Promise<void>;
   clearAll(): Promise<void>;
+
+  // --- Group records (protocol-v2-group; runtime-only, see {@link GroupRecord}) ---
+
+  /**
+   * Create-or-replace a group record. Re-storing an existing group id keeps
+   * the original `createdAt` and overwrites the rest (a rejoin refreshes the
+   * record to the same effect). Members and key material are defensively
+   * copied so later mutation of the caller's buffers cannot corrupt the row.
+   */
+  storeGroup(record: GroupRecord): Promise<GroupRecord>;
+  /** The stored record for `groupId`, or null when none exists. */
+  getGroup(groupId: GroupId): Promise<GroupRecord | null>;
+  /**
+   * Land the latest canonical member list on the record: sets `epoch` and
+   * `members`, and (re)populates `authorIdentityPub` from the member entry
+   * flagged `isAuthor` when one is present. Throws
+   * {@link StoreErrorCode.GroupNotFound} for an unknown group id.
+   */
+  updateGroupMembership(
+    groupId: GroupId,
+    epoch: number,
+    members: readonly GroupMember[],
+  ): Promise<GroupRecord>;
+  /** The group's local label; null clears it. Unknown id → GroupNotFound. */
+  setGroupDisplayName(groupId: GroupId, name: string | null): Promise<void>;
+  /** Drop a group record entirely (e.g. clearAll); unknown ids are a no-op. */
+  removeGroup(groupId: GroupId): Promise<void>;
+  /** Every stored group record, ordered by createdAt then group-id hex. */
+  listGroups(): Promise<GroupRecord[]>;
   /**
    * Release any backing resources the repository holds open (e.g. an OPFS
    * SQLite database / Web Worker). Optional so in-memory and test fakes need

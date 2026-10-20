@@ -25,6 +25,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { defineEventHandler, getRequestIP, setHeader, setResponseStatus } from "nitro/h3";
 
 import { env } from "@fuck-eu-chat-control/env/server";
+import { DEFAULT_MAX_GROUP_MEMBERS } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 
 /**
  * Random per-request id embedded in the TURN REST API username (R7/F1). The
@@ -195,6 +196,8 @@ export interface IceEnv {
   readonly TURN_TLS_URL?: string;
   readonly TURN_SHARED_SECRET?: string;
   readonly PUBLIC_BASE_URL?: string;
+  /** GROUP_MAX_MEMBERS env var (protocol-v2 §7 seat cap); optional. */
+  readonly GROUP_MAX_MEMBERS?: number;
 }
 
 /**
@@ -257,6 +260,14 @@ export interface IceConfigResponse {
    * `window.location.origin`.
    */
   readonly publicBaseUrl?: string;
+  /**
+   * The operator-configured group member cap (`GROUP_MAX_MEMBERS`), always
+   * emitted as a number — `DEFAULT_MAX_GROUP_MEMBERS` when unset. The SPA
+   * plumbs it into the chat controller so the client-side group session and
+   * the broker registry enforce the SAME configured cap (protocol-v2 §7);
+   * same delivery pattern as {@link publicBaseUrl}.
+   */
+  readonly groupMaxMembers: number;
 }
 
 /**
@@ -288,7 +299,7 @@ export default defineEventHandler((event): IceConfigResponse => {
   if (!consumeRateToken(ip, Date.now())) {
     setHeader(event, "Cache-Control", "no-store");
     setResponseStatus(event, 429);
-    return { iceServers: [] };
+    return { iceServers: [], groupMaxMembers: env.GROUP_MAX_MEMBERS ?? DEFAULT_MAX_GROUP_MEMBERS };
   }
   const now = Math.floor(Date.now() / 1000);
   const iceServers = buildIceServers(env, now);
@@ -305,6 +316,9 @@ export default defineEventHandler((event): IceConfigResponse => {
   // for the cache-key-normalizing proxies that distinguish key sets.
   return {
     iceServers,
+    // Group member cap (protocol-v2 §7): always emitted so the client-side
+    // group session enforces the same configured cap as the broker registry.
+    groupMaxMembers: env.GROUP_MAX_MEMBERS ?? DEFAULT_MAX_GROUP_MEMBERS,
     ...(env.PUBLIC_BASE_URL !== undefined ? { publicBaseUrl: env.PUBLIC_BASE_URL } : {}),
   };
 });

@@ -10,6 +10,7 @@ export type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
+  GroupRecord,
   IdentityConflict,
   ImportResult,
   PeerIdentityRecord,
@@ -28,6 +29,8 @@ export { InMemoryConversationRepository } from "./in-memory-repo";
 export { messageRecordAad } from "./message-record-aad";
 
 export { LockableRepository } from "./lockable-repo";
+
+export { PairwiseLinkRepository } from "./pairwise-link-repo";
 
 export { exportBundle, importBundle, ImportMode } from "./export-bundle";
 

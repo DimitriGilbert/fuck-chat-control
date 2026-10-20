@@ -29,7 +29,6 @@ import { AuthMode, ControlSubtype } from "@fuck-eu-chat-control/chat-runtime/pro
 import type { PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
-import type { ConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { bytesEqual } from "../crypto/_helpers";
 import { linkLoopbackPair, mockSocketFactory, MockSignalingSocket } from "../orchestrator/_helpers";
@@ -108,7 +107,7 @@ function makeSpies(): SessionSpies {
 interface MemberKit {
   readonly session: GroupSession;
   readonly identity: IdentityKeyPair;
-  readonly repository: ConversationRepository;
+  readonly repository: InMemoryConversationRepository;
   readonly spies: SessionSpies;
 }
 
@@ -402,6 +401,42 @@ describe("GroupSession", () => {
           true,
         );
         expect(joinerB.spies.onMessage.calls[0]![1]).toBe("author here");
+      },
+    );
+
+    it(
+      "persists no conversation or message rows for a full mesh with traffic",
+      { timeout: 20000 },
+      async () => {
+        const gid = groupId(22);
+        const { author, joinerB, joinerC } = await makeThreeMemberGroup(gid);
+
+        // Fan text over every verified link: B's message reaches A and C,
+        // then A's reaches B and C — every link both sends and receives.
+        await joinerB.session.sendText("hello mesh");
+        await waitFor(
+          () =>
+            author.spies.onMessage.calls.length === 1 && joinerC.spies.onMessage.calls.length === 1,
+          "B's text to fan out",
+        );
+        await author.session.sendText("author reply");
+        await waitFor(
+          () =>
+            joinerB.spies.onMessage.calls.length === 1 &&
+            joinerC.spies.onMessage.calls.length === 2,
+          "author's text to fan out",
+        );
+
+        // F1 net check: pairwise link orchestrators run on a non-persisting
+        // repository decorator and the group transcript is in-memory only, so
+        // the real store holds ZERO group-scoped or pairwise rows — nothing
+        // can leak into the resumable list or the export bundle.
+        for (const kit of [author, joinerB, joinerC]) {
+          expect(await kit.repository.listConversations()).toHaveLength(0);
+          const state = kit.repository.serialize();
+          expect(state.conversations).toHaveLength(0);
+          expect(state.messages).toHaveLength(0);
+        }
       },
     );
 

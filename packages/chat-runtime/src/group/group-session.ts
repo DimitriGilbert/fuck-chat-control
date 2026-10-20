@@ -13,6 +13,7 @@ import { AuthMode, ControlSubtype } from "../protocol/types";
 import type { PublicKey } from "../protocol/types";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
 import { ConnectionState } from "../signaling/state-machine";
+import { PairwiseLinkRepository } from "../store";
 import type { ConversationMessage, ConversationRepository } from "../store";
 import type { PeerTransport } from "../transport/peer-transport";
 
@@ -73,6 +74,15 @@ export interface GroupSessionHandlers {
   readonly onFileReceived?: (memberIdentityPub: PublicKey, file: ReceivedFile) => void;
   /** Per-link v1 connection-state transitions, keyed by signaling peerId. */
   readonly onLinkState?: (peerId: PeerId, state: ConnectionState) => void;
+  /**
+   * The session ended: {@link GroupSession.leave} ran — locally (host-initiated
+   * leave) OR internally (self-eject on a kick, §4.2). The host MUST pair this
+   * with the WebRTC manager's teardown (its `leave()` releases the broker seat
+   * and every peer connection); firing it here, inside leave(), is what makes
+   * self-ejection observable to the host instead of silently dropping links
+   * while the manager keeps its seat and PCs up.
+   */
+  readonly onClosed?: () => void;
   /** Non-fatal session errors (bad gossip, unknown link identity, I/O). */
   readonly onError?: (error: unknown) => void;
 }
@@ -92,7 +102,13 @@ export interface GroupSessionDeps {
   readonly pakeCode?: string;
   /** True on the group creator's session — the sole list signer/admin. */
   readonly isAuthor: boolean;
-  /** Same repository the pairwise orchestrators persist under. */
+  /**
+   * The conversation repository the session's link orchestrators are wired
+   * to. The session wraps it in a {@link PairwiseLinkRepository} at
+   * construction, so no link can persist conversation rows, message rows, or
+   * display-name rows — pairwise link state is runtime-only — while
+   * TOFU-identity and group-record calls still reach the real store.
+   */
   readonly repository: ConversationRepository;
   /** This member's display name on its own member entry (≤32 UTF-8 bytes). */
   readonly displayName?: string;
@@ -191,8 +207,12 @@ export class GroupSession {
    * lists. Unused on the author's own session (it never adopts).
    */
   private pinnedAuthorKey: PublicKey | null = null;
-  /** This member's display name, announced on every link that connects. */
-  private readonly localDisplayName: string;
+  /**
+   * This member's display name, announced on every link that connects.
+   * Mutable via {@link updateDisplayName}, which re-announces on every
+   * connected link (and, on the author, re-signs this member's list entry).
+   */
+  private localDisplayName: string;
   private epoch = 0;
   private membershipValue: GroupMembership | null = null;
   private groupSafetyNumberValue: string | null = null;
@@ -233,7 +253,12 @@ export class GroupSession {
     this.identity = deps.identity;
     this.authModeValue = deps.authMode;
     this.author = deps.isAuthor;
-    this.repository = deps.repository;
+    // Every link orchestrator this session constructs (attachLinkTransport)
+    // is wired to this decorator — ONE instance, shared across links, so its
+    // session-scoped TOFU pins cover re-signaled links binding the same
+    // derived pairwise id, and no link can ever write a conversation or
+    // message row into the durable store (group state is runtime-only).
+    this.repository = new PairwiseLinkRepository(deps.repository);
     this.maxMembers = maxMembers;
     this.brokerUrl = deps.brokerUrl ?? "";
     this.baseUrl = deps.baseUrl ?? "";
@@ -487,13 +512,85 @@ export class GroupSession {
 
   /**
    * Send `leave` on every link and tear the whole session down. Idempotent;
-   * post-leave mutating calls are no-ops.
+   * post-leave mutating calls are no-ops. Fires {@link GroupSessionHandlers.onClosed}
+   * once the links are closed so the host can pair this with the WebRTC
+   * manager's teardown — including on self-eject (kick), which otherwise
+   * leaves the manager's broker seat and peer connections running.
    */
   leave(): void {
     if (this.closed) return;
     this.closed = true;
     for (const link of Array.from(this.links.values())) {
       this.closeLink(link);
+    }
+    this.handlers.onClosed?.();
+  }
+
+  /**
+   * The v1 connection state of the link to the member whose identity key is
+   * `identityPub`, or null when no live link carries that identity. Covers
+   * pending-verify links too (the verified-link index is consulted first,
+   * then the authenticated-but-unverified links), so the UI can render a
+   * member's link state before verification completes.
+   */
+  memberLinkState(identityPub: PublicKey): ConnectionState | null {
+    const keyId = pubKeyId(identityPub);
+    const verified = this.linksByIdentity.get(keyId);
+    if (verified !== undefined) {
+      return verified.orchestrator.state;
+    }
+    for (const link of this.links.values()) {
+      if (link.peerIdentity !== null && pubKeyId(link.peerIdentity) === keyId) {
+        return link.orchestrator.state;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Change this member's own display name (protocol-v2 §4.1): validate the
+   * byte cap, re-announce on every connected link, and — on the author —
+   * fold the new name into our own member entry and re-sign the list so the
+   * canonical entry converges instead of relying on announcements alone.
+   * No-op when the name is unchanged or the session has left.
+   *
+   * Note on clearing: an empty name is a valid local value, but the codec
+   * treats a 0-length `identity_announcement` payload as "no announcement",
+   * so clearing the name does not propagate to peers' stored entries — only
+   * non-empty renames are gossiped.
+   */
+  updateDisplayName(name: string): void {
+    const bytes = utf8Encoder.encode(name);
+    if (bytes.length > MAX_MEMBER_DISPLAY_NAME) {
+      throw new GroupError(
+        GroupErrorCode.Malformed,
+        `displayName is ${bytes.length} UTF-8 bytes; cap is ${MAX_MEMBER_DISPLAY_NAME}`,
+      );
+    }
+    if (name === this.localDisplayName) return;
+    // Post-leave the session must be fully inert: check `closed` BEFORE
+    // mutating localDisplayName so a rename after leave() cannot quietly
+    // diverge the member entry from what was last announced/signed.
+    if (this.closed) return;
+    this.localDisplayName = name;
+    for (const link of this.links.values()) {
+      if (link.orchestrator.state === ConnectionState.Connected) {
+        this.announceDisplayName(link);
+      }
+    }
+    if (this.author) {
+      this.enqueueAuthorMutation(async () => {
+        if (this.closed) return;
+        const self = this.findMember(this.identity.publicKey);
+        if (self === undefined || self.displayName === name) return;
+        const keyId = pubKeyId(this.identity.publicKey);
+        const next = this.members.map((m) =>
+          pubKeyId(m.identityPub) === keyId ? { ...m, displayName: name } : m,
+        );
+        await this.applyMembershipChange(next, { joined: [], removed: [] });
+      }).catch((err: unknown) => {
+        this.handlers.onError?.(err);
+      });
     }
   }
 

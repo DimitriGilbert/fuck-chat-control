@@ -5,7 +5,7 @@ import * as React from "react";
 
 import { AtRestKeyLockedError } from "@fuck-eu-chat-control/chat-runtime/runtime/at-rest-key-manager";
 import type { ChatControllerDeps } from "@fuck-eu-chat-control/chat-runtime/runtime/chat-controller";
-import type { ConversationRecord } from "@fuck-eu-chat-control/chat-runtime/store";
+import type { ConversationRecord, GroupRecord } from "@fuck-eu-chat-control/chat-runtime/store";
 
 import { ChatProvider, useChat } from "@/features/chat/runtime/chat-provider";
 
@@ -39,19 +39,28 @@ import { ChatProvider, useChat } from "@/features/chat/runtime/chat-provider";
 interface FakeRepositoryDouble {
   closeCount: number;
   listConversationsCalls: number;
+  listGroupsCalls: number;
   close(): Promise<void>;
   listConversations(): Promise<ConversationRecord[]>;
+  listGroups(): Promise<GroupRecord[]>;
 }
 
 function fakeRepository(): FakeRepositoryDouble {
   return {
     closeCount: 0,
     listConversationsCalls: 0,
+    listGroupsCalls: 0,
     async close(): Promise<void> {
       this.closeCount += 1;
     },
     async listConversations(): Promise<ConversationRecord[]> {
       this.listConversationsCalls += 1;
+      return [];
+    },
+    // The controller's refresh exclusion pass (groupScopedConversationKeys)
+    // lists groups alongside conversations.
+    async listGroups(): Promise<GroupRecord[]> {
+      this.listGroupsCalls += 1;
       return [];
     },
   };
