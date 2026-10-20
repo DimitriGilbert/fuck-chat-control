@@ -32,6 +32,28 @@ export function SettingsSheetTrigger({
   readonly withLabel?: boolean;
 }): React.ReactElement {
   const [open, setOpen] = React.useState(false);
+  // The base-ui Dialog root under <Sheet> crashes during SSR (its internal
+  // store reaches React's useSyncExternalStore with a null dispatcher on the
+  // server), which killed the entire `/` render and left the router's
+  // pending <Loader/> as the whole SSR payload. A closed Sheet renders no
+  // markup anyway, so render the trigger button alone on the server and
+  // mount the Sheet only after hydration — same pixels, no crash.
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => setMounted(true), []);
+
+  if (!mounted) {
+    return withLabel ? (
+      <Button variant="ghost" size="sm" aria-label="Open settings" className="w-full justify-start">
+        <Settings2Icon />
+        Settings
+      </Button>
+    ) : (
+      <Button variant="ghost" size="icon-sm" aria-label="Open settings">
+        <Settings2Icon />
+      </Button>
+    );
+  }
+
   return (
     <Sheet open={open} onOpenChange={setOpen}>
       {withLabel ? (

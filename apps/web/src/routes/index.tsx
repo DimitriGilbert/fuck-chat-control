@@ -3,10 +3,16 @@ import * as React from "react";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { AppShell } from "@/features/chat/ui/app-shell";
+import { BootShell } from "@/features/chat/ui/boot-shell";
 import { useInvitationJoin } from "@/features/chat/ui/use-invitation-join";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
+  // The match stays suspended through the whole SSR pass, so whatever the
+  // pending component renders IS the first paint. A static replica of the
+  // shell beats the router's default spinner: users see the real layout +
+  // copy instantly instead of ~2s of empty page.
+  pendingComponent: BootShell,
 });
 
 /**
