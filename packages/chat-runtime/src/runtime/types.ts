@@ -1,9 +1,12 @@
-import type { AuthMode, ConversationId } from "../protocol/types";
+import type { GroupSession } from "../group/group-session";
+import type { GroupId } from "../group/types";
+import type { AuthMode, ConversationId, PublicKey } from "../protocol/types";
 import type { ConnectionState } from "../signaling/state-machine";
 import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
-import type { ConversationMessage, ConversationRecord } from "../store";
+import type { ConversationMessage, ConversationRecord, MessageDirection } from "../store";
 import type { ReceivedFile } from "../framing";
 
+import type { GroupWebrtcManager } from "./group-webrtc-manager";
 import type { TransferState } from "./transfer-state";
 import type { WebRtcBridge } from "./webrtc-bridge";
 
@@ -251,5 +254,216 @@ export function activeSessionView(session: ChatSession | null): ActiveSessionSta
     // SEC-4: mirror the negotiated auth mode so the status bar and security
     // sheet can show PAKE vs safety-number provenance for the active session.
     authMode: session.orchestrator.handshakeAuthMode,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Group sessions (protocol-v2)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry of a group's in-memory attributed transcript. Unlike a 1:1
+ * {@link ConversationMessage}, a group message needs sender attribution:
+ * `senderIdentityPub` is the AUTHENTICATED identity key of the sending
+ * member's link (protocol-v2 §6 — attribution is the link's peer identity,
+ * never the ephemeral signaling peerId). `null` marks our own sent messages.
+ *
+ * Nothing is persisted: group history is session-scoped and memory-only,
+ * readable via the controller's `getGroupHistory` (flattened to the plain
+ * {@link ConversationMessage} timeline — the sender column is dropped
+ * there; attribution is a live-session view only).
+ */
+export interface GroupChatMessage {
+  readonly id: string;
+  readonly groupId: GroupId;
+  readonly direction: MessageDirection;
+  /** Authenticated sender identity key; null for our own sent messages. */
+  readonly senderIdentityPub: PublicKey | null;
+  readonly timestamp: number;
+  readonly text: string;
+}
+
+/**
+ * The per-group record held in the controller's group map. Each entry owns
+ * one {@link GroupSession} (membership + per-link orchestrators) plus one
+ * {@link GroupWebrtcManager} (the broker seat + per-member peer
+ * connections). Mirrors the role {@link ChatSession} plays for 1:1.
+ */
+export interface ChatGroupSession {
+  /** The 16-byte group id — also the broker room id (protocol-v2 §1). */
+  readonly id: GroupId;
+  /** The membership layer: canonical list, epochs, content fan-out. */
+  readonly session: GroupSession;
+  /** The broker seat + per-member peer connections feeding the session. */
+  readonly manager: GroupWebrtcManager;
+  /** True when this device authored the group (sole list signer/admin). */
+  readonly isAuthor: boolean;
+  /** The negotiated link auth mode (uniform across every pairwise link). */
+  readonly authMode: AuthMode;
+  /** Local group label (the `name` given at creation; sidebar display). */
+  displayName: string | null;
+  /** In-memory attributed transcript for the live session. */
+  messages: GroupChatMessage[];
+  /**
+   * Whether the user accepted the current epoch-bound group safety number
+   * out-of-band. Reset to false on every membership change — the number is
+   * epoch-bound (§5), so a new epoch is a new number needing re-verification.
+   */
+  safetyNumberVerified: boolean;
+  /** Unread message count for non-active groups; cleared on select. */
+  unread: number;
+  /** Composer draft restored when the user switches back to this group. */
+  draft: string;
+  /** Initiator invitation link (null on the joiner side). */
+  invitation: string | null;
+  /** Preview of the most recent message, for the sidebar. */
+  lastMessagePreview: string | null;
+  /** Timestamp of the most recent message; null when there are none. */
+  lastMessageAt: number | null;
+  /** Timestamp of the most recent RECEIVED message; null when none. */
+  lastReceivedAt: number | null;
+  /**
+   * Received file bytes keyed by `<senderKeyId>:<transferId>` — per-link
+   * transfer id spaces collide across members, so the key pairs the sender's
+   * identity key with the link-local transfer id. In memory only.
+   */
+  readonly receivedFiles: Map<string, ReceivedFile>;
+  /**
+   * Inbound gate, same contract as {@link ChatSession.detached}: set by a
+   * group history clear so a late frame does not repopulate the transcript.
+   */
+  detached: boolean;
+  /**
+   * Teardown idempotency latch (same discipline as {@link ChatSession.tornDown}):
+   * set once the group is torn down — by leaveGroup/leaveAll/dispose or by the
+   * session's own self-eject via the host's onClosed wiring.
+   */
+  tornDown: boolean;
+}
+
+/** One member row in the active-group view. */
+export interface GroupMemberView {
+  /** The member's authenticated identity public key (65-byte SEC1). */
+  readonly identityPub: PublicKey;
+  /** Identity key rendered as hex — the stable React key / testid input. */
+  readonly identityPubHex: string;
+  /** True for the list's author-flagged entry (the sole admin). */
+  readonly isAuthor: boolean;
+  /** True for this device's own entry. */
+  readonly isSelf: boolean;
+  /** The member's announced/signed display name ("" when unset). */
+  readonly displayName: string;
+  /**
+   * The v1 connection state of our link to this member (pending-verify links
+   * included), or null when no link exists — the self entry reports null.
+   */
+  readonly linkState: ConnectionState | null;
+}
+
+/** Sidebar-facing summary of one live group — mirrors {@link SessionSummary}. */
+export interface GroupSummary {
+  readonly groupId: GroupId;
+  /** Group id rendered as hex — the stable React key / testid input. */
+  readonly groupIdHex: string;
+  /** Local label (creation `name`), else a member-count fallback. */
+  readonly label: string;
+  readonly epoch: number;
+  readonly memberCount: number;
+  readonly isAuthor: boolean;
+  readonly unread: number;
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+  readonly safetyNumberVerified: boolean;
+}
+
+/**
+ * The active group's full snapshot — mirrors {@link ActiveSessionState}.
+ * Members/safety number/epoch are read LIVE from the session, so the view
+ * always reflects the latest adopted list.
+ */
+export interface ActiveGroupState {
+  readonly groupId: GroupId;
+  readonly groupIdHex: string;
+  readonly isAuthor: boolean;
+  readonly epoch: number;
+  readonly members: readonly GroupMemberView[];
+  readonly safetyNumber: string | null;
+  readonly safetyNumberVerified: boolean;
+  readonly authMode: AuthMode;
+  readonly displayName: string | null;
+  readonly messages: readonly GroupChatMessage[];
+  readonly invitation: string | null;
+  readonly unread: number;
+  readonly draft: string;
+  readonly lastMessagePreview: string | null;
+  readonly lastMessageAt: number | null;
+}
+
+function bytesToHexString(bytes: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i]!.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+function sameKey(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/** Build a {@link GroupSummary} view from a live group session record. */
+export function summarizeGroup(group: ChatGroupSession): GroupSummary {
+  const memberCount = group.session.memberList.length;
+  return {
+    groupId: group.id,
+    groupIdHex: bytesToHexString(group.id),
+    label: group.displayName ?? `Group · ${memberCount} member${memberCount === 1 ? "" : "s"}`,
+    epoch: group.session.memberEpoch,
+    memberCount,
+    isAuthor: group.isAuthor,
+    unread: group.unread,
+    lastMessagePreview: group.lastMessagePreview,
+    lastMessageAt: group.lastMessageAt,
+    safetyNumberVerified: group.safetyNumberVerified,
+  };
+}
+
+/**
+ * Build an {@link ActiveGroupState} view from a live group record. `selfPub`
+ * is the device identity public key used to flag the caller's own member
+ * entry.
+ */
+export function activeGroupView(group: ChatGroupSession, selfPub: PublicKey): ActiveGroupState {
+  const members: GroupMemberView[] = group.session.memberList.map((m) => {
+    const isSelf = sameKey(m.identityPub, selfPub);
+    return {
+      identityPub: m.identityPub,
+      identityPubHex: bytesToHexString(m.identityPub),
+      isAuthor: m.isAuthor,
+      isSelf,
+      displayName: m.displayName,
+      linkState: isSelf ? null : group.session.memberLinkState(m.identityPub),
+    };
+  });
+  return {
+    groupId: group.id,
+    groupIdHex: bytesToHexString(group.id),
+    isAuthor: group.isAuthor,
+    epoch: group.session.memberEpoch,
+    members,
+    safetyNumber: group.session.groupSafetyNumber,
+    safetyNumberVerified: group.safetyNumberVerified,
+    authMode: group.authMode,
+    displayName: group.displayName,
+    messages: group.messages,
+    invitation: group.invitation,
+    unread: group.unread,
+    draft: group.draft,
+    lastMessagePreview: group.lastMessagePreview,
+    lastMessageAt: group.lastMessageAt,
   };
 }

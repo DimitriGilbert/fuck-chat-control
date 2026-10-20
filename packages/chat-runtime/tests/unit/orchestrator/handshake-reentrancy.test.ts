@@ -5,6 +5,7 @@ import {
   generateIdentityKeyPair,
 } from "@fuck-eu-chat-control/chat-runtime/crypto";
 import type { ConversationId, PublicKey } from "@fuck-eu-chat-control/chat-runtime/protocol/types";
+import type { GroupId, GroupMember } from "@fuck-eu-chat-control/chat-runtime/group/types";
 import { ConnectionState } from "@fuck-eu-chat-control/chat-runtime/signaling/state-machine";
 import { InMemoryConversationRepository } from "@fuck-eu-chat-control/chat-runtime/store";
 import type {
@@ -12,6 +13,7 @@ import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
+  GroupRecord,
   MessageDirection,
   PeerIdentityRecord,
 } from "@fuck-eu-chat-control/chat-runtime/store";
@@ -154,6 +156,40 @@ class CountingRepository implements ConversationRepository {
 
   clearAll(): Promise<void> {
     return this.inner.clearAll();
+  }
+  storeGroup(record: GroupRecord): Promise<GroupRecord> {
+    {
+      return this.inner.storeGroup(record);
+    }
+  }
+  getGroup(groupId: GroupId): Promise<GroupRecord | null> {
+    {
+      return this.inner.getGroup(groupId);
+    }
+  }
+  updateGroupMembership(
+    groupId: GroupId,
+    epoch: number,
+    members: readonly GroupMember[],
+  ): Promise<GroupRecord> {
+    {
+      return this.inner.updateGroupMembership(groupId, epoch, members);
+    }
+  }
+  setGroupDisplayName(groupId: GroupId, name: string | null): Promise<void> {
+    {
+      return this.inner.setGroupDisplayName(groupId, name);
+    }
+  }
+  removeGroup(groupId: GroupId): Promise<void> {
+    {
+      return this.inner.removeGroup(groupId);
+    }
+  }
+  listGroups(): Promise<GroupRecord[]> {
+    {
+      return this.inner.listGroups();
+    }
   }
 }
 

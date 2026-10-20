@@ -1,3 +1,4 @@
+import type { GroupId, GroupMember } from "../group/types";
 import type { ConversationId, PublicKey } from "../protocol/types";
 
 import { getAuthFailedDurable } from "./auth-failed-store";
@@ -8,6 +9,7 @@ import type {
   ConversationMessage,
   ConversationRecord,
   ConversationRepository,
+  GroupRecord,
   PeerIdentityRecord,
 } from "./types";
 import type { AtRestKey } from "../crypto/types";
@@ -344,5 +346,43 @@ export class LockableRepository implements ConversationRepository {
   async clearAll(): Promise<void> {
     this.assertUnlocked();
     await this.inner.clearAll();
+  }
+
+  // --- Group records (protocol-v2; runtime-only metadata — see GroupRecord) ---
+  // Gated on the same lock as every other repository call: group records are
+  // metadata, but a locked controller should not mutate store state at all.
+
+  async storeGroup(record: GroupRecord): Promise<GroupRecord> {
+    this.assertUnlocked();
+    return await this.inner.storeGroup(record);
+  }
+
+  async getGroup(groupId: GroupId): Promise<GroupRecord | null> {
+    this.assertUnlocked();
+    return await this.inner.getGroup(groupId);
+  }
+
+  async updateGroupMembership(
+    groupId: GroupId,
+    epoch: number,
+    members: readonly GroupMember[],
+  ): Promise<GroupRecord> {
+    this.assertUnlocked();
+    return await this.inner.updateGroupMembership(groupId, epoch, members);
+  }
+
+  async setGroupDisplayName(groupId: GroupId, name: string | null): Promise<void> {
+    this.assertUnlocked();
+    await this.inner.setGroupDisplayName(groupId, name);
+  }
+
+  async removeGroup(groupId: GroupId): Promise<void> {
+    this.assertUnlocked();
+    await this.inner.removeGroup(groupId);
+  }
+
+  async listGroups(): Promise<GroupRecord[]> {
+    this.assertUnlocked();
+    return await this.inner.listGroups();
   }
 }

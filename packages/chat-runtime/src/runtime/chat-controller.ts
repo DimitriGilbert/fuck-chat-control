@@ -1,14 +1,21 @@
-import { Role } from "../protocol/types";
-import type { ConversationId } from "../protocol/types";
+import { AuthMode, Role } from "../protocol/types";
+import type { ConversationId, PublicKey } from "../protocol/types";
 import {
+  CONVERSATION_ID_BYTES,
   MAX_CONCURRENT_TRANSFERS,
   MAX_MANIFEST_MIME_BYTES,
   MAX_MANIFEST_NAME_BYTES,
 } from "../protocol/limits";
 import { randomBytes } from "../crypto/primitives";
+import { ctEqual } from "../crypto/ct-equal";
+import { GroupError, GroupErrorCode } from "../group/errors";
+import { pubKeyId } from "../group/membership";
+import { derivePairwiseConvId } from "../group/pairwise-id";
+import { encodeGroupId } from "../group/types";
+import type { GroupId, GroupMember, PeerId } from "../group/types";
 import { ConnectionState, deriveResumeGlareRole } from "../signaling/state-machine";
 import type { SignalingSocketFactory } from "../signaling/signaling-client";
-import { exportBundle, importBundle, ImportMode } from "../store";
+import { exportBundle, importBundle, ImportMode, MessageDirection } from "../store";
 import { AuthFailedRetryBlocked } from "../store";
 import { clearAllAuthFailedDurable, clearAuthFailedDurable } from "../store/auth-failed-store";
 import { LockableRepository } from "../store/lockable-repo";
@@ -21,13 +28,22 @@ import type {
 import type { ReceivedFile } from "../framing";
 import type { PeerTransport } from "../transport/peer-transport";
 import type { ConversationOrchestrator } from "../orchestrator/orchestrator";
-import { parseInvitation } from "../orchestrator/invitation";
+import { formatGroupInvitation, parseInvitation } from "../orchestrator/invitation";
+import { OrchestratorError, OrchestratorErrorCode } from "../orchestrator/errors";
 import type { IceServer, PeerConnectionFactory } from "../transport/types";
 
 import type { AtRestKeyManager } from "./at-rest-key-manager";
 import type { AtRestKey } from "../crypto";
 import {
+  createGroupHost,
+  groupConversationId,
+  receivedFileKey,
+  teardownGroup,
+} from "./group-session-host";
+import type { GroupHostInit } from "./group-session-host";
+import {
   buildOrchestrator,
+  previewOf,
   seedSessionFromHistory,
   teardownSession,
   wireBridge,
@@ -35,8 +51,17 @@ import {
   type SessionHolder,
 } from "./chat-session";
 import type { IdentityManager } from "./identity-manager";
-import type { ActiveSessionState, ChatFileInput, ChatSession, SessionSummary } from "./types";
-import { activeSessionView, summarizeSession } from "./types";
+import type {
+  ActiveGroupState,
+  ActiveSessionState,
+  ChatFileInput,
+  ChatGroupSession,
+  ChatSession,
+  GroupChatMessage,
+  GroupSummary,
+  SessionSummary,
+} from "./types";
+import { activeGroupView, activeSessionView, summarizeGroup, summarizeSession } from "./types";
 
 export { ImportMode };
 
@@ -69,6 +94,15 @@ export interface ChatControllerState {
   readonly active: ActiveSessionState | null;
   /** Persisted conversation records (resume list). */
   readonly conversations: readonly ConversationRecord[];
+  /**
+   * Sidebar summaries for every live GROUP session (protocol-v2) — the
+   * group counterpart of {@link sessions}.
+   */
+  readonly groups: readonly GroupSummary[];
+  /** Active group id, or null when no group is selected. */
+  readonly activeGroupId: GroupId | null;
+  /** Full snapshot of the active group, or null when none is selected. */
+  readonly activeGroup: ActiveGroupState | null;
   /** Controller-level readiness (identity + at-rest key loaded). */
   readonly ready: boolean;
   /** Last controller-level error (orchestrator errors flow through here). */
@@ -143,6 +177,14 @@ export interface ChatControllerDeps {
    * `false`.
    */
   readonly enablePake?: boolean;
+  /**
+   * Configured group member cap (protocol-v2 §7). The web provider passes the
+   * `groupMaxMembers` value served by `/ice-config` (Phase 7 wires the fetch);
+   * other shells and tests leave it unset. Defaults to
+   * `DEFAULT_MAX_GROUP_MEMBERS` inside the group session/manager — the
+   * controller only plumbs the value through.
+   */
+  readonly maxGroupMembers?: number;
 }
 
 export interface ChatController {
@@ -236,6 +278,94 @@ export interface ChatController {
   /** Alias for {@link ChatController.leaveConversation} with no id (active). */
   leave(id?: ConversationId): void;
 
+  // --- Group sessions (protocol-v2) ---
+  /**
+   * Create a group as its author (the sole member-list signer/admin). Mints
+   * a CSPRNG 16-byte group id — also the broker room id — seats this device
+   * in the room, and returns the bearer invitation (`#<hex>`, or
+   * `#<hex>~NNNNNN` when `code` is supplied for all-PAKE links).
+   * `name` sets the local sidebar label; `displayName` is this member's own
+   * announced member-entry name (§4.1).
+   */
+  startGroup(options?: {
+    readonly code?: string;
+    readonly name?: string;
+    readonly displayName?: string;
+  }): Promise<{ invitation: string }>;
+  /**
+   * Join a group via an invitation fragment (`#<hex>` / `#<hex>~NNNNNN`,
+   * same grammar as 1:1 — link bytes are identical; the JOIN FLOW decides
+   * pair vs group). Seats the member in the broker room; membership is
+   * adopted from the author's signed list once a link verifies.
+   */
+  joinGroup(fragment: string, options?: { readonly displayName?: string }): Promise<void>;
+  /** Select a live group (clears its unread count; no re-handshake). */
+  selectGroup(groupId: GroupId): void;
+  /**
+   * Leave a group (no-arg targets the active group): `leave` on every link,
+   * vacate the broker seat, and evict the record from the live list. The
+   * stored group record is kept — it documents last-known membership so the
+   * derived pairwise conversations stay filtered from the sidebar.
+   */
+  leaveGroup(groupId?: GroupId): void;
+  /**
+   * Author-only member removal (§4): drops the member, bumps the epoch,
+   * re-signs, and gossips the new list (including to the removed member, so
+   * it learns of its own removal and self-ejects). Throws
+   * {@link GroupError}(NotAuthor) on a non-author session — the typed error
+   * is the caller-facing contract for cap/role violations.
+   */
+  removeGroupMember(groupId: GroupId, identityPub: PublicKey): Promise<void>;
+  /** Fan a text frame out over every verified connected link (§6). */
+  sendGroupText(groupId: GroupId, text: string): Promise<void>;
+  /**
+   * One independent v1 file transfer per verified connected link (§6 — no
+   * group-wide transfer id space). Returns each link's transfer id keyed by
+   * the member's signaling peerId.
+   */
+  sendGroupFile(groupId: GroupId, file: ChatFileInput): Promise<Map<PeerId, number>>;
+  /**
+   * The group's in-memory transcript — same plain {@link ConversationMessage}
+   * timeline shape as 1:1 history (no sender column; the attributed view is
+   * `activeGroup.messages`). Session-scoped: empty for an unknown or ended
+   * group — group state is runtime-only and nothing is persisted.
+   */
+  getGroupHistory(groupId: GroupId): Promise<ConversationMessage[]>;
+  /**
+   * Fetch a received file's bytes. Per-link transfer-id spaces collide
+   * across members, so the sender's identity key scopes the lookup. In
+   * memory only; null when absent.
+   */
+  getGroupReceivedFile(
+    groupId: GroupId,
+    senderIdentityPub: PublicKey,
+    transferId: number,
+  ): ReceivedFile | null;
+  /** Sidebar summaries for every live group (same data as `state.groups`). */
+  listGroups(): GroupSummary[];
+  /**
+   * Mark the current epoch-bound group safety number as verified
+   * out-of-band. In-memory only (groups are runtime-only); a membership
+   * change resets it because the number is epoch-bound (§5).
+   */
+  markGroupSafetyVerified(groupId?: GroupId): void;
+  /** The epoch-bound group safety number, or null before one is computed. */
+  getGroupSafetyNumber(groupId: GroupId): string | null;
+  /**
+   * Update OUR OWN member display name and propagate it: re-announced on
+   * every connected link and (on the author) folded into our member entry
+   * with a re-signed list (§4.1). No-arg groupId targets the active group.
+   */
+  setGroupDisplayName(groupId: GroupId | undefined, name: string): void;
+  /** Store the composer's draft text for a group (same contract as setDraft). */
+  setGroupDraft(groupId: GroupId, draft: string): void;
+  /**
+   * Test seam: hand an open loopback transport to a group session's link
+   * orchestrator for `peerId` — the group analogue of
+   * {@link __attachTransportForTest}. NOT part of the public contract.
+   */
+  __attachGroupLinkForTest(groupId: GroupId, peerId: PeerId, transport: PeerTransport): void;
+
   /**
    * Lock the at-rest key. After this returns, every ciphertext-touching
    * repository call (appendMessage, getHistory, clearConversation, ...) throws
@@ -296,6 +426,9 @@ const EMPTY_STATE: ChatControllerState = {
   sessions: [],
   active: null,
   conversations: [],
+  groups: [],
+  activeGroupId: null,
+  activeGroup: null,
   ready: false,
   error: null,
   connectionState: ConnectionState.Idle,
@@ -352,6 +485,18 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * negligible next to the React re-render it gates.
    */
   const sessions = new Map<string, ChatSession>();
+  /**
+   * Live group sessions keyed by the hex of the GroupId (same keyOf
+   * normalization as the session map — both brands are 16-byte ids). The
+   * record itself holds the session + manager pair built by
+   * {@link createGroupHost}.
+   */
+  const groupSessions = new Map<string, ChatGroupSession>();
+  /** Read markers for group unread counting — same contract as readMarkers. */
+  const groupReadMarkers = new Map<string, number>();
+  /** In-flight joinGroup attempts keyed by hex group id (same dedup as `joining`). */
+  const groupJoining = new Map<string, Promise<void>>();
+  let activeGroupId: GroupId | null = null;
   // R5/F4: in-flight resumeConversation attempts keyed by hex id, so a
   // concurrent resume of the same conversation dedupes onto one startSession.
   const resuming = new Map<string, Promise<void>>();
@@ -441,11 +586,22 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     const active =
       activeConversationId !== null ? (sessions.get(keyOf(activeConversationId)) ?? null) : null;
     const activeView = activeSessionView(active);
+    const groupSummaries = Array.from(groupSessions.values())
+      .map((group) => summarizeGroup(group))
+      .sort(compareGroupSummaries);
+    const activeGroup =
+      activeGroupId !== null ? (groupSessions.get(keyOf(activeGroupId)) ?? null) : null;
     return {
       activeConversationId,
       sessions: summaries,
       active: activeView,
       conversations: conversationsCache,
+      groups: groupSummaries,
+      activeGroupId,
+      activeGroup:
+        activeGroup === null
+          ? null
+          : activeGroupView(activeGroup, deps.identityManager.get().publicKey),
       ready,
       error,
       // Backward-compatible mirrors of the active session (or empty defaults).
@@ -478,12 +634,22 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
   }
 
   async function runRefresh(): Promise<void> {
-    const rows = await repository.listConversations();
+    // Fetch the conversation rows AND the group-scoped exclusion set together:
+    // group-scoped ids (the group id itself + every pairwise link id derived
+    // from a group record's or live session's member list) must never surface
+    // in the resumable sidebar list. The current build persists no such rows —
+    // link orchestrators run on a PairwiseLinkRepository and the transcript is
+    // in-memory — so the mask is defense-in-depth for rows persisted by
+    // earlier builds or arriving via export/import.
+    const [rows, groupScopedKeys] = await Promise.all([
+      repository.listConversations(),
+      groupScopedConversationKeys(),
+    ]);
     // The await can straddle disposal (e.g. a boot-time hydrate resolving after
     // the provider unmounted and called dispose()). Bail before mutating state
     // or emitting into a torn-down controller.
     if (disposed) return;
-    conversationsCache = rows.slice();
+    conversationsCache = rows.filter((r) => !groupScopedKeys.has(keyOf(r.id)));
     // Sync each session's cached record so summary derivation stays cheap.
     for (const session of sessions.values()) {
       const updated = conversationsCache.find((r) => r.id === session.id) ?? null;
@@ -669,6 +835,229 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     sessions.set(keyOf(session.id), session);
     activeConversationId = session.id;
     syncActiveReadMarker(session);
+  }
+
+  // -----------------------------------------------------------------------
+  // Group sessions (protocol-v2)
+  // -----------------------------------------------------------------------
+
+  /**
+   * The conversation-id keys that must NEVER surface in the resumable
+   * sidebar list because they are group-scoped: the group id itself (the
+   * namespace the group's transcript rows carry) plus every DERIVED pairwise
+   * conversation id a per-link orchestrator resolves during a link handshake
+   * ({@link derivePairwiseConvId} per member). No such rows are persisted by
+   * this build — the mask is the defense-in-depth layer for rows written by
+   * earlier builds or re-imported from an export bundle.
+   *
+   * Sources are the union of the stored group records AND the live sessions'
+   * member lists — the stored record can lag the live list by a gossip hop
+   * (the host's updateGroupMembership write settles asynchronously), and a
+   * live session may predate its landed record. Stored records keep their
+   * last-known member list after leave, so pairwise ids stay masked for
+   * rows a foreign export/import could reintroduce.
+   */
+  async function groupScopedConversationKeys(): Promise<Set<string>> {
+    const excluded = new Set<string>();
+    const ownPub = deps.identityManager.get().publicKey;
+    const memberPubsByGroup = new Map<string, Map<string, GroupMember>>();
+    const groupIds = new Map<string, GroupId>();
+    const collect = (groupId: GroupId, members: readonly GroupMember[]): void => {
+      const k = keyOf(groupId);
+      excluded.add(k); // the group-scoped id itself (transcript namespace)
+      groupIds.set(k, groupId);
+      let pubs = memberPubsByGroup.get(k);
+      if (pubs === undefined) {
+        pubs = new Map<string, GroupMember>();
+        memberPubsByGroup.set(k, pubs);
+      }
+      for (const m of members) {
+        pubs.set(pubKeyId(m.identityPub), m);
+      }
+    };
+    for (const record of await repository.listGroups()) {
+      collect(record.groupId, record.members);
+    }
+    for (const group of groupSessions.values()) {
+      collect(group.id, group.session.memberList);
+    }
+    for (const [k, pubs] of memberPubsByGroup) {
+      const groupId = groupIds.get(k) as GroupId;
+      for (const member of pubs.values()) {
+        if (ctEqual(member.identityPub, ownPub)) continue;
+        excluded.add(keyOf(await derivePairwiseConvId(groupId, ownPub, member.identityPub)));
+      }
+    }
+    return excluded;
+  }
+
+  /**
+   * The group counterpart of {@link onSessionChange}: advance the active
+   * group's read marker on received messages, or count unread on a
+   * background group, then emit a fresh snapshot.
+   */
+  function onGroupSessionChange(group: ChatGroupSession): void {
+    if (activeGroupId === null || keyOf(activeGroupId) !== keyOf(group.id)) {
+      const last = group.lastReceivedAt;
+      if (last !== null) {
+        const readUpTo = groupReadMarkers.get(keyOf(group.id)) ?? -Infinity;
+        let unread = 0;
+        for (const m of group.messages) {
+          if (m.timestamp > readUpTo && m.direction === MessageDirection.Received) {
+            unread++;
+          }
+        }
+        group.unread = unread;
+      } else {
+        group.unread = 0;
+      }
+    } else {
+      if (group.lastReceivedAt !== null) {
+        const k = keyOf(group.id);
+        const prev = groupReadMarkers.get(k) ?? -Infinity;
+        if (group.lastReceivedAt > prev) {
+          groupReadMarkers.set(k, group.lastReceivedAt);
+        }
+      }
+      group.unread = 0;
+    }
+    emit(null);
+  }
+
+  /** Non-fatal group session/manager errors surface on `state.error`. */
+  function onGroupSessionError(group: ChatGroupSession, error: unknown): void {
+    void group;
+    emitErrorMessage(error);
+  }
+
+  /**
+   * The group's session ended — leave, kick self-eject, or broker-seat loss.
+   * The host has already torn the manager down (the obs-F pairing); we just
+   * evict the record. A no-arg delete when the controller already evicted it
+   * (leaveGroup deletes first, then tears down) keeps this idempotent.
+   */
+  function onGroupSessionEnded(group: ChatGroupSession): void {
+    const k = keyOf(group.id);
+    if (groupSessions.get(k) !== group) return;
+    groupSessions.delete(k);
+    groupReadMarkers.delete(k);
+    if (activeGroupId !== null && keyOf(activeGroupId) === k) {
+      activeGroupId = null;
+    }
+    emit(null);
+  }
+
+  /** Construct the session + manager pair with the controller's singletons. */
+  function buildGroupHost(init: GroupHostInit): ChatGroupSession {
+    return createGroupHost(
+      {
+        brokerUrl: deps.brokerUrl,
+        baseUrl: deps.baseUrl,
+        repository,
+        socketFactory: deps.socketFactory,
+        peerConnectionFactory: deps.peerConnectionFactory,
+        iceServers: deps.iceServers,
+        identity: deps.identityManager.get(),
+        enablePake: deps.enablePake,
+        maxMembers: deps.maxGroupMembers,
+      },
+      init,
+      {
+        onChange: onGroupSessionChange,
+        onError: onGroupSessionError,
+        onEnded: onGroupSessionEnded,
+      },
+    );
+  }
+
+  function syncGroupReadMarker(group: ChatGroupSession): void {
+    // Same R9/F5 contract as syncActiveReadMarker: the marker tracks the most
+    // recent RECEIVED message only, so a sent message never suppresses unread.
+    groupReadMarkers.set(keyOf(group.id), group.lastReceivedAt ?? -Infinity);
+    group.unread = 0;
+  }
+
+  function findGroupOrThrow(id: GroupId): ChatGroupSession {
+    const group = groupSessions.get(keyOf(id));
+    if (group === undefined) {
+      throw new GroupError(GroupErrorCode.GroupNotFound, `no live group session for group ${id}`);
+    }
+    return group;
+  }
+
+  /**
+   * Register the group record in the repository — the shared second half of
+   * startGroup/joinGroup after the host is built. The group transcript is
+   * deliberately NOT persisted: it lives on {@link ChatGroupSession.messages}
+   * (in-memory, session-scoped), so no group-scoped conversation row is ever
+   * created and nothing group-related can leak into the resumable
+   * conversation list or the export bundle. `storeGroup` is the only write
+   * left, so there is no partial-write window to order around — a failure
+   * leaves the store untouched; the catch then tears the half-registered
+   * group down, evicts it, surfaces the error on `state.error`, and rethrows
+   * to the caller.
+   */
+  async function persistGroupRecord(group: ChatGroupSession, label: string | null): Promise<void> {
+    const k = keyOf(group.id);
+    try {
+      await repository.storeGroup({
+        groupId: group.id,
+        epoch: group.session.memberEpoch,
+        // The author knows itself from the start; a joiner learns the author
+        // key when it adopts its first signed list (updateGroupMembership
+        // populates it from the isAuthor entry).
+        authorIdentityPub: group.isAuthor ? deps.identityManager.get().publicKey : null,
+        members: group.session.memberList,
+        displayName: label,
+        createdAt: Date.now(),
+      });
+    } catch (err: unknown) {
+      if (groupSessions.get(k) === group) {
+        groupSessions.delete(k);
+        groupReadMarkers.delete(k);
+        if (activeGroupId !== null && keyOf(activeGroupId) === k) {
+          activeGroupId = null;
+        }
+      }
+      teardownGroup(group);
+      emitErrorMessage(err);
+      throw err;
+    }
+  }
+
+  /**
+   * The single-flight body of joinGroup: build the joiner host, persist the
+   * (author-key-unknown) record, then seat in the broker room.
+   */
+  async function performJoinGroup(
+    groupId: GroupId,
+    code: string | null,
+    options?: { readonly displayName?: string },
+  ): Promise<void> {
+    const key = keyOf(groupId);
+    const group = buildGroupHost({
+      groupId,
+      isAuthor: false,
+      authMode: code === null ? AuthMode.SafetyNumberOnly : AuthMode.Pake,
+      pakeCode: code ?? undefined,
+      memberName: options?.displayName,
+      label: null,
+      invitation: null,
+    });
+    groupSessions.set(key, group);
+    activeGroupId = group.id;
+    syncGroupReadMarker(group);
+    await persistGroupRecord(group, null);
+    // The awaits above can straddle a leaveGroup/leaveAll/dispose: when the
+    // record is gone our entry was already evicted and torn down by that
+    // path — connect() on the closed manager is a no-op anyway, but bail
+    // before refreshing state the caller no longer owns.
+    if (disposed || groupSessions.get(key) !== group) {
+      return;
+    }
+    group.manager.connect();
+    await refreshConversations();
+    emit(null);
   }
 
   async function startSession(
@@ -993,6 +1382,19 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
    * completing start.
    */
   async function performJoin(fragment: string, lifecycle: ConversationLifecycle): Promise<void> {
+    // Guard: an invitation fragment whose 16-byte id is GROUP-SCOPED — a
+    // stored/live group id itself, or a pairwise link id derived from any
+    // stored group record's or live session's member list — must not be
+    // bound as a 1:1 conversation. The join flow decides pair-vs-group (§8),
+    // and the pair path here is the wrong one for either id class.
+    const bare = fragment.slice(fragment.lastIndexOf("#") + 1);
+    const joinIdKey = keyOf(parseInvitation(bare).conversationId);
+    if ((await groupScopedConversationKeys()).has(joinIdKey)) {
+      throw new GroupError(
+        GroupErrorCode.Malformed,
+        "invitation identifies a group-scoped id; use joinGroup",
+      );
+    }
     const { session } = await startSession(
       Role.Responder,
       fragment,
@@ -1024,6 +1426,18 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     lifecycle: ConversationLifecycle,
   ): Promise<void> {
     const resumeKey = lifecycle.key;
+    // Guard FIRST — before the unknown-conversation check: a group-scoped id
+    // (a stored/live group id or a pairwise link id derived from any group
+    // record's or live session's member list) must reject with the typed
+    // GroupError even when no conversation row exists for it — pairwise
+    // links deliberately persist no rows, so the record lookup alone cannot
+    // distinguish them from a merely-unknown id.
+    if ((await groupScopedConversationKeys()).has(resumeKey)) {
+      throw new GroupError(
+        GroupErrorCode.Malformed,
+        `cannot resume group-scoped id ${conversationId} as a pair conversation`,
+      );
+    }
     const record = await repository.getConversation(conversationId);
     if (record === null) {
       throw new Error(`cannot resume unknown conversation ${conversationId}`);
@@ -1368,6 +1782,17 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       holders.clear();
       readMarkers.clear();
       activeConversationId = null;
+      // Groups tear down too: every live group session sends `leave` on its
+      // links and vacates its broker seat via the host's finishGroup funnel
+      // (teardownGroup → manager.leave → session.leave). Eviction is direct
+      // — the onEnded callbacks observe already-deleted map entries.
+      for (const group of Array.from(groupSessions.values())) {
+        const k = keyOf(group.id);
+        groupSessions.delete(k);
+        groupReadMarkers.delete(k);
+        teardownGroup(group);
+      }
+      activeGroupId = null;
       emit(null);
     },
 
@@ -1604,6 +2029,274 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       this.leaveConversation(id);
     },
 
+    // --- Group sessions (protocol-v2) ---
+
+    async startGroup(options?: {
+      readonly code?: string;
+      readonly name?: string;
+      readonly displayName?: string;
+    }): Promise<{ invitation: string }> {
+      assertNotDisposed(disposed);
+      // Same normalization as startConversation: trim at the boundary, and a
+      // code that is empty after trimming counts as NO code — the group runs
+      // SafetyNumberOnly and the invitation carries no `~code` tail. (Before
+      // this, `"   "` produced a Pake group with an empty code whose
+      // invitation omitted the tail, so joiners could never authenticate.)
+      const trimmed = options?.code === undefined ? undefined : options.code.trim();
+      const code = trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+      // CSPRNG 16-byte group id — the broker room id (protocol-v2 §1).
+      const groupId = encodeGroupId(randomBytes(CONVERSATION_ID_BYTES));
+      const invitation = formatGroupInvitation(
+        keyOf(groupId),
+        deps.publicBaseUrl ?? deps.baseUrl,
+        code,
+      );
+      const group = buildGroupHost({
+        groupId,
+        isAuthor: true,
+        authMode: code === undefined ? AuthMode.SafetyNumberOnly : AuthMode.Pake,
+        pakeCode: code,
+        memberName: options?.displayName,
+        label: options?.name ?? null,
+        invitation,
+      });
+      const key = keyOf(groupId);
+      groupSessions.set(key, group);
+      activeGroupId = group.id;
+      syncGroupReadMarker(group);
+      await persistGroupRecord(group, options?.name ?? null);
+      if (disposed || groupSessions.get(key) !== group) {
+        // leaveAll/dispose won the race: the record was evicted and torn down
+        // by that path. Mirror startConversation — fail loudly rather than
+        // hand back an invitation to a room nobody will join.
+        throw new Error("group start aborted before the session was installed");
+      }
+      group.manager.connect();
+      await refreshConversations();
+      emit(null);
+      return { invitation };
+    },
+
+    async joinGroup(fragment: string, options?: { readonly displayName?: string }): Promise<void> {
+      assertNotDisposed(disposed);
+      // Same normalization as joinConversation: everything before the last
+      // `#` is the link prefix; parseInvitation handles the leading `#`, the
+      // lowercase fold, and the `~code` tail (same grammar as 1:1).
+      const hashIndex = fragment.lastIndexOf("#");
+      const bare = hashIndex >= 0 ? fragment.slice(hashIndex + 1) : fragment;
+      const parsed = parseInvitation(bare);
+      if (parsed.code !== null && deps.enablePake === false) {
+        // Mirror the 1:1 join gate (R8/F1): a coded group link must not
+        // reach the wasm-gated SPAKE2 path on builds without it.
+        throw new OrchestratorError(
+          OrchestratorErrorCode.PakeDisabled,
+          "coded group invitations (PAKE) are not supported in this build",
+        );
+      }
+      const groupId = encodeGroupId(parsed.conversationId);
+      const key = keyOf(groupId);
+      const existing = groupSessions.get(key);
+      if (existing !== undefined) {
+        // Already seated — just select it (mirrors joinConversation's
+        // already-live branch).
+        activeGroupId = existing.id;
+        syncGroupReadMarker(existing);
+        existing.detached = false;
+        emit(null);
+        return;
+      }
+      const inFlight = groupJoining.get(key);
+      if (inFlight !== undefined) {
+        try {
+          await inFlight;
+        } catch {
+          // The prior join failed; our own attempt below is next-best intent.
+        }
+        const landed = groupSessions.get(key);
+        if (landed !== undefined) {
+          activeGroupId = landed.id;
+          syncGroupReadMarker(landed);
+          landed.detached = false;
+          emit(null);
+          return;
+        }
+      }
+      const attempt = performJoinGroup(groupId, parsed.code, options).finally(() => {
+        groupJoining.delete(key);
+      });
+      groupJoining.set(key, attempt);
+      return attempt;
+    },
+
+    selectGroup(groupId: GroupId): void {
+      assertNotDisposed(disposed);
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) {
+        throw new GroupError(
+          GroupErrorCode.GroupNotFound,
+          `cannot select unknown group ${groupId}`,
+        );
+      }
+      activeGroupId = group.id;
+      syncGroupReadMarker(group);
+      group.detached = false;
+      emit(null);
+    },
+
+    leaveGroup(groupId?: GroupId): void {
+      assertNotDisposed(disposed);
+      const target = groupId ?? activeGroupId;
+      if (target === null) return;
+      const k = keyOf(target);
+      const group = groupSessions.get(k);
+      if (group === undefined) return;
+      // Evict BEFORE tearing down: finishGroup's onEnded callback then
+      // observes the record as already gone and stays a no-op, leaving this
+      // path's single emit the only notification.
+      groupSessions.delete(k);
+      groupReadMarkers.delete(k);
+      if (activeGroupId !== null && keyOf(activeGroupId) === k) {
+        activeGroupId = null;
+      }
+      teardownGroup(group);
+      emit(null);
+    },
+
+    async removeGroupMember(groupId: GroupId, identityPub: PublicKey): Promise<void> {
+      assertNotDisposed(disposed);
+      const group = findGroupOrThrow(groupId);
+      // kickMember throws GroupError(NotAuthor) for non-authors and
+      // GroupError(MembershipInvalid) for self-removal — both propagate to
+      // the caller as the typed-error contract.
+      await group.session.kickMember(identityPub);
+      emit(null);
+    },
+
+    async sendGroupText(groupId: GroupId, text: string): Promise<void> {
+      assertNotDisposed(disposed);
+      const group = findGroupOrThrow(groupId);
+      group.detached = false;
+      // The group transcript is in-memory only (ChatGroupSession.messages) —
+      // no durable conversation row exists for a group. Fan out first, then
+      // mirror: a failed send records nothing, keeping the transcript aligned
+      // with what was actually delivered.
+      const timestamp = Date.now();
+      await group.session.sendText(text);
+      const message: GroupChatMessage = {
+        id: globalThis.crypto.randomUUID(),
+        groupId: group.id,
+        direction: MessageDirection.Sent,
+        senderIdentityPub: null,
+        timestamp,
+        text,
+      };
+      group.messages = group.messages.concat(message);
+      group.lastMessagePreview = previewOf(text);
+      group.lastMessageAt = timestamp;
+      onGroupSessionChange(group);
+    },
+
+    async sendGroupFile(groupId: GroupId, file: ChatFileInput): Promise<Map<PeerId, number>> {
+      assertNotDisposed(disposed);
+      const group = findGroupOrThrow(groupId);
+      group.detached = false;
+      const data = file.data;
+      const name = file.name === "" ? "file.bin" : file.name;
+      const mimeType = file.mimeType === "" ? "application/octet-stream" : file.mimeType;
+      const nameBytes = utf8Length(name);
+      if (nameBytes > MAX_MANIFEST_NAME_BYTES) {
+        throw new Error(`name length ${nameBytes} exceeds ${MAX_MANIFEST_NAME_BYTES}`);
+      }
+      const mimeBytes = utf8Length(mimeType);
+      if (mimeBytes > MAX_MANIFEST_MIME_BYTES) {
+        throw new Error(`mimeType length ${mimeBytes} exceeds ${MAX_MANIFEST_MIME_BYTES}`);
+      }
+      // Per-link fan-out: each link runs its own v1 transfer, so the map is
+      // keyed by the peer's signaling peerId (§6 — no group-wide id space).
+      return await group.session.sendFile(data, name, mimeType);
+    },
+
+    async getGroupHistory(groupId: GroupId): Promise<ConversationMessage[]> {
+      // The group transcript is session-scoped and in-memory only: read it
+      // off the live record, flattened to the plain ConversationMessage
+      // timeline shape 1:1 history uses (the sender column is dropped —
+      // attribution lives on the activeGroup.messages view). Empty for an
+      // unknown or ended group.
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) return [];
+      const conversationId = groupConversationId(group.id);
+      return group.messages.map((m) => ({
+        id: m.id,
+        conversationId,
+        direction: m.direction,
+        timestamp: m.timestamp,
+        text: m.text,
+      }));
+    },
+
+    getGroupReceivedFile(
+      groupId: GroupId,
+      senderIdentityPub: PublicKey,
+      transferId: number,
+    ): ReceivedFile | null {
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) return null;
+      return group.receivedFiles.get(receivedFileKey(senderIdentityPub, transferId)) ?? null;
+    },
+
+    listGroups(): GroupSummary[] {
+      return Array.from(groupSessions.values())
+        .map((group) => summarizeGroup(group))
+        .sort(compareGroupSummaries);
+    },
+
+    markGroupSafetyVerified(groupId?: GroupId): void {
+      assertNotDisposed(disposed);
+      const target = groupId ?? activeGroupId;
+      if (target === null) return;
+      const group = groupSessions.get(keyOf(target));
+      if (group === undefined) return;
+      // Same R13F5 discipline as the 1:1 mark: only flag verified when a
+      // safety number actually exists to verify.
+      if (group.session.groupSafetyNumber !== null) {
+        group.safetyNumberVerified = true;
+      }
+      emit(null);
+    },
+
+    getGroupSafetyNumber(groupId: GroupId): string | null {
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) return null;
+      return group.session.groupSafetyNumber;
+    },
+
+    setGroupDisplayName(groupId: GroupId | undefined, name: string): void {
+      assertNotDisposed(disposed);
+      const target = groupId ?? activeGroupId;
+      if (target === null) return;
+      const group = groupSessions.get(keyOf(target));
+      if (group === undefined) return;
+      // GroupSession.updateDisplayName validates the byte cap, re-announces
+      // on connected links, and (author) re-signs our member entry.
+      group.session.updateDisplayName(name);
+      emit(null);
+    },
+
+    setGroupDraft(groupId: GroupId, draft: string): void {
+      assertNotDisposed(disposed);
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) return;
+      if (group.draft === draft) return;
+      group.draft = draft;
+      emit(null);
+    },
+
+    __attachGroupLinkForTest(groupId: GroupId, peerId: PeerId, transport: PeerTransport): void {
+      const group = groupSessions.get(keyOf(groupId));
+      if (group === undefined) return;
+      group.session.attachLinkTransport(peerId, transport);
+    },
+
     lock(): void {
       // Drop the in-memory key and flip the manager's locked flag. The
       // LockableRepository wrapper observes isLocked() on the next seal/unseal
@@ -1699,7 +2392,14 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
     },
 
     async listConversations(): Promise<ConversationRecord[]> {
-      return await repository.listConversations();
+      // Same group-scoped exclusion as runRefresh: the public list must not
+      // surface group-scoped or derived pairwise link records (legacy or
+      // imported rows — this build persists none).
+      const [rows, excluded] = await Promise.all([
+        repository.listConversations(),
+        groupScopedConversationKeys(),
+      ]);
+      return rows.filter((r) => !excluded.has(keyOf(r.id)));
     },
 
     async clearAll(): Promise<void> {
@@ -1759,6 +2459,24 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
         // with the wiped snapshot.
         session.lastReceivedAt = null;
         session.unread = 0;
+      }
+      // Same per-session wipe for live group sessions: clearAll already
+      // deleted the stored group records (the group's transcript and its
+      // pairwise links persist nothing — they are in-memory), so mirror the
+      // live snapshot (transcript, received-file bytes, detached gate) —
+      // the session itself stays seated.
+      for (const group of groupSessions.values()) {
+        for (const file of group.receivedFiles.values()) {
+          file.data.fill(0);
+        }
+        group.receivedFiles.clear();
+        group.detached = true;
+        group.messages = [];
+        group.lastMessagePreview = null;
+        group.lastMessageAt = null;
+        group.lastReceivedAt = null;
+        group.unread = 0;
+        groupReadMarkers.delete(keyOf(group.id));
       }
       await refreshConversations();
       emit(null);
@@ -1822,6 +2540,15 @@ export function createChatController(deps: ChatControllerDeps): ChatController {
       holders.clear();
       readMarkers.clear();
       activeConversationId = null;
+      // Groups too: teardownGroup is idempotent and pairs session.leave()
+      // with manager.leave() (the obs-F pairing) — live broker seats and
+      // peer connections must not survive disposal.
+      for (const group of Array.from(groupSessions.values())) {
+        teardownGroup(group);
+      }
+      groupSessions.clear();
+      groupReadMarkers.clear();
+      activeGroupId = null;
       listeners.clear();
       // R5:F3 / R6:F1: release any backing DB handles (the web provider's
       // OPFS-backed repo holds a wa-sqlite DB + dedicated Worker open for the
@@ -1942,7 +2669,15 @@ function compareSummaries(a: SessionSummary, b: SessionSummary): number {
   return compareConversationId(a.id, b.id);
 }
 
-function compareConversationId(a: ConversationId, b: ConversationId): number {
+/** Stable ordering for group summaries: most-recently-active first. */
+function compareGroupSummaries(a: GroupSummary, b: GroupSummary): number {
+  const aAt = a.lastMessageAt ?? 0;
+  const bAt = b.lastMessageAt ?? 0;
+  if (aAt !== bAt) return bAt - aAt;
+  return compareConversationId(a.groupId, b.groupId);
+}
+
+function compareConversationId(a: Uint8Array, b: Uint8Array): number {
   const la = a.length;
   const lb = b.length;
   const limit = Math.min(la, lb);
@@ -1971,7 +2706,7 @@ interface ConversationLifecycle {
  * different producers miss each other under SameValueZero); the lowercase hex
  * string is stable across producers and matches the store's `idKey` convention.
  */
-function keyOf(id: ConversationId): string {
+function keyOf(id: Uint8Array): string {
   let hex = "";
   for (let i = 0; i < id.length; i++) {
     hex += id[i].toString(16).padStart(2, "0");

@@ -10,6 +10,8 @@ import { decryptAtRest, encryptAtRest } from "@fuck-eu-chat-control/chat-runtime
 import { ctEqual } from "@fuck-eu-chat-control/chat-runtime/crypto/ct-equal";
 import { CryptoError, CryptoErrorCode } from "@fuck-eu-chat-control/chat-runtime/crypto/errors";
 import type { AtRestKey } from "@fuck-eu-chat-control/chat-runtime/crypto/types";
+import { encodeGroupId } from "@fuck-eu-chat-control/chat-runtime/group/types";
+import type { GroupId, GroupMember } from "@fuck-eu-chat-control/chat-runtime/group/types";
 import {
   encodeConversationId,
   encodePublicKey,
@@ -36,6 +38,7 @@ import type {
   AppendMessageOptions,
   ConversationMessage,
   ConversationRecord,
+  GroupRecord,
   PeerIdentityRecord,
   PersistableConversationRepository,
   ReloadableConversationRepository,
@@ -166,6 +169,17 @@ export class BrowserDbConversationRepository
    */
   private readonly database: CloseableDatabase | null;
   private closed = false;
+  /**
+   * Group records (protocol-v2), keyed by group-id hex. Deliberately backed
+   * by an in-memory map rather than a persisted collection: groups are
+   * runtime-only state — a broker room ceases when empty, there is no
+   * "resume group" flow, and membership is re-derived from the author's
+   * signed list on rejoin. Keeping the records out of the SQLite schema
+   * avoids a SCHEMA_VERSION bump for state that is meaningless after a
+   * reload anyway, and keeps serialize()/reload() byte-identical (the export
+   * bundle stays v1). {@link clearAll} and {@link reload} still wipe the map.
+   */
+  private readonly groups = new Map<string, GroupRecord>();
   /**
    * R4/F6: persistence signals for writes this repo has started but whose
    * OPFS/SQLite commit has not settled yet. Every write method awaits its own
@@ -637,6 +651,76 @@ export class BrowserDbConversationRepository
     if (conversationKeys.length > 0) {
       await this.awaitPersistence(this.conversations.delete(conversationKeys));
     }
+    this.groups.clear();
+  }
+
+  // --- Group records (runtime-only, in-memory — see {@link groups}) ---
+
+  async storeGroup(record: GroupRecord): Promise<GroupRecord> {
+    const key = groupKey(record.groupId);
+    const stored: GroupRecord = cloneGroupRecord({
+      ...record,
+      // Create-or-replace: rejoining keeps the original createdAt.
+      createdAt: this.groups.get(key)?.createdAt ?? record.createdAt,
+    });
+    this.groups.set(key, stored);
+    return cloneGroupRecord(stored);
+  }
+
+  async getGroup(groupId: GroupId): Promise<GroupRecord | null> {
+    const stored = this.groups.get(groupKey(groupId));
+    return stored === undefined ? null : cloneGroupRecord(stored);
+  }
+
+  async updateGroupMembership(
+    groupId: GroupId,
+    epoch: number,
+    members: readonly GroupMember[],
+  ): Promise<GroupRecord> {
+    const key = groupKey(groupId);
+    const stored = this.groups.get(key);
+    if (stored === undefined) {
+      throw new StoreError(
+        StoreErrorCode.GroupNotFound,
+        "cannot update membership for a group that does not exist",
+      );
+    }
+    // The canonical list carries exactly one author-flagged entry (codec
+    // invariant); adopt its key as the record's author identity.
+    const author = members.find((m) => m.isAuthor);
+    const next: GroupRecord = {
+      ...stored,
+      epoch,
+      members: cloneGroupMembers(members),
+      authorIdentityPub:
+        author === undefined ? stored.authorIdentityPub : clonePublicKey(author.identityPub),
+    };
+    this.groups.set(key, next);
+    return cloneGroupRecord(next);
+  }
+
+  async setGroupDisplayName(groupId: GroupId, name: string | null): Promise<void> {
+    const key = groupKey(groupId);
+    const stored = this.groups.get(key);
+    if (stored === undefined) {
+      throw new StoreError(
+        StoreErrorCode.GroupNotFound,
+        "cannot set a display name for a group that does not exist",
+      );
+    }
+    this.groups.set(key, { ...stored, displayName: name });
+  }
+
+  async removeGroup(groupId: GroupId): Promise<void> {
+    this.groups.delete(groupKey(groupId));
+  }
+
+  async listGroups(): Promise<GroupRecord[]> {
+    const records = [...this.groups.values()].map(cloneGroupRecord);
+    records.sort(
+      (a, b) => a.createdAt - b.createdAt || groupKey(a.groupId).localeCompare(groupKey(b.groupId)),
+    );
+    return records;
   }
 
   serialize(): SerializedState {
@@ -895,6 +979,9 @@ export class BrowserDbConversationRepository
     // R4/F6: route through awaitPersistence so a close() racing the reload's
     // commit also drains it.
     await this.awaitPersistence(tx);
+    // Group records are runtime-only (see {@link groups}): a bundle reload
+    // replaces the device state, so stale group bookkeeping is wiped.
+    this.groups.clear();
   }
 
   /** CR-7: zeroize the live at-rest key when the {@link LockableRepository} observes a lock. */
@@ -971,6 +1058,31 @@ function cloneConversationId(id: ConversationId): ConversationId {
 
 function clonePublicKey(key: Uint8Array): PublicKey {
   return encodePublicKey(copyBytes(key, PUBLIC_KEY_BYTES));
+}
+
+function groupKey(id: GroupId): string {
+  return bytesToHex(id);
+}
+
+/** Defensive copy of a member list: each identity key is cloned and re-branded. */
+function cloneGroupMembers(members: readonly GroupMember[]): GroupMember[] {
+  return members.map((m) => ({
+    identityPub: clonePublicKey(m.identityPub),
+    isAuthor: m.isAuthor,
+    displayName: m.displayName,
+  }));
+}
+
+function cloneGroupRecord(record: GroupRecord): GroupRecord {
+  return {
+    groupId: encodeGroupId(record.groupId),
+    epoch: record.epoch,
+    authorIdentityPub:
+      record.authorIdentityPub === null ? null : clonePublicKey(record.authorIdentityPub),
+    members: cloneGroupMembers(record.members),
+    displayName: record.displayName,
+    createdAt: record.createdAt,
+  };
 }
 
 function copyBytes(source: Uint8Array, length: number): Uint8Array {
