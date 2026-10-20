@@ -158,6 +158,48 @@ describe("chat-provider ICE-server entry filtering (R9F1)", () => {
     expect(harness.lastDeps?.publicBaseUrl).toBe("https://chat.example");
   });
 
+  it("plumbs /ice-config's groupMaxMembers into the controller's maxGroupMembers dep", async () => {
+    // Phase 7 (protocol-v2): the operator-configured GROUP_MAX_MEMBERS seat
+    // cap must reach the client-side group session so it enforces the SAME
+    // cap as the broker registry. The field rides the same fetch as the ICE
+    // list and publicBaseUrl.
+    stubIceConfigResponse({ iceServers: [], groupMaxMembers: 4 });
+
+    await renderUntilConstructed();
+
+    expect(harness.lastDeps?.maxGroupMembers).toBe(4);
+    const latest = observed[observed.length - 1];
+    expect(latest).toMatchObject({ ready: true, iceDegraded: false });
+  });
+
+  it("a malformed groupMaxMembers is treated as unset (runtime default applies)", async () => {
+    stubIceConfigResponse({ iceServers: [], groupMaxMembers: "many" });
+
+    await renderUntilConstructed();
+
+    expect(harness.lastDeps?.maxGroupMembers).toBeUndefined();
+  });
+
+  it("an out-of-window groupMaxMembers (above the hard ceiling) is dropped", async () => {
+    stubIceConfigResponse({ iceServers: [], groupMaxMembers: 99 });
+
+    await renderUntilConstructed();
+
+    expect(harness.lastDeps?.maxGroupMembers).toBeUndefined();
+  });
+
+  it("the injected path leaves maxGroupMembers unset (desktop has no /ice-config)", async () => {
+    setInjectedConfig({
+      brokerUrl: "wss://broker.example/ws",
+      iceServers: [{ urls: "stun:injected.example" }],
+    });
+
+    await renderUntilConstructed();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(harness.lastDeps?.maxGroupMembers).toBeUndefined();
+  });
+
   it("an all-malformed fetched list degrades (fail-open + warn)", async () => {
     stubIceConfigResponse({
       iceServers: [{ urls: "" }, { urls: 123 }, { credential: "c" }],

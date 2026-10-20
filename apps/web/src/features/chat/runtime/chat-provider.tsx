@@ -20,6 +20,7 @@ import type {
 } from "@fuck-eu-chat-control/chat-runtime/store";
 import { BrowserDbConversationRepository } from "@/features/chat/store/browser-db-repo";
 import { setSpake2ModuleUrl } from "@fuck-eu-chat-control/chat-runtime/crypto/pake";
+import { MAX_GROUP_MEMBERS_HARD } from "@fuck-eu-chat-control/chat-runtime/protocol/limits";
 import type {
   SignalingSocket,
   SignalingSocketFactory,
@@ -179,10 +180,18 @@ function resolveBrowserDeps(): {
  * The two adapters stay intentionally decoupled (no shared helper) — the
  * mobile build cannot import browser-only globals and the web build should
  * not grow a dependency on the Expo config module.
+ *
+ * Phase 7 (protocol-v2): the response also carries `groupMaxMembers` — the
+ * operator-configured `GROUP_MAX_MEMBERS` seat cap — which is plumbed into
+ * the controller's `maxGroupMembers` dep so the client-side group session
+ * and the broker registry enforce the SAME cap. Absent/malformed →
+ * `undefined` and the runtime default applies (same soft-fail posture as
+ * {@link publicBaseUrl}; it is never a `degraded` outcome).
  */
 async function fetchIceConfig(): Promise<{
   readonly iceServers: readonly IceServer[];
   readonly publicBaseUrl: string | undefined;
+  readonly groupMaxMembers: number | undefined;
   readonly degraded: boolean;
 }> {
   const controller = new AbortController();
@@ -194,6 +203,7 @@ async function fetchIceConfig(): Promise<{
   const degraded = (): {
     readonly iceServers: readonly IceServer[];
     readonly publicBaseUrl: string | undefined;
+    readonly groupMaxMembers: number | undefined;
     readonly degraded: boolean;
   } => {
     // eslint-disable-next-line no-console
@@ -201,7 +211,7 @@ async function fetchIceConfig(): Promise<{
       "[chat-provider] /ice-config fetch degraded — continuing with host-candidate-only ICE. " +
         "Cross-network connections may fail in this deployment.",
     );
-    return { iceServers: [], publicBaseUrl: undefined, degraded: true };
+    return { iceServers: [], publicBaseUrl: undefined, groupMaxMembers: undefined, degraded: true };
   };
   try {
     const response = await fetch("/ice-config", { signal: controller.signal });
@@ -209,6 +219,7 @@ async function fetchIceConfig(): Promise<{
     const body = (await response.json()) as {
       readonly iceServers?: unknown;
       readonly publicBaseUrl?: unknown;
+      readonly groupMaxMembers?: unknown;
     };
     if (!Array.isArray(body.iceServers)) return degraded();
     // Map the untyped JSON body into the neutral IceServer shape at the fetch
@@ -242,7 +253,20 @@ async function fetchIceConfig(): Promise<{
       typeof body.publicBaseUrl === "string" && body.publicBaseUrl.length > 0
         ? body.publicBaseUrl
         : undefined;
-    return { iceServers, publicBaseUrl, degraded: false };
+    // Phase 7 (protocol-v2): the group member cap. The route always emits a
+    // number (`env.GROUP_MAX_MEMBERS ?? DEFAULT_MAX_GROUP_MEMBERS`); clamp to
+    // the spec's legal window (integer 2..MAX_GROUP_MEMBERS_HARD) so a
+    // hand-edited/proxied body can never widen the client-side cap past the
+    // codec's hard ceiling, and treat anything else as "unset" (runtime
+    // default applies).
+    const groupMaxMembers =
+      typeof body.groupMaxMembers === "number" &&
+      Number.isInteger(body.groupMaxMembers) &&
+      body.groupMaxMembers >= 2 &&
+      body.groupMaxMembers <= MAX_GROUP_MEMBERS_HARD
+        ? body.groupMaxMembers
+        : undefined;
+    return { iceServers, publicBaseUrl, groupMaxMembers, degraded: false };
   } catch {
     // Swallow (covers both network errors and the abort timeout): the
     // controller accepts an empty list and falls back to host candidates.
@@ -471,6 +495,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           ? Promise.resolve({
               iceServers: injectedIceServers,
               publicBaseUrl: undefined,
+              // The desktop shell cannot reach /ice-config, so the group cap
+              // falls back to the runtime default (the broker's own
+              // GROUP_MAX_MEMBERS still bounds the room server-side).
+              groupMaxMembers: undefined,
               degraded: false,
             })
           : fetchIceConfig();
@@ -581,6 +609,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
               socketFactory: createBrowserSocket,
               peerConnectionFactory,
               iceServers: iceConfig.iceServers,
+              // Phase 7 (protocol-v2): the operator-configured group seat cap
+              // from /ice-config; undefined keeps the runtime default.
+              maxGroupMembers: iceConfig.groupMaxMembers,
             });
             // M3: re-check `cancelled` AFTER the async repository-create yield
             // and BEFORE publishing the controller. The check at the top of this

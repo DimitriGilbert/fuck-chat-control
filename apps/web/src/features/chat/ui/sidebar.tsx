@@ -2,15 +2,17 @@ import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
 import * as React from "react";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
-import { ConversationList, StartConversationButton } from "@/features/chat/ui/session-list";
+import { NewGroupButton } from "@/features/chat/ui/new-group-dialog";
+import { SessionList, StartConversationButton } from "@/features/chat/ui/session-list";
 import { SettingsSheetTrigger } from "@/features/chat/ui/settings-sheet";
 import { TESTIDS } from "@/features/chat/ui/testids";
-import { buildUnifiedSessions } from "@/features/chat/ui/unified-sessions";
+import { buildUnifiedList } from "@/features/chat/ui/unified-sessions";
 
 // Re-exported so existing imports ("@/features/chat/ui/sidebar") keep working
 // after the extract-then-restyle moved the implementations into
 // unified-sessions.ts and session-list.tsx. Tests pin these paths.
-export { buildUnifiedSessions } from "@/features/chat/ui/unified-sessions";
+export { buildUnifiedSessions, buildUnifiedList } from "@/features/chat/ui/unified-sessions";
+export type { SessionListEntry } from "@/features/chat/ui/unified-sessions";
 export { DeleteConversationDialog } from "@/features/chat/ui/session-list";
 export type { DeleteConversationDialogProps } from "@/features/chat/ui/session-list";
 
@@ -61,13 +63,13 @@ export function Sidebar({
 }: SidebarProps): React.ReactElement {
   const { state } = useChat();
   // Unified list: the UNION of persisted conversations and live session
-  // summaries (see {@link buildUnifiedSessions}). Live state (connection,
-  // unread, preview) is merged in where a session exists; a live session whose
-  // record was deleted still gets a row, so the two list surfaces can never
-  // disagree about what is alive.
+  // summaries, merged with every live group (see {@link buildUnifiedList}).
+  // Live state (connection, unread, preview) is merged in where a session
+  // exists; a live session or group whose record was deleted still gets a
+  // row, so the two list surfaces can never disagree about what is alive.
   const sorted = React.useMemo(
-    () => buildUnifiedSessions(state.conversations, state.sessions),
-    [state.sessions, state.conversations],
+    () => buildUnifiedList(state.conversations, state.sessions, state.groups),
+    [state.sessions, state.conversations, state.groups],
   );
 
   return (
@@ -89,13 +91,14 @@ export function Sidebar({
           <span className="text-sidebar-foreground">-chat-control</span>
         </a>
       </div>
-      <div className="px-2 pb-2">
+      <div className="flex flex-col gap-1.5 px-2 pb-2">
         <StartConversationButton testId={startTestId} />
+        <NewGroupButton />
       </div>
 
       {/* Middle: scrolls internally. The list itself is the <nav>; the
           first-run story (emptyContent) is not navigation and stays outside
-          the landmark. The "Conversations" label is a quiet small-caps
+          the landmark. The "Chats" label is a quiet small-caps
           header: muted, xs, tracked. The gold accent is reserved for active
           state, the CTA, the focus ring, the unread badge, and the
           connection dot, never as a fill here. */}
@@ -107,11 +110,11 @@ export function Sidebar({
             </p>
           ))
         ) : (
-          <nav aria-label="Conversations">
+          <nav aria-label="Chats">
             <h2 className="text-muted-foreground mb-1 px-2 text-xs font-medium uppercase tracking-wide">
-              Conversations
+              Chats
             </h2>
-            <ConversationList sessions={sorted} onSessionOpen={onSessionOpen} testId={listTestId} />
+            <SessionList entries={sorted} onSessionOpen={onSessionOpen} testId={listTestId} />
           </nav>
         )}
       </div>

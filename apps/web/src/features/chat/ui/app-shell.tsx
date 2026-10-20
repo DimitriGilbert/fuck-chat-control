@@ -5,9 +5,11 @@ import * as React from "react";
 
 import { useChat } from "@/features/chat/runtime/chat-provider";
 import { ChatView } from "@/features/chat/ui/chat-view";
+import { GroupView } from "@/features/chat/ui/group-view";
 import { EmptyState, SecurityStory } from "@/features/chat/ui/empty-state";
 import { Sidebar } from "@/features/chat/ui/sidebar";
 import { TESTIDS } from "@/features/chat/ui/testids";
+import { conversationIdKey } from "@/features/chat/ui/unified-sessions";
 
 /**
  * The application shell, in two responsive modes:
@@ -33,21 +35,38 @@ import { TESTIDS } from "@/features/chat/ui/testids";
 export function AppShell(): React.ReactElement {
   const { state } = useChat();
   const activeId = state.activeConversationId;
+  // The controller keeps the two selections mutually exclusive, so at most
+  // one of these is non-null; the group branch wins defensively if both ever
+  // were (e.g. a stale pre-v2 snapshot).
+  const activeGroup = state.activeGroup;
 
   // Mobile overlay dismissal. `chatHidden` only affects <md: the back button
-  // sets it (list visible, session stays live); any activeId change clears
-  // it so joining/opening a conversation always reveals the chat. Selecting
-  // a row also clears it via the sidebar's onSessionOpen.
+  // sets it (list visible, session stays live); any active-surface change
+  // clears it so joining/opening a chat always reveals it. Selecting a row
+  // also clears it via the sidebar's onSessionOpen.
   const [chatHidden, setChatHidden] = React.useState(false);
-  const lastActiveRef = React.useRef(activeId);
+  // Composite "which surface" key, not a boolean — EVERY active-surface
+  // change must fire the reveal: none↔some AND A→B, including
+  // conversation↔group switches. A bare boolean would miss e.g. tapping
+  // "Start a conversation" while a chat was open-but-hidden (the old
+  // surface stays active until the new one activates — true→true, no
+  // transition). The c:/g: prefixes match buildUnifiedList's namespace
+  // split (both kinds share the 16-byte id space).
+  const activeKey =
+    activeGroup !== null
+      ? `g:${activeGroup.groupIdHex}`
+      : activeId === null
+        ? ""
+        : `c:${conversationIdKey(activeId)}`;
+  const lastActiveRef = React.useRef(activeKey);
   React.useEffect(() => {
-    if (lastActiveRef.current !== activeId) {
-      lastActiveRef.current = activeId;
+    if (lastActiveRef.current !== activeKey) {
+      lastActiveRef.current = activeKey;
       setChatHidden(false);
     }
-  }, [activeId]);
+  }, [activeKey]);
 
-  const mobileChatOpen = activeId !== null && !chatHidden;
+  const mobileChatOpen = activeKey !== "" && !chatHidden;
 
   return (
     <div className="relative flex h-svh w-full min-w-0 overflow-hidden bg-background text-foreground">
@@ -103,7 +122,9 @@ export function AppShell(): React.ReactElement {
         </div>
 
         <div className="min-h-0 flex-1 overflow-hidden">
-          {activeId === null ? (
+          {activeGroup !== null ? (
+            <GroupView />
+          ) : activeId === null ? (
             <div className="h-full overflow-y-auto">
               <EmptyState />
             </div>

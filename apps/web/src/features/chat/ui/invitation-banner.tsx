@@ -38,23 +38,12 @@ import { TESTIDS } from "@/features/chat/ui/testids";
  */
 export function InvitationBanner(): React.ReactElement | null {
   const { state, controller } = useChat();
-  const linkInputRef = React.useRef<HTMLInputElement | null>(null);
   // Local input lets the inviter type a custom code (6 digits). Empty means
   // we will generate a fresh CSPRNG code on toggle. Held in component state so
   // the typing experience stays responsive independent of the controller's
   // snapshot cadence.
   const [codeDraft, setCodeDraft] = React.useState("");
   const [busy, setBusy] = React.useState(false);
-  // Verifiable copy: explicit "Copied" feedback plus an inline error when
-  // the clipboard write is rejected. A transient "copied" state resets on a
-  // timer (tracked so unmount cannot leak it).
-  const [copied, setCopied] = React.useState(false);
-  const [copyError, setCopyError] = React.useState<string | null>(null);
-  const copyTimerRef = React.useRef<number | null>(null);
-  // navigator.share is additive only and does not exist everywhere (Tauri
-  // webviews, non-secure contexts); feature-detect after mount so SSR and
-  // first paint stay identical everywhere.
-  const [canShare, setCanShare] = React.useState(false);
 
   const invitation = state.invitation;
   // Pull the active code out of the invitation BEFORE any early return so the
@@ -78,13 +67,6 @@ export function InvitationBanner(): React.ReactElement | null {
     if (activeCode !== null) setCodeDraft(activeCode);
   }, [activeCode]);
 
-  React.useEffect(() => {
-    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
-    return () => {
-      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-    };
-  }, []);
-
   if (invitation === null) return null;
   // Hide once the peer is connected or the session has dropped.
   if (
@@ -97,42 +79,6 @@ export function InvitationBanner(): React.ReactElement | null {
   // session is still waiting/handshaking. Bind a narrowed alias so the
   // closure handlers below get a `string` type.
   const activeInvitation: string = invitation;
-
-  async function handleCopy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(activeInvitation);
-      setCopyError(null);
-      setCopied(true);
-      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
-      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2_500);
-    } catch {
-      setCopied(false);
-      setCopyError("Could not copy automatically — select the link and copy it yourself.");
-      toast.error("Clipboard unavailable", {
-        description: "Select the link text and copy it manually.",
-      });
-    }
-  }
-
-  function handleSelectAll(): void {
-    const input = linkInputRef.current;
-    if (input === null) return;
-    input.focus();
-    input.select();
-  }
-
-  async function handleShare(): Promise<void> {
-    if (typeof navigator.share !== "function") return;
-    try {
-      await navigator.share({ url: activeInvitation, title: "Join my private chat" });
-    } catch (err: unknown) {
-      // AbortError means the user dismissed the share sheet — not an error.
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      toast.error("Share failed", {
-        description: "Copy the link and send it yourself.",
-      });
-    }
-  }
 
   async function copyCode(code: string): Promise<void> {
     try {
@@ -239,54 +185,7 @@ export function InvitationBanner(): React.ReactElement | null {
           </p>
         </div>
 
-        {/* Verifiable copy: a real readable input (select-on-focus plus an
-            explicit Select all), a Copy button that admits "Copied", and an
-            inline error when the clipboard write is rejected. */}
-        <div>
-          <div className="flex items-stretch gap-2">
-            <input
-              ref={linkInputRef}
-              readOnly
-              value={activeInvitation}
-              onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select()}
-              className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 min-w-0 flex-1 rounded-md border px-2 py-1 font-mono text-xs focus-visible:ring-1 focus-visible:outline-none"
-              aria-label="Invitation link"
-              data-testid={TESTIDS.invitationLinkInput}
-            />
-            <Button variant="outline" size="sm" onClick={() => void handleCopy()}>
-              {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
-              {copied ? "Copied" : "Copy link"}
-            </Button>
-            {canShare && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void handleShare()}
-                aria-label="Share invitation link"
-              >
-                <Share2Icon className="size-4" />
-                Share
-              </Button>
-            )}
-          </div>
-          <div className="mt-1 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleSelectAll}
-              className="text-primary focus-visible:ring-ring/50 rounded-sm text-xs underline underline-offset-4 hover:opacity-80 focus-visible:ring-1 focus-visible:outline-none"
-            >
-              Select all
-            </button>
-            <span aria-live="polite" className="text-muted-foreground text-xs">
-              {copied ? "Link copied to clipboard." : ""}
-            </span>
-          </div>
-          {copyError !== null && (
-            <p className="text-destructive mt-1 text-xs" role="alert">
-              {copyError}
-            </p>
-          )}
-        </div>
+        <InvitationLinkField invitation={activeInvitation} />
 
         <ExtraCodeControl
           enabled={codeEnabled}
@@ -300,6 +199,127 @@ export function InvitationBanner(): React.ReactElement | null {
           onCopyCode={copyCode}
         />
       </div>
+    </div>
+  );
+}
+
+export interface InvitationLinkFieldProps {
+  /** The full invitation URL to display/copy/share. */
+  readonly invitation: string;
+  /** navigator.share title; defaults to the 1:1 wording. */
+  readonly shareTitle?: string;
+}
+
+/**
+ * The verifiable link-copy field shared by the 1:1 {@link InvitationBanner}
+ * and the group view's invitation panel (Phase 7a): a real readable input
+ * (select-on-focus plus an explicit Select all — a11y and Tauri webviews
+ * where clipboard/share may be absent), a Copy button that admits "Copied",
+ * an inline error when the clipboard write is rejected, and a Share button
+ * rendered solely when `navigator.share` actually exists (feature-detected
+ * after mount so SSR and first paint stay identical everywhere).
+ */
+export function InvitationLinkField({
+  invitation,
+  shareTitle = "Join my private chat",
+}: InvitationLinkFieldProps): React.ReactElement {
+  const linkInputRef = React.useRef<HTMLInputElement | null>(null);
+  // Verifiable copy: explicit "Copied" feedback plus an inline error when
+  // the clipboard write is rejected. A transient "copied" state resets on a
+  // timer (tracked so unmount cannot leak it).
+  const [copied, setCopied] = React.useState(false);
+  const [copyError, setCopyError] = React.useState<string | null>(null);
+  const copyTimerRef = React.useRef<number | null>(null);
+  const [canShare, setCanShare] = React.useState(false);
+
+  React.useEffect(() => {
+    setCanShare(typeof navigator !== "undefined" && typeof navigator.share === "function");
+    return () => {
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
+  async function handleCopy(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(invitation);
+      setCopyError(null);
+      setCopied(true);
+      if (copyTimerRef.current !== null) window.clearTimeout(copyTimerRef.current);
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 2_500);
+    } catch {
+      setCopied(false);
+      setCopyError("Could not copy automatically — select the link and copy it yourself.");
+      toast.error("Clipboard unavailable", {
+        description: "Select the link text and copy it manually.",
+      });
+    }
+  }
+
+  function handleSelectAll(): void {
+    const input = linkInputRef.current;
+    if (input === null) return;
+    input.focus();
+    input.select();
+  }
+
+  async function handleShare(): Promise<void> {
+    if (typeof navigator.share !== "function") return;
+    try {
+      await navigator.share({ url: invitation, title: shareTitle });
+    } catch (err: unknown) {
+      // AbortError means the user dismissed the share sheet — not an error.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      toast.error("Share failed", {
+        description: "Copy the link and send it yourself.",
+      });
+    }
+  }
+
+  return (
+    <div>
+      <div className="flex items-stretch gap-2">
+        <input
+          ref={linkInputRef}
+          readOnly
+          value={invitation}
+          onFocus={(e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select()}
+          className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 min-w-0 flex-1 rounded-md border px-2 py-1 font-mono text-xs focus-visible:ring-1 focus-visible:outline-none"
+          aria-label="Invitation link"
+          data-testid={TESTIDS.invitationLinkInput}
+        />
+        <Button variant="outline" size="sm" onClick={() => void handleCopy()}>
+          {copied ? <CheckIcon className="size-4" /> : <CopyIcon className="size-4" />}
+          {copied ? "Copied" : "Copy link"}
+        </Button>
+        {canShare && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleShare()}
+            aria-label="Share invitation link"
+          >
+            <Share2Icon className="size-4" />
+            Share
+          </Button>
+        )}
+      </div>
+      <div className="mt-1 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleSelectAll}
+          className="text-primary focus-visible:ring-ring/50 rounded-sm text-xs underline underline-offset-4 hover:opacity-80 focus-visible:ring-1 focus-visible:outline-none"
+        >
+          Select all
+        </button>
+        <span aria-live="polite" className="text-muted-foreground text-xs">
+          {copied ? "Link copied to clipboard." : ""}
+        </span>
+      </div>
+      {copyError !== null && (
+        <p className="text-destructive mt-1 text-xs" role="alert">
+          {copyError}
+        </p>
+      )}
     </div>
   );
 }
