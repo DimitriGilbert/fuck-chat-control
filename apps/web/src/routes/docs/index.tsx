@@ -73,6 +73,14 @@ function DocsIndexComponent() {
             </span>
           </li>
           <li>
+            <Link to="/docs/protocol-group">Protocol v2 — group chats</Link>
+            <br />
+            <span className="text-muted-foreground">
+              The group extension: a mesh of v1 pairwise links, peerId-addressed broker signaling,
+              and the author-signed membership list. v1 is untouched.
+            </span>
+          </li>
+          <li>
             <Link to="/docs/deployment">Deployment guide</Link>
             <br />
             <span className="text-muted-foreground">

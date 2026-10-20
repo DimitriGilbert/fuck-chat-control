@@ -189,33 +189,26 @@ describe("resume glare role derivation (R3F4 / Phase 8) — real broker semantic
     expect(messagesOfKind(aResume, "offer")).toBe(1);
 
     // The broker relays A's offer to B. B never saw a join notification, so
-    // the offer itself promotes the peer (R6/F7 auto-promotion) — which
-    // fires onPeerJoin and, post-fix, B originates its own offer too. B is
-    // the IMPOLITE side with an offer now in flight, so perfect negotiation
-    // makes it IGNORE A's offer: the impolite side's offer is the one that
-    // survives a collision.
+    // the offer itself promotes the peer to present (R6/F7 auto-promotion) —
+    // presence ONLY, no join event: the joiner never originates, it simply
+    // answers the offer that promoted. Exactly one SDP direction exists.
     bResume.deliver(rawOfKind(aResume, "offer") as string);
     await flush();
-    expect(messagesOfKind(bResume, "offer")).toBe(1);
-    expect(messagesOfKind(bResume, "answer")).toBe(0);
+    expect(messagesOfKind(bResume, "offer")).toBe(0);
+    expect(messagesOfKind(bResume, "answer")).toBe(1);
+    const bPeerAnswer = sideB.peers[1];
+    expect(bPeerAnswer).toBeDefined();
+    expect(bPeerAnswer?.localDescTypes).toEqual(["answer"]);
+    expect(bPeerAnswer?.remoteDescTypes).toEqual(["offer"]);
 
-    // B's offer crosses back to A. A is the POLITE side with its own offer
-    // in flight: it rolls its own back and answers B's.
-    aResume.deliver(rawOfKind(bResume, "offer") as string);
+    // B's answer returns to A; the exchange completes with A's single offer
+    // — no rollback, no second offer anywhere.
+    aResume.deliver(rawOfKind(bResume, "answer") as string);
     await flush();
-    expect(messagesOfKind(aResume, "answer")).toBe(1);
     const aPeer = sideA.peers[1];
     expect(aPeer).toBeDefined();
-    expect(aPeer?.localDescTypes).toContain("rollback");
-    expect(aPeer?.remoteDescTypes).toEqual(["offer"]);
-
-    // A's answer returns to B; B's exchange completes. Exactly one offer
-    // survived the collision — B's — and it was answered exactly once.
-    bResume.deliver(rawOfKind(aResume, "answer") as string);
-    await flush();
-    const bPeer = sideB.peers[1];
-    expect(bPeer).toBeDefined();
-    expect(bPeer?.remoteDescTypes).toEqual(["answer"]);
+    expect(aPeer?.localDescTypes).toEqual(["offer"]);
+    expect(aPeer?.remoteDescTypes).toEqual(["answer"]);
 
     sideA.controller.dispose();
     sideB.controller.dispose();
@@ -291,19 +284,16 @@ describe("resume glare role derivation (R3F4 / Phase 8) — real broker semantic
     const resumedA = sideA.controller.getActiveConversationId() as ConversationId;
 
     // Phase 1: A seated, B joins → A (Responder) offers. B auto-promotes on
-    // the inbound offer and originates its own; the collision resolves in
-    // favor of impolite B's offer (A rolls back and answers), as in the
-    // sequential test above.
+    // the inbound offer (presence-only — the joiner never originates) and
+    // answers it directly, as in the sequential test above.
     aResume.deliver(joinMessage(resumedA));
     await flush();
     expect(messagesOfKind(aResume, "offer")).toBe(1);
     bResume.deliver(rawOfKind(aResume, "offer") as string);
     await flush();
-    expect(messagesOfKind(bResume, "offer")).toBe(1);
-    aResume.deliver(rawOfKind(bResume, "offer") as string);
-    await flush();
-    expect(messagesOfKind(aResume, "answer")).toBe(1);
-    bResume.deliver(rawOfKind(aResume, "answer") as string);
+    expect(messagesOfKind(bResume, "offer")).toBe(0);
+    expect(messagesOfKind(bResume, "answer")).toBe(1);
+    aResume.deliver(rawOfKind(bResume, "answer") as string);
     await flush();
 
     // Phase 2: A's signaling socket dies (network drop). Real broker
@@ -337,18 +327,17 @@ describe("resume glare role derivation (R3F4 / Phase 8) — real broker semantic
     expect(messagesOfKind(aRetry, "offer")).toBe(0);
 
     // The broker relays B's offer to the re-dialer. A's socket is fresh, so
-    // the offer itself promotes the peer (R6/F7) — A briefly originates a
-    // nascent offer, but A is POLITE with the inbound offer pending, so it
-    // rolls the nascent one back (abandoned before the wire) and answers B.
+    // the offer itself promotes the peer to present (R6/F7) — presence only,
+    // no counter-offer — and A answers B directly. No rollback is involved:
+    // the joiner never originates, so no offer exists to roll back.
     aRetry.deliver(rawOfKind(bRetry, "offer") as string);
     await flush();
     expect(messagesOfKind(aRetry, "answer")).toBe(1);
     expect(messagesOfKind(aRetry, "offer")).toBe(0);
     const retryPeer = sideA.peers[2];
     expect(retryPeer).toBeDefined();
-    expect(retryPeer?.localDescTypes).toContain("rollback");
+    expect(retryPeer?.localDescTypes).toEqual(["answer"]);
     expect(retryPeer?.remoteDescTypes).toEqual(["offer"]);
-    expect(sideA.controller.getState().active?.connectionState).toBe("signaling");
 
     // A's answer returns to B; the re-established exchange completes.
     bRetry.deliver(rawOfKind(aRetry, "answer") as string);

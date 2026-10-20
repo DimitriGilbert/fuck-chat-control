@@ -44,8 +44,10 @@ export interface GroupSignalingClientOptions {
  * broker's `{t:"join", roomId, peerId}` notification; the newcomer learns of
  * seated members only when their addressed offers arrive (the broker never
  * echoes the roster), so a first handshake initiation from an unknown peerId
- * promotes that peer to present — the same auto-promotion rule the 1:1 client
- * applies to `peerPresent`.
+ * promotes that peer to present — presence only, WITHOUT the onPeerJoin
+ * callback, because the arriving offer/answer already carries the link's
+ * creation duty and a counter-offer would violate the single-offerer rule
+ * (§2.1).
  */
 export class GroupSignalingClient {
   private readonly brokerUrl: string;
@@ -213,12 +215,17 @@ export class GroupSignalingClient {
     // Auto-promotion, narrowed to handshake initiations like the 1:1 client:
     // the newcomer has no roster (the broker only notifies already-seated
     // members), so a first offer/answer from an unknown peerId is how it
-    // learns that member exists. A pure-ICE frame from an unknown peer is
-    // still dispatched below but does NOT promote — it cannot prove intent
-    // to establish a session on its own.
+    // learns that member exists. Promotion marks PRESENCE ONLY — it must not
+    // fire onPeerJoin: that callback carries the offer duty for genuinely
+    // new seats (only seated members offer to newcomers, §2.1), and firing
+    // it for an inbound handshake would make this side originate a
+    // counter-offer in the same instant the offer itself is dispatched
+    // below — a crossing-offer glare that kills the pair in real browsers.
+    // A pure-ICE frame from an unknown peer is still dispatched below but
+    // does NOT promote — it cannot prove intent to establish a session on
+    // its own.
     if (!this.present.has(from) && isHandshakeInitiation(message)) {
       this.present.add(from);
-      this.handlers.onPeerJoin?.(from);
     }
     switch (message.kind) {
       case "offer":

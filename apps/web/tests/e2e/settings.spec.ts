@@ -73,8 +73,13 @@ test.describe("settings sheet", () => {
       await composer.press("Enter");
 
       await pair.pageA.getByRole("button", { name: "Open settings" }).click();
-      // Wait for the Sheet to mount before interacting with its tabs.
-      await expect(pair.pageA.getByText("Settings")).toBeVisible({ timeout: 5_000 });
+      // Wait for the Sheet to mount before interacting with its tabs. The
+      // "Settings" text also matches the sidebar's "Open settings" trigger
+      // (substring, case-insensitive), so assert on the sheet's heading
+      // inside the dialog landmark instead of bare text.
+      await expect(
+        pair.pageA.getByRole("dialog").getByRole("heading", { name: "Settings" }),
+      ).toBeVisible({ timeout: 20_000 });
       await pair.pageA.getByRole("tab", { name: "Data" }).click();
       await expect(pair.pageA.getByText("Portable bundle")).toBeVisible({ timeout: 5_000 });
 
@@ -103,7 +108,9 @@ test.describe("settings sheet", () => {
       // The wipe's confirm closes the settings sheet (onConfirm calls onClose).
       // Re-open it to reach the import affordance.
       await pair.pageA.getByRole("button", { name: "Open settings" }).click();
-      await expect(pair.pageA.getByText("Settings")).toBeVisible({ timeout: 5_000 });
+      await expect(
+        pair.pageA.getByRole("dialog").getByRole("heading", { name: "Settings" }),
+      ).toBeVisible({ timeout: 20_000 });
       await pair.pageA.getByRole("tab", { name: "Data" }).click();
 
       // Import: pick the exported file, re-enter the same passphrase, Merge.

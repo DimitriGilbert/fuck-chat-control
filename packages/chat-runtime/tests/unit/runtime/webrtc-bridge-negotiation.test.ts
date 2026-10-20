@@ -324,8 +324,8 @@ describe("R7F8: negotiation-generation guard vs reconnect()/close()", () => {
     expect(pc1).toBeDefined();
     pc1.parkRemoteDescriptions = true;
 
-    // The inbound offer auto-promotes the peer (fires onPeerJoin → the
-    // polite side's nascent offer arms) and parks handleRemoteOffer inside
+    // The inbound offer auto-promotes the peer to present (no join event —
+    // the joiner never counter-offers) and parks handleRemoteOffer inside
     // setRemoteDescription.
     first.deliver(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "remote-offer" } }));
     await flush();

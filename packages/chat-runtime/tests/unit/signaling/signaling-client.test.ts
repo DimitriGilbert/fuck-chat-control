@@ -111,7 +111,7 @@ describe("SignalingClient — relay both ways", () => {
     clientB.close();
   });
 
-  it("fires onPeerJoin on the first handshake initiation (offer/answer)", () => {
+  it("marks presence (without onPeerJoin) on the first handshake initiation (offer/answer)", () => {
     const a = new MockSignalingSocket();
     const b = new MockSignalingSocket();
     const ha = recordingHandlers();
@@ -119,9 +119,15 @@ describe("SignalingClient — relay both ways", () => {
     const clientA = createClient(Role.Initiator, ha, a);
     createClient(Role.Responder, hb, b);
 
+    // An inbound offer promotes the peer to present — but must NOT fire
+    // onPeerJoin: that callback carries the offer duty for the broker-
+    // notified side only, and firing it here makes the joiner originate a
+    // counter-offer in the same dispatch the offer arrives in — a crossing
+    // glare that kills real-browser negotiations.
     clientA.sendOffer({ type: "offer", sdp: "o" });
     b.deliver(a.sent[a.sent.length - 1]);
-    expect(hb.events).toContain("join");
+    expect(hb.events).not.toContain("join");
+    expect(hb.offers).toHaveLength(1);
     expect(clientA.isPeerPresent()).toBe(false);
 
     // A pure-ICE frame on a side that has not yet seen offer/answer must NOT
@@ -131,9 +137,10 @@ describe("SignalingClient — relay both ways", () => {
     expect(ha.events).not.toContain("join");
     expect(clientA.isPeerPresent()).toBe(false);
 
-    // The legitimate path — an answer from the peer — still promotes.
+    // The legitimate path — an answer from the peer — still promotes
+    // presence, again without a join event.
     a.deliver(JSON.stringify({ t: "answer", sdp: { type: "answer", sdp: "y" } }));
-    expect(ha.events).toContain("join");
+    expect(ha.events).not.toContain("join");
     expect(clientA.isPeerPresent()).toBe(true);
     clientA.close();
   });
@@ -279,8 +286,10 @@ describe("SignalingClient — peer leave", () => {
     const ha = recordingHandlers();
     const client = createClient(Role.Initiator, ha, a);
 
+    // The offer promotes the peer to present (presence-only — no join
+    // event), so the socket close afterwards reports a peer leave.
     a.deliver(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "x" } }));
-    expect(ha.events).toContain("join");
+    expect(client.isPeerPresent()).toBe(true);
 
     a.serverClose();
     expect(ha.events).toContain("leave");

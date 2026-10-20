@@ -314,21 +314,19 @@ export class WebRtcBridge {
   // --- internal handlers ---
 
   private handlePeerJoin(): void {
-    // Any seated side that receives peer-join originates the offer; role
-    // determines POLITENESS (glare resolution), never offer permission. The
-    // broker notifies ONLY the first-seated peer when a second joins (the
-    // joiner receives nothing), so a role gate here deadlocks whenever the
-    // derived Responder is the seated side — nobody offers and both peers
-    // hang in Signaling. The joining side's glare resolver is NOT unarmed
-    // when the relayed offer arrives: auto-promotion (R6/F7) fires onPeerJoin
-    // first, which runs initiateOffer → beginOffer() SYNCHRONOUSLY (R3F5) in
-    // the same message dispatch, before onOffer runs — so the joiner is
-    // already armed and answers because it is POLITE. An impolite joiner
-    // instead ignores the inbound offer and keeps its own; convergence still
-    // holds because a polite seated side rolls its own offer back and answers
-    // the joiner's. In the crossing case (both seated, both holding a join
-    // notification from the other's re-entry), both offer and the glare
-    // machinery resolves by politeness — the impolite side's offer survives.
+    // Only the broker's `join` notification reaches this handler: the broker
+    // notifies ONLY the already-seated peer when a second joins, so this is
+    // the single offer-origination point — the offer/answer direction is
+    // deterministic and the joiner simply answers the offer that auto-
+    // promoted it to present (the signaling client marks presence WITHOUT
+    // firing onPeerJoin for handshake-initiated promotions, so the joiner
+    // never originates a counter-offer — crossing-offer glare cannot arise
+    // on establishment; see signaling-client.ts R6/F7). Glare machinery
+    // still governs the genuinely-crossing case: a broker `join` arriving
+    // while a negotiation is already live (seat turnover — the departed
+    // peer's silent leave is never relayed) is a FRESH presence edge; the
+    // stale negotiation is released below and a fresh offer is originated
+    // under the politeness rules.
     // Offers are ordinary relayed SDP, so this stays within the frozen wire
     // protocol. Create the data channel BEFORE the offer so the SDP
     // advertises it, and offer at most once.

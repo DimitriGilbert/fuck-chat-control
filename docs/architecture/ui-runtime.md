@@ -22,9 +22,11 @@ ChatController  ── browser runtime glue (non-React; testable in isolation)
    ├── IdentityManager   (generate once, persist privateKey + publicKey to localStorage)
    ├── AtRestKeyManager  (generate at-rest key, persist; optional passphrase wrap)
    ├── ConversationRepository  (in-memory; serialize()/reload() available, not yet wired to localStorage)
-   └── per-conversation: ConversationOrchestrator + WebRtcBridge
+   ├── per-conversation: ConversationOrchestrator + WebRtcBridge
+   └── per-group: GroupSession + GroupWebrtcManager  (protocol-v2)
    ▼
 WebRtcBridge  ── connects a SignalingClient + WebRtcAdapter to an orchestrator
+GroupWebrtcManager ── one broker seat + one peer connection per member pair
 ```
 
 The repository is in-memory in the current build. `serialize()` and
@@ -106,6 +108,36 @@ is testable in isolation. Its public API:
 It emits state changes through a subscribe/emit pattern that the React
 provider turns into React state.
 
+### Group API (protocol-v2)
+
+Groups mirror the conversation API surface. Each live group is a
+`ChatGroupSession` record bundling a `GroupSession` (membership + one
+`ConversationOrchestrator` per member link) and a `GroupWebrtcManager`
+(the persistent broker seat + per-member peer connections) — the group
+analogue of `ChatSession`/`WebRtcBridge`, built by
+`runtime/group-session-host.ts`.
+
+- `startGroup(options?: { code?, name?, displayName? }): Promise<{ invitation: string }>`
+  — seat this device as the group author; `code` mints a PAKE group (one
+  6-digit code authenticates EVERY pairwise link), `name` is the local
+  sidebar label, `displayName` is announced on the member list.
+- `joinGroup(fragment, options?: { displayName? })` — join through the
+  shared invitation link (same `#<hex>(~<code>)?` grammar as 1:1).
+- `leaveGroup(id?)`, `removeGroupMember(id, identityPub)` (author only),
+  `sendGroupText(id, text)`, `sendGroupFile(id, file)`,
+  `setGroupDisplayName(id, name)` (own member name), `setGroupDraft(id,
+draft)`, `selectGroup(id)`, `markGroupSafetyVerified(id?)`.
+- State carries `activeGroup` / `activeGroupId` (mutually exclusive with
+  the active conversation) and `groups` summaries for the unified session
+  list: member count, `k/n connected` link summary, epoch-bound group
+  safety number, per-member link state, and the in-memory attributed
+  transcript (group history is session-scoped — never persisted, never
+  exported).
+- The configured member cap arrives via `/ice-config` as
+  `groupMaxMembers` (`GROUP_MAX_MEMBERS`, default 8, hard ceiling 16) and
+  is threaded into the session and the broker-facing manager — the same
+  delivery pattern as `publicBaseUrl`.
+
 ## ChatProvider (`apps/web/src/features/chat/runtime/chat-provider.tsx`)
 
 - React context exposing a `useChat()` hook that returns
@@ -117,20 +149,35 @@ provider turns into React state.
 - Resolves browser dependencies at runtime: the broker URL is derived from
   `window.location` as `${https ? "wss" : "ws"}://${host}/ws`, and the ICE
   servers are fetched from `/ice-config` (falling back to `[]` on failure).
-  The SPAKE2 WASM module URL is configured here.
+  The same fetch carries `groupMaxMembers` — the operator-configured
+  `GROUP_MAX_MEMBERS` seat cap — which is clamped to `2..16` and passed to
+  the controller as `maxGroupMembers`. The SPAKE2 WASM module URL is
+  configured here.
 
 ## Routes (TanStack file routes)
 
 Routes live in `apps/web/src/routes/`.
 
 - `/` — landing page (purpose, security model, no-account, STUN/TURN
-  coverage, link to docs) plus the conversation list and the conversation
-  view. The conversation view is hash-driven on `/`: joining is `/#<hex>`
-  (or `/#<hex>~<code>` for PAKE), parsed from `window.location.hash`. There
-  is no `/start` route and no `/c/$conversationId` server route — the
-  invitation lives entirely in the fragment and never reaches the server.
-- `/docs/`, `/docs/protocol`, `/docs/security`, `/docs/deployment`,
-  `/docs/threat-model` — the rendered documentation pages.
+  coverage, link to docs) plus the unified session list, the conversation
+  view, and the group view. Joining is hash-driven on `/`: `/#<hex>` (or
+  `/#<hex>~<code>` for PAKE), parsed from `window.location.hash`. Because
+  pair and group links carry identical bytes (protocol-v2 §8), a detected
+  fragment opens the join-mode dialog — the user picks "Join as 1:1
+  conversation" (`joinConversation`) or "Join as group" (`joinGroup`), and
+  the credential-laden hash is scrubbed from the address bar the moment it
+  is consumed. There is no `/start` route and no `/c/$conversationId`
+  server route — the invitation lives entirely in the fragment and never
+  reaches the server.
+- Group surfaces: the sidebar's "New group" dialog (optional name, own
+  member display name, and the same 6-digit extra-code affordance as 1:1),
+  the group view (`k/n connected` link summary, author invitation panel,
+  attributed transcript, per-group draft), the members sheet (member list,
+  self name edit, author-only remove with confirm), and the epoch-bound
+  group safety-number dialog.
+- `/docs/`, `/docs/protocol`, `/docs/protocol-group`, `/docs/security`,
+  `/docs/deployment`, `/docs/threat-model` — the rendered documentation
+  pages.
 - Settings sheet: passphrase controls, export/import, clear/wipe.
 
 ## Key behavioral rules
@@ -150,8 +197,9 @@ Routes live in `apps/web/src/routes/`.
 
 ## Verification
 
-- Playwright E2E against a real dev server, two isolated browser contexts,
+- Playwright E2E against a real dev server, isolated browser contexts,
   loopback WebRTC (no STUN needed locally). Includes a dedicated suite for
-  PAKE-coded invitations.
+  PAKE-coded invitations and a three-context group suite covering the
+  create/join flow, attributed fan-out messaging, and member removal.
 - Live two-browser E2E (via agent-browser), proving a real conversation
   works between two profiles.

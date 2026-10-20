@@ -192,9 +192,13 @@ describe("GroupSignalingClient — peer presence", () => {
 
     // The newcomer learns of seated members only via their addressed offers —
     // the broker never echoes the roster — so the first offer promotes.
+    // Promotion is presence-only: onPeerJoin must NOT fire here, or the
+    // consumer would originate a counter-offer the same instant the inbound
+    // offer is dispatched — a crossing-offer glare (§2.1 seats offer; the
+    // newcomer answers).
     const offer = { type: "offer", sdp: "v=0" };
     socket.deliver(JSON.stringify({ t: "offer", sdp: offer, from: PEER_B }));
-    expect(handlers.events).toEqual([`join:${PEER_B}`]);
+    expect(handlers.events).toEqual([]);
     expect(client.isPeerPresent(PEER_B)).toBe(true);
     expect(handlers.offers).toEqual([{ from: PEER_B, sdp: offer }]);
 
@@ -232,10 +236,11 @@ describe("GroupSignalingClient — peer presence", () => {
     const client = createClient(OWN_PEER, handlers, socket);
 
     // isHandshakeInitiation covers both offer and answer: an answer from an
-    // unknown peerId is still proof of intent to establish a session.
+    // unknown peerId is still proof of intent to establish a session. Same
+    // presence-only promotion rule as the offer case — no onPeerJoin fire.
     const answer = { type: "answer", sdp: "ans" };
     socket.deliver(JSON.stringify({ t: "answer", sdp: answer, from: PEER_B }));
-    expect(handlers.events).toEqual([`join:${PEER_B}`]);
+    expect(handlers.events).toEqual([]);
     expect(client.isPeerPresent(PEER_B)).toBe(true);
     expect(handlers.answers).toEqual([{ from: PEER_B, sdp: answer }]);
     client.close();

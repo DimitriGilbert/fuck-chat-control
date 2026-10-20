@@ -210,9 +210,19 @@ export class SignalingClient {
     // party injecting noise — so a pure-ICE frame from an unknown peer is
     // ignored rather than promoting the sender to present. The join-reflection
     // promotion above (line 140) still fires first and is unaffected.
+    //
+    // Promotion is presence-only: it must NOT fire onPeerJoin. That callback
+    // carries the offer duty for the broker-notified (already-seated) side —
+    // only it may originate, so the offer/answer direction is deterministic.
+    // Firing it here makes the JOINER originate a counter-offer in the same
+    // message dispatch that delivers the offer it must answer: in a real
+    // RTCPeerConnection the crossing offers race createOffer/rollback/
+    // setLocalDescription ordering on both ends and one side lands a
+    // description in the wrong signalingState — a silent negotiation death
+    // observed end-to-end in the two-browser e2e. The arriving offer/answer
+    // is dispatched below and creates the negotiation on its own.
     if (!this.peerPresent && isHandshakeInitiation(message)) {
       this.peerPresent = true;
-      this.handlers.onPeerJoin?.();
     }
     switch (message.kind) {
       case "offer":

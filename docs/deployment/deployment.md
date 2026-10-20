@@ -26,10 +26,15 @@ The TanStack Start (Nitro) server is the only process. It serves:
   sent to the client.
 
 There is no separate broker host. The broker is an in-process WebSocket
-handler at `apps/web/src/server/broker.ts` that keeps no persistent state,
-no presence table, and no application logs. Once a WebRTC data channel
-opens between two peers, both disconnect from the broker. (See "What the
-system protects" in the threat model.)
+handler at `apps/web/src/server/broker.ts` that keeps no persistent state
+and no application logs. For 1:1 conversations it also holds no presence
+table: once a WebRTC data channel opens between two peers, both disconnect
+from the broker. Group conversations are the exception — members stay
+seated in the broker room for the life of the group so late joiners can be
+admitted, so the broker observes the room id plus up to
+`GROUP_MAX_MEMBERS` online sockets while a group is active. It still sees
+no content. (See "What the system protects" and "Persistent broker seats"
+in the threat model.)
 
 A separate `coturn` container is defined in `docker-compose.yml` alongside
 `web`. `web` is HTTP behind traefik and uses `expose:`, so it stays on the
@@ -227,18 +232,19 @@ a TCP connect on 3478.
 
 The server env surface is small. From `packages/env/src/server.ts`:
 
-| Variable              | Required | Purpose                                                                                                                                                             |
-| --------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                                                                                               |
-| `CORS_ORIGIN`         | No       | The exact origin allowed on the broker WebSocket. Canonicalized at parse time — `https://host/`, `https://host:443`, and `HTTPS://HOST` all fold to `https://host`. |
-| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`).                                                                    |
-| `STUN_URL`            | No       | Public STUN endpoint with an explicit `stun:`/`stuns:` scheme, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`.                           |
-| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay) with an explicit `turn:`/`turns:` scheme, e.g. `turn:turn.example.com:3478`.                                                   |
-| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint; must use the `turns:` scheme, e.g. `turns:turn.example.com:5349`.                                                                    |
-| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials (minimum 32 characters). Never sent to the client.                                                                  |
-| `TURN_REALM`          | No       | coturn `realm` directive. Set to your own domain; no default (empty falls back to coturn's).                                                                        |
-| `TURN_EXTERNAL_IP`    | No       | Host's public IPv4 when ports are NAT-forwarded (docker behind NAT); maps to coturn `external-ip`.                                                                  |
-| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                                                                                      |
+| Variable              | Required | Purpose                                                                                                                                                                           |
+| --------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`            | Yes      | `production` (set in the Dockerfile).                                                                                                                                             |
+| `CORS_ORIGIN`         | No       | The exact origin allowed on the broker WebSocket. Canonicalized at parse time — `https://host/`, `https://host:443`, and `HTTPS://HOST` all fold to `https://host`.               |
+| `PUBLIC_BASE_URL`     | No       | The public origin used as the invitation-link prefix (surfaced to the client via `/ice-config`).                                                                                  |
+| `STUN_URL`            | No       | Public STUN endpoint with an explicit `stun:`/`stuns:` scheme, e.g. `stun:turn.example.com:3478`. Served to the client via `/ice-config`.                                         |
+| `TURN_URL`            | No       | Public TURN endpoint (UDP/TCP relay) with an explicit `turn:`/`turns:` scheme, e.g. `turn:turn.example.com:3478`.                                                                 |
+| `TURN_TLS_URL`        | No       | Public TURN-over-TLS endpoint; must use the `turns:` scheme, e.g. `turns:turn.example.com:5349`.                                                                                  |
+| `TURN_SHARED_SECRET`  | No\*     | Server-held secret for minting TURN credentials (minimum 32 characters). Never sent to the client.                                                                                |
+| `TURN_REALM`          | No       | coturn `realm` directive. Set to your own domain; no default (empty falls back to coturn's).                                                                                      |
+| `TURN_EXTERNAL_IP`    | No       | Host's public IPv4 when ports are NAT-forwarded (docker behind NAT); maps to coturn `external-ip`.                                                                                |
+| `GROUP_MAX_MEMBERS`   | No       | Seat cap for group-mode broker rooms — the maximum members a group can hold. Optional integer 2–16 (inclusive); defaults to 8 when unset. Served to the client via `/ice-config`. |
+| `SKIP_ENV_VALIDATION` | No       | Skips env validation entirely. Used during the Docker build; unset at runtime.                                                                                                    |
 
 Client side (`packages/env/src/web.ts`): none. The client bakes no ICE
 endpoints. STUN/TURN coordinates are fetched at runtime from `/ice-config`,
@@ -280,8 +286,13 @@ service deployable on Dokploy without a hard failure at interpolation time.
 
 The broker keeps nothing. From the [threat model](../architecture/threat-model.md):
 
-- The broker holds no persistent state, no presence table, and no message
-  log.
+- For 1:1 conversations the broker holds no persistent state, no presence
+  table, and no message log — both peers vacate the room once their data
+  channel opens.
+- Group rooms are the one stateful surface: members stay seated for the
+  life of the group, so the broker observes the room id and the presence
+  of up to `GROUP_MAX_MEMBERS` sockets while a group is active — still no
+  content, and still nothing written to durable state.
 - There are no application logs.
 - "No persistence" means the application retains none; it does not mean
   observation is impossible.
@@ -356,9 +367,9 @@ packages/` returns no matches. The deployment must not reintroduce any.
 - **No server-side message-key or identity material in env config.**
   `packages/env/src/server.ts` defines `CORS_ORIGIN`, `NODE_ENV`,
   `PUBLIC_BASE_URL`, the public ICE endpoint URLs
-  (`STUN_URL` / `TURN_URL` / `TURN_TLS_URL`), `TURN_REALM`, and
-  `TURN_SHARED_SECRET`. There is no message-key config and no identity-key
-  config. All cryptographic secrets protecting user content live in the
+  (`STUN_URL` / `TURN_URL` / `TURN_TLS_URL`), `TURN_REALM`,
+  `TURN_SHARED_SECRET`, and `GROUP_MAX_MEMBERS`. There is no message-key
+  config and no identity-key config. All cryptographic secrets protecting user content live in the
   user's browser (origin-scoped storage); none are sent to the server. The
   single server-held secret is `TURN_SHARED_SECRET`, used only to mint
   time-limited TURN credentials — it is never serialized into a response,

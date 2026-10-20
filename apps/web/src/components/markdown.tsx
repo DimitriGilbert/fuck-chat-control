@@ -46,9 +46,12 @@ function resolveDocsHref(href: string): string {
   if (hasDangerousScheme(href)) return "#";
   if (href.startsWith("#")) return href;
   if (href.includes("threat-model.md")) return "/docs/threat-model";
+  if (href.includes("protocol-v2-group.md")) return "/docs/protocol-group";
   if (href.includes("protocol-v1.md")) return "/docs/protocol";
   if (href.includes("deployment.md")) return "/docs/deployment";
   if (href.includes("001-crypto-dependencies.md")) return "/docs/security#adrs";
+  if (href.includes("002-chunkid-indexing.md")) return "/docs/security#adrs";
+  if (href.includes("003-group-chat.md")) return "/docs/security#adrs";
   return href;
 }
 
