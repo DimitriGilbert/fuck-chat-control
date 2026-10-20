@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { connectionStatePill, establishPeerPair, TID } from "./_helpers";
+import { CONNECTION_STATE_TEXT, connectionStatePill, establishPeerPair, TID } from "./_helpers";
 
 /**
  * Scenarios 4, 5, 6: the real two-browser P2P conversation. Two isolated
@@ -134,7 +134,13 @@ test.describe("two-context P2P", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
+      // The synthetic drop below bypasses the composer's disabled-until-
+      // Connected gate, so it MUST wait for the real Connected state — the
+      // pill element itself is mounted in every state, and a file dropped
+      // while still handshaking is silently lost.
+      await expect(connectionStatePill(pair.pageA)).toContainText(CONNECTION_STATE_TEXT.connected, {
+        timeout: 45_000,
+      });
 
       // Drive a file send through a synthetic drop on the chat drop zone. The
       // native file picker is hard to drive from Playwright, so we dispatch a
@@ -182,7 +188,11 @@ test.describe("two-context P2P", () => {
     const pair = await establishPeerPair(browser);
 
     try {
-      await expect(connectionStatePill(pair.pageA)).toBeVisible({ timeout: 45_000 });
+      // Same drop-bypass race as the text-file test: wait for the real
+      // Connected label before dispatching the synthetic drop.
+      await expect(connectionStatePill(pair.pageA)).toContainText(CONNECTION_STATE_TEXT.connected, {
+        timeout: 45_000,
+      });
 
       // 1x1 PNG bytes.
       const pngBase64 =

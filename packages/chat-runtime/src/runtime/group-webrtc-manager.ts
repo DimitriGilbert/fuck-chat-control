@@ -522,9 +522,11 @@ export class GroupWebrtcManager {
   private async answerRemoteOffer(link: PeerLink, sdp: SessionDescription): Promise<void> {
     const generation = link.generation;
     if (link.localOfferInFlight) {
-      // Glare: both sides of the pair hold an in-flight offer (a crossing
-      // re-offer after a drop, or the newcomer auto-promotion initiating its
-      // own offer before the seated member's offer landed). Politeness
+      // Glare: both sides of the pair hold an in-flight offer — possible
+      // only as a crossing re-offer (a link reset or terminal-state rebuild
+      // racing the peer's own re-offer). An inbound offer marks presence
+      // only and never originates a counter-offer on this side, so initial
+      // establishment is glare-free by construction (§2.1). Politeness
       // decides — impolite keeps its offer and ignores the remote one.
       if (!this.politeFor(link)) return;
       try {
@@ -555,12 +557,13 @@ export class GroupWebrtcManager {
       if (generation !== link.generation) return;
       await link.pc.setLocalDescription(answer);
       if (generation !== link.generation) return;
-      // Answering their offer means THEY originated this pair's negotiation —
-      // the single-offerer rule gives them the re-offer duty on a drop. This
-      // is what keeps the auto-promotion edge consistent: the signaling
-      // client fires onPeerJoin for the seated member's first offer (marking
-      // the link seatedByUs) before the offer itself lands, and answering it
-      // corrects the flag so only one side of the pair ever re-originates.
+      // Answering their offer means THEY originated — or won the glare on —
+      // this pair's negotiation, so the single-offerer rule hands them the
+      // re-offer duty on a drop: only one side ever re-originates from
+      // handleLinkFailure. For a link created BY this inbound offer (the
+      // newcomer path) the flag is already false; the assignment matters
+      // after a polite glare rollback, where the broker's join notification
+      // had marked the link seatedByUs before the peer's crossing offer won.
       link.seatedByUs = false;
       this.signaling.sendAnswer(link.peerId, answer);
     } catch {
@@ -602,10 +605,11 @@ export class GroupWebrtcManager {
    * {@link resetLink} drops the session link — and its authenticated
    * identity — before the rebuilt connection negotiates, so only a
    * retained pin keeps re-offer glare identity-derived. With no pin,
-   * politeness falls back to the peerId ordering — smaller peerId is
-   * impolite — so a collision in the pre-identity window (a newcomer
-   * auto-promoted by the seated member's offer firing its own offer)
-   * still resolves deterministically on both ends.
+   * politeness falls back to the peerId ordering — the larger peerId is
+   * polite — so glare in the pre-identity window (crossing re-offers on a
+   * fresh or rebuilt pair whose v1 handshake has not yet authenticated the
+   * peer) still resolves deterministically on both ends: each side reads
+   * the same two peerIds off the wire.
    */
   private politeFor(link: PeerLink): boolean {
     const peerIdentity = this.refreshPeerIdentity(link.peerId);
@@ -628,13 +632,17 @@ export class GroupWebrtcManager {
       return;
     }
     link.channel = transport;
-    // The peer connection may already report "connected" when the channel
-    // arrives (responder path); if so, attach now. The channel's own `open`
-    // event re-checks — the state machine and the data channel transition
-    // independently, so either may be last.
-    if (link.pc.connectionState === "connected") {
-      this.maybeAttach(link);
-    }
+    // Attach the moment the channel can carry bytes — the same rule the 1:1
+    // bridge applies in maybeFireTransportReady (channel-ready alone, never
+    // gated on the pc's connectionState). The immediate call covers a
+    // channel already open when recorded (an onOpen listener registered
+    // after the fact never fires); the listener covers the usual
+    // still-connecting case. Gating on pc "connected" instead routinely
+    // lost the race the other way — the data channel's `open` lands BEFORE
+    // the connection-state transition, and inbound bytes (the peer's
+    // handshake Hello) arriving in that window hit a transport with no
+    // message handler yet and were dropped silently, dead-linking the pair.
+    this.maybeAttach(link);
     transport.onOpen((): void => {
       this.maybeAttach(link);
     });
@@ -688,7 +696,6 @@ export class GroupWebrtcManager {
     if (this.closed || link.attached) return;
     const channel = link.channel;
     if (channel === null || !channel.ready) return;
-    if (link.pc.connectionState !== "connected") return;
     try {
       this.options.session.attachLinkTransport(link.peerId, toPeerTransport(channel));
     } catch (err) {

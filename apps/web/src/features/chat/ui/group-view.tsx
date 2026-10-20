@@ -145,6 +145,14 @@ export function GroupView(): React.ReactElement | null {
         {connectedCount === 0 && (
           <span className="text-muted-foreground text-xs">waiting for members</span>
         )}
+        {/* Group link/session failures surface on the controller-level
+            `state.error` (onGroupSessionError) — rendered inline like the
+            1:1 status bar so a dead link is never silent. */}
+        {state.error !== null && (
+          <span className="text-destructive text-xs" title={state.error}>
+            {state.error}
+          </span>
+        )}
         {group.safetyNumber !== null && (
           <GroupSafetyDialog
             groupId={group.groupId}

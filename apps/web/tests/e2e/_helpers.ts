@@ -32,6 +32,23 @@ export const TID = {
   verifyPeer: "verify-peer",
   backToConversations: "back-to-conversations",
   conversationList: "conversation-list",
+  newGroup: "new-group",
+  groupNameInput: "group-name-input",
+  groupDisplayNameInput: "group-display-name-input",
+  groupCodeInput: "group-code-input",
+  createGroup: "create-group",
+  groupEntry: "group-entry",
+  joinAsPair: "join-as-pair",
+  joinAsGroup: "join-as-group",
+  groupView: "group-view",
+  groupMembers: "group-members",
+  groupMembersPanel: "group-members-panel",
+  groupMemberRow: "group-member-row",
+  groupMemberRemove: "group-member-remove",
+  groupMemberRemoveConfirm: "group-member-remove-confirm",
+  verifyGroup: "verify-group",
+  groupSafetyDialog: "group-safety-dialog",
+  groupSafetyConfirm: "group-safety-confirm",
 } as const;
 
 /** The connection-state pill in the chat header. */
@@ -115,8 +132,12 @@ export async function establishPeerPair(
   const invitation = (await invitationLinkInput(pageA).inputValue()) as string;
 
   // B opens the invitation URL fresh (its own context; the hash never reaches
-  // the server). This is the real user flow: the peer pastes the link.
+  // the server). This is the real user flow: the peer pastes the link. Since
+  // the join-mode decision point (protocol-v2 §8), the link lands on a
+  // chooser — the link bytes carry no mode bit — so the responder picks
+  // "Join as 1:1 conversation".
   await pageB.goto(invitation);
+  await pageB.getByTestId(TID.joinAsPair).click();
 
   return {
     pageA,

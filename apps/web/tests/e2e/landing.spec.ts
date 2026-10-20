@@ -138,9 +138,15 @@ test.describe("landing shell", () => {
       timeout: 10_000,
     });
 
-    // The fragment is retained in the URL bar (the join flow reads it from
-    // window.location.hash) and is NOT part of any server request.
-    expect(page.url()).toContain(`#${fragment}`);
+    // The join flow parsed the fragment client-side: the join-mode chooser
+    // (1:1 vs group — protocol-v2 §8) is the visible proof. Consuming the
+    // fragment also scrubs it from the URL bar (R11F2), so the credential
+    // does not linger in history — an even stronger guarantee than retention.
+    await expect(page.getByTestId(TID.joinAsPair)).toBeVisible({ timeout: 10_000 });
+    expect(page.url()).not.toContain(fragment);
+    expect(page.url()).not.toContain("#");
+
+    // The fragment is NOT part of any server request.
     for (const hit of serverHits) {
       expect(hit).not.toContain(fragment);
       expect(hit).not.toContain("#");
@@ -173,14 +179,16 @@ test.describe("landing shell", () => {
     await page.goto(`http://localhost:3001/#${fragment}`);
 
     // The shell rendered; the join flow parsed the coded invitation from the
-    // fragment client-side.
+    // fragment client-side — the join-mode chooser is the visible proof, and
+    // consuming the fragment scrubs the credential-laden hash from the URL
+    // bar (R11F2) so it cannot leak through history or a later copy.
     await expect(startConversationButton(page)).toBeVisible({
       timeout: 10_000,
     });
-
-    // The full coded invitation (hex + ~ + digits) is retained in the URL bar
-    // for the client-side join flow to consume.
-    expect(page.url()).toContain(`#${fragment}`);
+    await expect(page.getByTestId(TID.joinAsPair)).toBeVisible({ timeout: 10_000 });
+    expect(page.url()).not.toContain(hex);
+    expect(page.url()).not.toContain("~");
+    expect(page.url()).not.toContain(code);
 
     // The server never sees the fragment at all: not the hex id, not the `~`
     // separator, not the digit code, and no literal `#`. The `~` and the digit
@@ -211,8 +219,13 @@ test.describe("landing shell", () => {
     // At least one row (the just-started session) is present.
     await expect(rows.first()).toBeVisible();
 
-    // Assert that exactly one row carries the active attribute.
-    const activeRows = page.locator('[data-slot="sidebar-row"][data-active="true"]');
+    // Assert that exactly one row carries the active attribute. The sidebar
+    // mounts twice (desktop rail + mobile list-first home) so scope the
+    // lookup inside the first "Chats" navigation landmark.
+    const activeRows = page
+      .getByRole("navigation", { name: "Chats" })
+      .first()
+      .locator('[data-slot="sidebar-row"][data-active="true"]');
     await expect(activeRows).toHaveCount(1);
   });
 });

@@ -23,9 +23,12 @@ See [ADR 001](../adr/001-crypto-dependencies.md) and the
 The system protects the content of conversations against:
 
 - **The broker.** The broker sees only signaling metadata and encrypted
-  key-exchange bytes travelling over DTLS. It holds no persistent state, no
-  presence table, and no message log. Once the WebRTC data channel opens,
-  both peers disconnect from the broker and it leaves the data path.
+  key-exchange bytes travelling over DTLS. It holds no persistent state and
+  no message log, and — for 1:1 conversations — no presence table: once the
+  WebRTC data channel opens, both peers disconnect from the broker and it
+  leaves the data path. Group conversations keep members seated in the
+  broker room for the group's life (see "Persistent broker seats" below);
+  the broker still sees no content.
 - **Network observers between peers.** They see DTLS-encrypted traffic on
   the data channel and TLS/WSS-encrypted signaling.
 - **A passive observer who has not obtained the invitation link.** The

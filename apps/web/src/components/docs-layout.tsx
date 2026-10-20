@@ -6,6 +6,7 @@ const NAV: ReadonlyArray<readonly [string, string]> = [
   ["Security", "/docs/security"],
   ["Threat model", "/docs/threat-model"],
   ["Protocol v1", "/docs/protocol"],
+  ["Protocol v2 (group)", "/docs/protocol-group"],
   ["Deployment", "/docs/deployment"],
 ];
 

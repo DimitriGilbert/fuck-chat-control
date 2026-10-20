@@ -84,6 +84,9 @@ test.describe("PAKE-coded invitation", () => {
       expect(tamperedInvitation).not.toBe(codedInvitation);
 
       await pageB.goto(tamperedInvitation);
+      // Same join-mode chooser the helper clicks through: the link carries no
+      // mode bit, so the responder picks "Join as 1:1 conversation".
+      await pageB.getByTestId(TID.joinAsPair).click();
 
       // PAKE mismatch aborts loudly: BOTH sides must end up NOT-Connected
       // within a bounded window. We assert against the negative (no

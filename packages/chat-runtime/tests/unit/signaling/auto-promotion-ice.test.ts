@@ -71,40 +71,43 @@ describe("SignalingClient — auto-promotion gating (R6/F7)", () => {
     client.close();
   });
 
-  it("an offer from an unknown peer DOES flip peerPresent", () => {
+  it("an offer from an unknown peer DOES flip peerPresent (presence-only, no join event)", () => {
     const socket = new MockSignalingSocket();
     const handlers = recordingHandlers();
     const client = createClient(Role.Responder, handlers, socket);
 
     socket.deliver(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "o" } }));
     expect(client.isPeerPresent()).toBe(true);
-    expect(handlers.events).toContain("join");
+    // Presence is marked but onPeerJoin must NOT fire — the joiner never
+    // originates; the inbound offer itself is what it answers.
+    expect(handlers.events).not.toContain("join");
     expect(handlers.offers).toEqual([{ type: "offer", sdp: "o" }]);
     client.close();
   });
 
-  it("an answer from an unknown peer DOES flip peerPresent", () => {
+  it("an answer from an unknown peer DOES flip peerPresent (presence-only, no join event)", () => {
     const socket = new MockSignalingSocket();
     const handlers = recordingHandlers();
     const client = createClient(Role.Initiator, handlers, socket);
 
     socket.deliver(JSON.stringify({ t: "answer", sdp: { type: "answer", sdp: "y" } }));
     expect(client.isPeerPresent()).toBe(true);
-    expect(handlers.events).toContain("join");
+    expect(handlers.events).not.toContain("join");
     client.close();
   });
 
-  it("does not double-promote on a subsequent ICE after an offer promoted", () => {
+  it("does not re-promote on a subsequent ICE after an offer promoted", () => {
     const socket = new MockSignalingSocket();
     const handlers = recordingHandlers();
     const client = createClient(Role.Responder, handlers, socket);
 
     socket.deliver(JSON.stringify({ t: "offer", sdp: { type: "offer", sdp: "o" } }));
-    expect(handlers.events.filter((e) => e === "join")).toHaveLength(1);
+    expect(client.isPeerPresent()).toBe(true);
 
     socket.deliver(JSON.stringify({ t: "ice", candidate: { candidate: "z" } }));
-    // peerPresent already true — no second join event.
-    expect(handlers.events.filter((e) => e === "join")).toHaveLength(1);
+    // peerPresent already true — the candidate is dispatched, presence is
+    // unchanged, and no join event ever fires on the promotion path.
+    expect(handlers.events).not.toContain("join");
     expect(handlers.ices).toEqual([{ candidate: "z" }]);
     client.close();
   });

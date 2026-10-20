@@ -201,3 +201,60 @@ durable storage, but conversation history is not currently persisted to
 captured in an export/import bundle. The OPFS-backed repository
 (`BrowserDbConversationRepository`) remains an unimplemented stub. Only the
 identity-change warning flag uses a durable storage layer today.
+
+## Group links (protocol-v2)
+
+Group conversations are a mesh of ordinary pairwise v1 sessions coordinated
+by `GroupSession` (`packages/chat-runtime/src/group/group-session.ts`). The
+normative spec is [protocol-v2-group.md](protocol-v2-group.md); the design
+rationale is [ADR 003](../adr/003-group-chat.md). v1 behavior is unchanged —
+everything below is opt-in via the group-link seams.
+
+`GroupSession` owns one `ConversationOrchestrator` per member↔member link.
+Each link runs the full v1 handshake (Hello → Signature → optional SPAKE2)
+over its own WebRTC data channel, with the group's auth mode and PAKE code
+applied uniformly. A link orchestrator differs from a 1:1 orchestrator in
+three ways:
+
+- **Deferred conversation id.** The dep
+  `groupLinkConversationId(peerIdentityKey)` resolves the pairwise
+  conversation id inside the handshake, once the peer's Hello has revealed
+  its identity key — `SHA-256("fck-group-v1/pair" || groupId || min(idPubA,
+idPubB) || max(idPubA, idPubB))[0..16]`. `beginGroupLinkSession()` replaces
+  `start()`/`join()` (both throw in this mode): no invitation is minted, no
+  signaling socket is opened — the group's own signaling client stays
+  seated in the broker room on every link's behalf. Handshake bytes and
+  early frames that arrive while the id resolves are parked in bounded
+  buffers and replayed after resolution.
+- **Group control frames.** The link's `FrameSender`/`FrameReceiver` are
+  built with `allowGroupControlSubtypes`, which admits
+  `group_membership` (`0x07`) and `group_membership_request` (`0x08`) on
+  the wire. On a plain v1 link both remain a terminal protocol error.
+- **Membership-gated verification.** A link that reaches `Connected` is
+  "pending verify" until its authenticated peer identity is proven to
+  appear in the current signed member list; a bounded window
+  (`DEFAULT_PENDING_VERIFY_TIMEOUT_MS`, 30 s) closes unverifiable links as
+  `UnknownLinkIdentity`.
+
+The session wraps the shared `ConversationRepository` in a
+`PairwiseLinkRepository` (`packages/chat-runtime/src/store/`) and hands it
+to every link orchestrator. Rationale: a pairwise link's conversation id is
+runtime bookkeeping, not a durable conversation — group rooms cease when
+empty, there is no "resume group" flow, and a persisted pairwise row would
+leak into the resumable sidebar list and the export bundle as a ghost DM.
+The decorator therefore swallows conversation/message/display-name writes
+(no-op, never throws) while still delegating TOFU `peerIdentity` calls —
+falling back to a session-scoped pin map when no durable row exists, so a
+re-signaled link still binds the key its predecessor proved — and the
+group-record methods (`storeGroup`/`updateGroupMembership`/…) verbatim.
+
+Content stays on unmodified v1 frames: `sendText`/`sendFile` fan out once
+per connected link, and inbound attribution is the link's authenticated
+peer identity — never the ephemeral signaling `peerId`. The author is the
+sole admin: it maintains the canonical member list, signs each epoch with
+its identity key, and gossips `group_membership` to all links (a removed
+member included, so it learns of its own removal before its links close);
+members adopt the highest-epoch verifiably-signed list they receive and
+close links to members the new list drops. A member that finds itself
+absent self-ejects via `leave()`, which fires `onClosed` so the host tears
+down the broker seat and every peer connection with it.

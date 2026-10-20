@@ -317,21 +317,21 @@ describe("GroupWebrtcManager — offer/answer flow", () => {
     manager.leave();
   });
 
-  it("onOffer answers addressed after rolling back the auto-initiated offer (polite pre-identity)", async () => {
+  it("onOffer creates the pair and answers directly (no counter-offer)", async () => {
     const { manager, socket, pcs } = makeManager();
     manager.connect();
     socket.serverOpen();
 
-    // The inbound offer auto-promotes the peer (onPeerJoin fires first,
-    // arming a nascent offer), then the offer itself — own peerId is the
-    // larger label so this side is the polite one: it rolls back and
-    // answers instead of letting a second offer hit the wire.
+    // The inbound offer promotes the peer to present (no join callback —
+    // the single-offerer rule gives the OFFERER the origination duty), so
+    // this side creates the pair in the offer handler and answers without
+    // any glare rollback: exactly one SDP direction ever hits the wire.
     socket.deliver(JSON.stringify({ t: "offer", from: PEER_B, sdp: { type: "offer", sdp: "r" } }));
     await flush();
 
     const pc = pcs.instances[0];
     expect(pc).toBeDefined();
-    expect(pc.localDescTypes).toContain("rollback");
+    expect(pc.localDescTypes).toEqual(["answer"]);
     expect(pc.remoteDescTypes).toEqual(["offer"]);
     expect(countKind(socket, "offer")).toBe(0);
     const answer = socket.sent.map(parse).find((m) => m.t === "answer");
@@ -668,7 +668,7 @@ describe("GroupWebrtcManager — member cap", () => {
     socket.deliver(JSON.stringify({ t: "offer", from: PEER_C, sdp: { type: "offer", sdp: "r" } }));
     await flush();
 
-    // The auto-promotion join for PEER_C is over the cap → no pair, no answer.
+    // The auto-promoted offer for PEER_C is over the cap → no pair, no answer.
     expect(pcs.instances).toHaveLength(1);
     expect(countKind(socket, "answer")).toBe(0);
     expect(errors.length).toBeGreaterThanOrEqual(1);

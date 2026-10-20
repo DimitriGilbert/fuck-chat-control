@@ -231,7 +231,7 @@ describe("perfect-negotiation glare + rollback", () => {
     bridge.close();
   });
 
-  it("polite peer (responder) answers a remote offer — rolling back the nascent offer auto-promotion originated", async () => {
+  it("polite peer (responder) answers a remote offer directly — auto-promotion originates no offer to roll back", async () => {
     const fakePc = installFakeRtc();
     const socket = new MockSignalingSocket();
     const roomId = deterministicConversationId(303);
@@ -250,24 +250,31 @@ describe("perfect-negotiation glare + rollback", () => {
     bridge.start();
     socket.serverOpen();
 
-    // A remote offer from a previously-unknown peer promotes the peer
-    // (R6/F7 auto-promotion), which fires onPeerJoin — and any notified
-    // side originates an offer, regardless of role. The polite side must
-    // roll that nascent local offer back and then answer the remote one.
+    // A remote offer from a previously-unknown peer promotes the peer to
+    // present (R6/F7 auto-promotion) — presence ONLY, with no onPeerJoin:
+    // the broker notifies only the already-seated side, so the offer duty
+    // stays with the offerer and the joiner never originates a
+    // counter-offer (signaling-client.ts R6/F7). With no local offer in
+    // flight the polite side answers directly — there is nothing to roll
+    // back. (Rollback on genuinely crossing offers stays covered by the
+    // in-flight-offer test below and by webrtc-bridge-negotiation.test.ts.)
     deliver(socket, { t: "offer", sdp: { type: "offer", sdp: "remote" } });
     await new Promise<void>((resolve) => setTimeout(resolve));
 
     expect(fakePc.remoteDescription?.type).toBe("offer");
     expect(findKind(socket, "answer")).toBeDefined();
-    expect(fakePc.rollbackCount).toBe(1);
+    // No counter-offer and no rollback: the answer is the only SDP this
+    // side puts on the wire.
+    expect(findKind(socket, "offer")).toBeUndefined();
+    expect(fakePc.rollbackCount).toBe(0);
 
     // A second (renegotiation) offer now arrives with peer presence known
-    // and NO local offer in flight: it is answered directly, with no
-    // further rollback.
+    // and NO local offer in flight: it is answered directly too — still no
+    // rollback anywhere.
     deliver(socket, { t: "offer", sdp: { type: "offer", sdp: "renegotiation" } });
     await new Promise<void>((resolve) => setTimeout(resolve));
 
-    expect(fakePc.rollbackCount).toBe(1);
+    expect(fakePc.rollbackCount).toBe(0);
     const answers = socket.sent.map((raw) => parse(raw)).filter((m) => m.t === "answer");
     expect(answers.length).toBe(2);
 
