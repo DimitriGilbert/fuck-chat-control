@@ -317,6 +317,33 @@ export class GroupSession {
   }
 
   /**
+   * The authenticated identity key of the peer behind `peerId`'s link — set
+   * once the link's v1 handshake reaches Connected; null when no link exists
+   * or it has not authenticated yet. The group WebRTC manager consults this
+   * for per-pair glare-role derivation on link renegotiation
+   * (docs/plans/group-chat.md Phase 5) — it pins the last non-null answer
+   * per seat so the identity-derived role survives the link reset that
+   * precedes a re-offer. Before the identity is known, the
+   * seated-member-offers rule holds.
+   */
+  linkPeerIdentity(peerId: PeerId): PublicKey | null {
+    return this.links.get(peerId)?.peerIdentity ?? null;
+  }
+
+  /**
+   * Drop the link to `peerId` if one exists (idempotent — an unknown peerId
+   * is a no-op). Invoked by the WebRTC manager when the peer's signaling seat
+   * or data channel is gone; membership itself is untouched — a re-seated
+   * peer re-links and re-verifies against the list.
+   */
+  dropLink(peerId: PeerId): void {
+    const link = this.links.get(peerId);
+    if (link !== undefined) {
+      this.closeLink(link);
+    }
+  }
+
+  /**
    * Hand a freshly-opened data channel for `peerId` to a new link
    * orchestrator (protocol-v2 §3): the pairwise conversation id derives from
    * the peer's Hello identity inside the v1 handshake, so the peer's public
