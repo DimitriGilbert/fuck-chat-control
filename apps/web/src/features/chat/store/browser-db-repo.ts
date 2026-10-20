@@ -3,6 +3,7 @@ import {
   openBrowserWASQLiteOPFSDatabase,
   persistedCollectionOptions,
 } from "@tanstack/browser-db-sqlite-persistence";
+import type { BrowserWASQLiteDatabase } from "@tanstack/browser-db-sqlite-persistence";
 import { createCollection, createTransaction } from "@tanstack/db";
 import type { Collection } from "@tanstack/db";
 import { decryptAtRest, encryptAtRest } from "@fuck-eu-chat-control/chat-runtime/crypto/at-rest";
@@ -183,6 +184,19 @@ export class BrowserDbConversationRepository
   }
 
   /**
+   * Spawn the OPFS worker, boot wa-sqlite, and open the database — the slowest
+   * single step of startup (the worker bundle carries the wasm base64-inlined,
+   * so fetch + parse + decode + compile dominates). Split from {@link create}
+   * so callers can start it in PARALLEL with other boot work (identity load,
+   * /ice-config fetch): the open needs nothing but the database name. Feed the
+   * settled handle into {@link createFromDatabase}. Rejects when OPFS is
+   * unavailable (Safari private mode, sandboxed iframes, etc.).
+   */
+  static openDatabase(databaseName: string): Promise<BrowserWASQLiteDatabase> {
+    return openBrowserWASQLiteOPFSDatabase({ databaseName });
+  }
+
+  /**
    * Open the OPFS database and build the two persisted collections, then return
    * a ready repository. Async because both the DB open and the collections'
    * first hydration are awaited via {@link Collection.toArrayWhenReady} (so the
@@ -191,9 +205,20 @@ export class BrowserDbConversationRepository
    * to {@link InMemoryConversationRepository} on that failure.
    */
   static async create(config: BrowserDbRepositoryConfig): Promise<BrowserDbConversationRepository> {
-    const database = await openBrowserWASQLiteOPFSDatabase({
-      databaseName: config.databaseName,
-    });
+    const database = await BrowserDbConversationRepository.openDatabase(config.databaseName);
+    return BrowserDbConversationRepository.createFromDatabase(config, database);
+  }
+
+  /**
+   * Build the persisted collections + repository on an ALREADY-OPEN database
+   * handle from {@link openDatabase}. Same hydration guarantee as
+   * {@link create} — resolves only after both collections have replayed their
+   * persisted state.
+   */
+  static async createFromDatabase(
+    config: BrowserDbRepositoryConfig,
+    database: BrowserWASQLiteDatabase,
+  ): Promise<BrowserDbConversationRepository> {
     const persistence = createBrowserWASQLitePersistence({ database });
 
     const conversations = createCollection(

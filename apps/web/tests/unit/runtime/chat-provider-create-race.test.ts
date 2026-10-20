@@ -22,7 +22,9 @@ import { ChatProvider, useChat } from "@/features/chat/runtime/chat-provider";
  * render tree), this file DOES render the real ChatProvider: the leak lives in
  * the provider's own effect wiring, so the race is reproduced end-to-end under
  * jsdom with exactly two seams — the OPFS-backed repository swapped for a
- * controllable double whose static create() parks until the test resolves it,
+ * controllable double whose static createFromDatabase() parks until the test
+ * resolves it (openDatabase() resolves immediately; the parked await is the
+ * collection-build leg, same position in the boot chain as the old create()),
  * and a spy wrapper around the real createChatController that delegates to the
  * original so the genuine AtRestKeyLockedError is thrown, not a
  * re-implementation.
@@ -74,7 +76,12 @@ const harness = vi.hoisted(
 
 vi.mock("@/features/chat/store/browser-db-repo", () => ({
   BrowserDbConversationRepository: {
-    create: (): Promise<FakeRepositoryDouble> =>
+    // The provider kicks the worker open in parallel with the identity loads;
+    // resolve it immediately so the parked createFromDatabase() stays the
+    // controllable await point.
+    openDatabase: (): Promise<{ close(): Promise<void> }> =>
+      Promise.resolve({ close: () => Promise.resolve() }),
+    createFromDatabase: (): Promise<FakeRepositoryDouble> =>
       new Promise((resolve) => {
         harness.createCalls += 1;
         harness.createResolvers.push(resolve);
@@ -131,8 +138,9 @@ describe("ChatProvider unmount-during-create race (R6/F1)", () => {
     const repo = fakeRepository();
     const { unmount } = render(React.createElement(ChatProvider, null));
 
-    // Progress the effect past both manager loads and the /ice-config fetch
-    // (fail-open in jsdom) to the parked `await create(...)`.
+    // Progress the effect past both manager loads, the /ice-config fetch
+    // (fail-open in jsdom), and the already-resolved databasePromise to the
+    // parked `await createFromDatabase(...)`.
     await act(async () => {
       await vi.waitFor(() => {
         expect(harness.createCalls).toBe(1);

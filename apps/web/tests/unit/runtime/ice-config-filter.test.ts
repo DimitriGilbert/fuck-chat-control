@@ -39,7 +39,15 @@ const harness = vi.hoisted((): Harness => ({ controllerConstructions: 0, lastDep
 
 vi.mock("@/features/chat/store/browser-db-repo", () => ({
   BrowserDbConversationRepository: {
-    create: (): Promise<{ close(): Promise<void>; listConversations(): Promise<never[]> }> =>
+    // The provider opens the worker in parallel with the other boot loads;
+    // resolve the handle immediately and hand back the repo double from the
+    // collection-build step.
+    openDatabase: (): Promise<{ close(): Promise<void> }> =>
+      Promise.resolve({ close: () => Promise.resolve() }),
+    createFromDatabase: (): Promise<{
+      close(): Promise<void>;
+      listConversations(): Promise<never[]>;
+    }> =>
       Promise.resolve({
         close: () => Promise.resolve(),
         listConversations: () => Promise.resolve([]),

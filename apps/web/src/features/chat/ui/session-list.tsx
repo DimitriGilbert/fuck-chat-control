@@ -18,6 +18,7 @@ import {
 import { cn } from "@fuck-eu-chat-control/ui/lib/utils";
 import {
   CheckCheckIcon,
+  Loader2Icon,
   LockIcon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -123,6 +124,13 @@ export interface StartConversationButtonProps {
   readonly testId: string;
 }
 
+/** Shared failure toast for startConversation, from click or queued intent. */
+function reportStartError(err: unknown): void {
+  toast.error("Could not start", {
+    description: err instanceof Error ? err.message : String(err),
+  });
+}
+
 /**
  * The primary CTA shared by the sidebar, the mobile home, and the empty
  * state. One implementation so the label, icon, ready-gating, and error
@@ -132,29 +140,60 @@ export function StartConversationButton({
   className,
   testId,
 }: StartConversationButtonProps): React.ReactElement {
-  const { controller, ready } = useChat();
+  const { controller, ready, state } = useChat();
+  const [queued, setQueued] = React.useState(false);
+  // While `ready` is false the provider is still opening the OPFS worker,
+  // wasm and identity — a few seconds on a slow device. The button stays
+  // ENABLED: a click during boot queues the intent and fires the moment the
+  // controller publishes, so the app feels responsive instead of dead. The
+  // label still says what it's doing; if boot failed (`state.error` set,
+  // `ready` never flips) say that instead of spinning forever.
+  const booting = !ready && state.error === null;
+  const bootError = !ready ? state.error : null;
+  const busy = booting || queued;
+
+  // Fire a queued start once the controller exists; drop it if boot failed
+  // meanwhile (the inline error already explains why nothing happens).
+  React.useEffect(() => {
+    if (!queued) return;
+    if (controller === null) {
+      if (state.error !== null) setQueued(false);
+      return;
+    }
+    void controller
+      .startConversation()
+      .catch(reportStartError)
+      .finally(() => setQueued(false));
+  }, [queued, controller, state.error]);
 
   function handleStart(): void {
-    if (controller === null) return;
-    void controller.startConversation().catch((err: unknown) => {
-      toast.error("Could not start", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    });
+    if (controller === null) {
+      if (state.error === null) setQueued(true);
+      return;
+    }
+    void controller.startConversation().catch(reportStartError);
   }
 
   return (
-    <Button
-      variant="default"
-      size="sm"
-      className={cn("w-full justify-start", className)}
-      onClick={handleStart}
-      disabled={!ready}
-      data-testid={testId}
-    >
-      <PlusIcon />
-      Start a conversation
-    </Button>
+    <div className="flex w-full flex-col gap-1.5">
+      <Button
+        variant="default"
+        size="sm"
+        className={cn("w-full justify-start", className)}
+        onClick={handleStart}
+        disabled={bootError !== null}
+        aria-busy={busy}
+        data-testid={testId}
+      >
+        {busy ? <Loader2Icon className="animate-spin" /> : <PlusIcon />}
+        {busy ? (ready ? "Starting…" : "Setting up secure storage…") : "Start a conversation"}
+      </Button>
+      {bootError !== null && (
+        <p role="alert" className="text-destructive px-1 text-xs leading-5">
+          Something failed to load — reload the page to try again. ({bootError})
+        </p>
+      )}
+    </div>
   );
 }
 

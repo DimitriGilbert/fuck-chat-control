@@ -474,6 +474,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
               degraded: false,
             })
           : fetchIceConfig();
+
+      // Spawn the OPFS worker + wa-sqlite boot NOW, in parallel with the
+      // identity/at-rest/ice-config loads — it is the longest leg of startup
+      // and needs none of their results. Failure resolves to null so an
+      // OPFS-less browser falls back to the in-memory repo below, and so a
+      // rejected promise never goes unhandled if this effect is cancelled
+      // before the await (the `null` also means no dangling handle to close).
+      const databasePromise = BrowserDbConversationRepository.openDatabase("fck-chat-control").then(
+        (db) => db,
+        () => null,
+      );
+
       void Promise.all([
         identityManager.ensureLoaded(),
         atRestKeyManager.ensureLoaded(),
@@ -506,6 +518,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           // collections' first hydration are async); a ready repo is then passed
           // in via `repository` so the controller stays synchronous.
           const atRestKey = atRestKeyManager.get();
+          // The DB open was kicked off before the awaits above; settle it. If
+          // unmount fired while it was in flight, the cleanup already locked
+          // the at-rest manager — close the orphan handle and bail, since no
+          // repository will ever adopt it (mirrors the R6/F1 ownership rule
+          // below: the resource must not outlive this continuation).
+          const database = await databasePromise;
+          if (cancelled) {
+            await Promise.resolve(database?.close?.()).catch(() => {});
+            return;
+          }
           let repository: ConversationRepository;
           // R6/F1: true while THIS continuation solely owns the repository's
           // resources (the OPFS DB + its dedicated Worker). Cleared at every
@@ -517,12 +539,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }): React
           // repository — this catch is the only release path left.
           let ownsRepository = false;
           try {
-            repository = await BrowserDbConversationRepository.create({
-              databaseName: "fck-chat-control",
-              atRestKey,
-            });
+            repository =
+              database === null
+                ? new InMemoryConversationRepository(atRestKey)
+                : await BrowserDbConversationRepository.createFromDatabase(
+                    { databaseName: "fck-chat-control", atRestKey },
+                    database,
+                  );
             ownsRepository = true;
           } catch {
+            // DB opened but collection setup threw — close the orphan handle
+            // before the in-memory fallback takes over.
+            await Promise.resolve(database?.close?.()).catch(() => {});
             repository = new InMemoryConversationRepository(atRestKey);
           }
 
