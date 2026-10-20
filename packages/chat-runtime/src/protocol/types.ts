@@ -33,9 +33,31 @@ export const ControlSubtype = {
    * parsing the AAD).
    */
   TransferCancel: 0x06,
+  /**
+   * Group conversations (protocol-v2 §4.1): the author-signed, epoch-numbered
+   * member list gossiped over pairwise group links. Payload:
+   * `groupId(16) ‖ epoch(4BE) ‖ memberCount(1) ‖ memberEntry[] ‖ signature(64)`.
+   * Valid on group links ONLY — on a pair-mode v1 link it is a terminal
+   * protocol error, exactly like any other unlisted subtype. Gated behind the
+   * sender/receiver `allowGroupControlSubtypes` opt-in, NOT the shared
+   * {@link CONTROL_SUBTYPE_VALUES} acceptance set.
+   */
+  GroupMembership: 0x07,
+  /**
+   * Group conversations (protocol-v2 §4.1): a joiner sends this on an
+   * established group link to ask for the current member list. Empty payload.
+   * Same group-link-only acceptance rule as {@link ControlSubtype.GroupMembership}.
+   */
+  GroupMembershipRequest: 0x08,
 } as const;
 export type ControlSubtype = (typeof ControlSubtype)[keyof typeof ControlSubtype];
 
+/**
+ * The v1-only control-subtype acceptance set. Deliberately EXCLUDES the group
+ * subtypes (0x07/0x08): a pair-mode v1 link must keep terminal-erroring on
+ * them byte-for-byte as before. Group links additionally accept
+ * {@link GROUP_CONTROL_SUBTYPE_VALUES} via an explicit opt-in flag.
+ */
 export const CONTROL_SUBTYPE_VALUES: readonly ControlSubtype[] = [
   ControlSubtype.SessionKeyExchange,
   ControlSubtype.IdentityAnnouncement,
@@ -43,6 +65,17 @@ export const CONTROL_SUBTYPE_VALUES: readonly ControlSubtype[] = [
   ControlSubtype.SafetyNumberAnnouncement,
   ControlSubtype.PakeShare,
   ControlSubtype.TransferCancel,
+];
+
+/**
+ * The group-link-only control subtypes (protocol-v2 §4.1). Accepted by the
+ * framing sender/receiver ONLY when the caller opted the conversation into
+ * group mode (`allowGroupControlSubtypes`); otherwise both values remain a
+ * terminal `UnknownControlSubtype` error.
+ */
+export const GROUP_CONTROL_SUBTYPE_VALUES: readonly ControlSubtype[] = [
+  ControlSubtype.GroupMembership,
+  ControlSubtype.GroupMembershipRequest,
 ];
 
 export const Role = {

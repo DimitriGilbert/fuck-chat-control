@@ -46,7 +46,19 @@ export interface LinkedPair {
   readonly peerSessionId: SessionId;
 }
 
-export async function makePair(handlers: FrameReceiverHandlers): Promise<LinkedPair> {
+export interface MakePairOptions {
+  /**
+   * Opts BOTH the sender and receiver into group-link mode (protocol-v2
+   * §4.1): the group control subtypes (0x07/0x08) are accepted instead of
+   * terminal-erroring. Omit for a pair-mode v1 link.
+   */
+  readonly allowGroupControlSubtypes?: boolean;
+}
+
+export async function makePair(
+  handlers: FrameReceiverHandlers,
+  options?: MakePairOptions,
+): Promise<LinkedPair> {
   const conv = conversationId(401);
   const a = await makePeer(1);
   const b = await makePeer(2);
@@ -82,6 +94,7 @@ export async function makePair(handlers: FrameReceiverHandlers): Promise<LinkedP
   const receiverConfig: FrameReceiverConfig = {
     sessionKeys: bKeys,
     peerSessionId: a.session,
+    ...(options?.allowGroupControlSubtypes === true ? { allowGroupControlSubtypes: true } : {}),
     ...handlers,
   };
   const receiver = new FrameReceiver(receiverConfig);
@@ -91,6 +104,7 @@ export async function makePair(handlers: FrameReceiverHandlers): Promise<LinkedP
     localSessionId: a.session,
     peerSessionId: b.session,
     transport,
+    ...(options?.allowGroupControlSubtypes === true ? { allowGroupControlSubtypes: true } : {}),
   });
   return { sender, receiver, transport, recvKeys: bKeys, peerSessionId: a.session };
 }

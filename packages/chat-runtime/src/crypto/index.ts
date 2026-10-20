@@ -1,12 +1,14 @@
 export {
   derivePublicKeyFromPrivate,
   generateIdentityKeyPair,
+  signMessage,
+  verifyMessage,
   signTranscript,
   verifyTranscript,
 } from "./identity";
 export { generateEphemeralKeyPair, deriveSessionKeys } from "./session";
 export { ReplayWindow, encryptFrame, decryptFrame } from "./aead";
-export { computeSafetyNumber } from "./safety-number";
+export { computeSafetyNumber, computeGroupSafetyNumber } from "./safety-number";
 export { hmacSha256, sha256 } from "./primitives";
 export {
   deriveKeyFromPassphrase,

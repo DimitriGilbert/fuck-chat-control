@@ -31,7 +31,7 @@ import {
   PROTOCOL_VERSION,
 } from "../protocol/limits";
 import { AuthMode, ControlSubtype, Role } from "../protocol/types";
-import type { ConversationId, Signature, Transcript } from "../protocol/types";
+import type { ConversationId, PublicKey, Signature, Transcript } from "../protocol/types";
 import { FrameReceiver } from "../framing";
 import { FrameSender } from "../framing";
 import { isPerTransferFramingError } from "../framing";
@@ -97,6 +97,18 @@ export interface OrchestratorHandlers {
   readonly onTransferError?: (transferId: number, error: unknown) => void;
   /** Fired when a file is fully received and hash-verified. */
   readonly onFileReceived?: (file: ReceivedFile) => void;
+  /**
+   * Group-link seam (protocol-v2 §4): fired for every decoded control frame
+   * once the link is Connected — including the group subtypes accepted when
+   * {@link OrchestratorDeps.groupLinkConversationId} is set
+   * (`group_membership` 0x07, `group_membership_request` 0x08) and the
+   * ordinary v1 subtypes a group session still cares about (e.g. `leave`
+   * 0x03, `identity_announcement` 0x02). `transfer_cancel` is consumed inside
+   * the framing layer and never reaches this hook. v1 callers that omit it
+   * keep the previous behavior — control frames are accepted and ignored
+   * exactly as before.
+   */
+  readonly onControlFrame?: (subtype: ControlSubtype, payload: Uint8Array) => void;
 }
 
 /**
@@ -167,10 +179,35 @@ export interface OrchestratorDeps {
    * blockList (which stays as a defense — it keeps the wasm out of the bundle).
    */
   readonly enablePake?: boolean;
+  /**
+   * Group-link seam (protocol-v2 §3): when set, this orchestrator runs a
+   * "group link" — a pairwise v1 session whose conversation id is NOT known
+   * until the peer's Hello reveals its identity key. The resolver is invoked
+   * exactly once, inside the handshake, with the peer's identity public key;
+   * its result becomes {@link conversationId} and is persisted + TOFU-keyed
+   * exactly like a start()/join() conversation id.
+   *
+   * Setting this switches the orchestrator into group-link mode:
+   * {@link beginGroupLinkSession} replaces start()/join() (both throw in this
+   * mode — no invitation is minted and no signaling socket is opened) and the
+   * link's FrameSender/FrameReceiver are built with
+   * `allowGroupControlSubtypes` so the group control subtypes are legal on
+   * the wire. v1 callers leave it unset and see no behavior change.
+   */
+  readonly groupLinkConversationId?: (peerIdentityKey: PublicKey) => Promise<ConversationId>;
 }
 
 const HELLO_BYTES = 163;
 const SIGNATURE_MESSAGE_BYTES = 65;
+/**
+ * Bound on both group-link parked-message buffers (protocol-v2 §3):
+ * {@link groupLinkPendingBytes} (handshake bytes parked while the deferred
+ * pairwise conversation id resolves) and {@link groupLinkEarlyFrames}
+ * (encrypted frames that arrive before our side reaches Connected). A peer
+ * flooding either window trips the terminal MalformedHandshakeMessage error
+ * instead of growing the buffer without bound.
+ */
+const MAX_GROUP_LINK_PARKED_MESSAGES = 64;
 /**
  * R2/F6 (Phase 7): a PAKE code must be exactly 6 decimal digits (PRD #90) —
  * the same shape the responder's invitation parser enforces
@@ -223,6 +260,50 @@ export class ConversationOrchestrator {
    * invitations before they reach {@link createPakeSession}/{@link loadWasm}.
    */
   private readonly enablePake: boolean;
+  /**
+   * Group-link mode resolver (protocol-v2 §3). See
+   * {@link OrchestratorDeps.groupLinkConversationId}. `undefined` on every
+   * v1 pair-mode orchestrator — its presence is what marks this orchestrator
+   * as a group link.
+   */
+  private readonly groupLinkConversationId:
+    | ((peerIdentityKey: PublicKey) => Promise<ConversationId>)
+    | undefined;
+  /**
+   * True while {@link resolveGroupLinkConversation} is running its
+   * derivation + persistence awaits. Inbound handshake bytes arriving in
+   * that window are parked in {@link groupLinkPendingBytes} so a racing
+   * SignatureMessage can never overtake the Hello inside the dispatch loop
+   * (it would otherwise reach verifyPeerAndComplete with a null transcript
+   * and kill a well-formed handshake).
+   */
+  private groupLinkResolving = false;
+  /**
+   * Handshake bytes parked while {@link groupLinkResolving} is true. Drained
+   * in arrival order by the resolution coroutine once the pairwise
+   * conversation id lands; cleared on teardown.
+   */
+  private groupLinkPendingBytes: Uint8Array[] = [];
+  /**
+   * Encrypted frames that arrived while the link was still handshaking.
+   * Group links can legitimately see this: the peer may reach Connected a
+   * beat before our side does and immediately send a control frame (e.g.
+   * `group_membership_request`). They are flushed through
+   * {@link FrameReceiver.ingest} on the Connected transition; AEAD still
+   * authenticates them there, so a hostile early frame is fatal exactly as a
+   * post-Connected bad frame would be. Group-link mode only — a pair-mode
+   * v1 link keeps terminal-erroring on an unexpected handshake length.
+   */
+  private groupLinkEarlyFrames: Uint8Array[] = [];
+  /**
+   * The peer's authenticated identity public key, populated by
+   * {@link verifyPeerAndComplete} once the peer's transcript signature
+   * verifies. Group sessions read it via {@link peerIdentityPublicKey} to
+   * bind each link to a member-list entry. Like {@link safetyNumberValue} it
+   * is deliberately NOT cleared on teardown so a post-disconnect read still
+   * reports who the link authenticated.
+   */
+  private authenticatedPeerIdentity: PublicKey | null = null;
 
   /**
    * Authoritative transition validator (R6/F6 + R7/F2). All state changes
@@ -381,6 +462,7 @@ export class ConversationOrchestrator {
     // R8/F1 (Phase 6): default true so web/desktop (which ship the SPAKE2 wasm)
     // are unchanged. Mobile passes false to gate coded invitations off in logic.
     this.enablePake = deps.enablePake ?? true;
+    this.groupLinkConversationId = deps.groupLinkConversationId;
     // M6: validate the test-only override — a non-finite or non-positive value
     // (0, negative, NaN) would make the handshake timer fire immediately and
     // falsely fail every handshake. Silently fall back to the production bound
@@ -417,6 +499,18 @@ export class ConversationOrchestrator {
    */
   get handshakeAuthMode(): AuthMode {
     return this.authMode;
+  }
+
+  /**
+   * The peer's authenticated identity public key — populated once the peer's
+   * transcript signature verifies inside {@link verifyPeerAndComplete}, so
+   * the returned key is bound to the handshake, not merely claimed by a
+   * Hello. Null before the signature verifies. Kept across teardown (like
+   * {@link safetyNumber}) so group sessions can still attribute a link to a
+   * member after it drops.
+   */
+  get peerIdentityPublicKey(): PublicKey | null {
+    return this.authenticatedPeerIdentity;
   }
 
   /**
@@ -535,6 +629,15 @@ export class ConversationOrchestrator {
         "orchestrator has already been started",
       );
     }
+    // Group-link mode: the pairwise conversation id derives from the peer's
+    // Hello identity (protocol-v2 §3) — minting a random one here would
+    // silently opt the link out of the derivation the group depends on.
+    if (this.groupLinkConversationId !== undefined) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.HandshakeFailed,
+        "start() is unavailable on a group-link orchestrator; use beginGroupLinkSession()",
+      );
+    }
     if (code !== undefined && code.length > 0) {
       if (!this.enablePake) {
         throw new OrchestratorError(
@@ -574,12 +677,48 @@ export class ConversationOrchestrator {
     return invitation;
   }
 
+  /**
+   * GROUP-LINK entry point (protocol-v2 §3): mark the session started
+   * WITHOUT a conversation id. The pairwise conversation id is resolved from
+   * the peer's Hello identity key inside the handshake via
+   * {@link OrchestratorDeps.groupLinkConversationId}; no invitation is minted
+   * and no signaling socket is opened — the group session's WebRTC layer
+   * hands each link's data channel straight to {@link attachTransport}.
+   *
+   * Only legal when the orchestrator was constructed with
+   * `groupLinkConversationId`; pair-mode orchestrators must use
+   * {@link start}/{@link join} as before.
+   */
+  beginGroupLinkSession(): void {
+    if (this.started) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.AlreadyStarted,
+        "orchestrator has already been started",
+      );
+    }
+    if (this.groupLinkConversationId === undefined) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.HandshakeFailed,
+        "beginGroupLinkSession requires the groupLinkConversationId dep",
+      );
+    }
+    this.started = true;
+    this.setState(ConnectionState.Waiting);
+  }
+
   /** RESPONDER flow: parse fragment, persist conversation. */
   async join(fragment: string): Promise<void> {
     if (this.started) {
       throw new OrchestratorError(
         OrchestratorErrorCode.AlreadyStarted,
         "orchestrator has already been started",
+      );
+    }
+    // Group-link mode: see the matching guard in start().
+    if (this.groupLinkConversationId !== undefined) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.HandshakeFailed,
+        "join() is unavailable on a group-link orchestrator; use beginGroupLinkSession()",
       );
     }
     this.started = true;
@@ -659,7 +798,11 @@ export class ConversationOrchestrator {
         `attachTransport called from state ${this.currentState}; expected Waiting or Signaling`,
       );
     }
-    if (this.conversation === null) {
+    // Group-link mode (protocol-v2 §3): the conversation id is not known at
+    // attach time — it resolves from the peer's Hello identity inside the
+    // handshake (see resolveGroupLinkConversation). Pair mode keeps the
+    // original requirement: a conversation must exist before attaching.
+    if (this.conversation === null && this.groupLinkConversationId === undefined) {
       throw new OrchestratorError(
         OrchestratorErrorCode.HandshakeFailed,
         "attachTransport called before start()/join()",
@@ -754,6 +897,24 @@ export class ConversationOrchestrator {
     const timestamp = Date.now();
     await this.repository.appendMessage(this.conversation, text, MessageDirection.Sent, timestamp);
     await this.frameSender.sendText(bytes);
+  }
+
+  /**
+   * Send an encrypted control frame on the established session. Group
+   * sessions use this for `group_membership` gossip (0x07),
+   * `group_membership_request` (0x08), and `identity_announcement` (0x02).
+   * The framing layer enforces the subtype acceptance set: on a group link
+   * ({@link OrchestratorDeps.groupLinkConversationId}) the group subtypes
+   * are legal; on a pair-mode v1 link they still terminal-error.
+   */
+  async sendControlFrame(subtype: ControlSubtype, payload: Uint8Array): Promise<void> {
+    if (this.currentState !== ConnectionState.Connected || this.frameSender === null) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.NotConnected,
+        "cannot sendControlFrame before the handshake completes",
+      );
+    }
+    await this.frameSender.sendControl(subtype, payload);
   }
 
   /**
@@ -1009,7 +1170,13 @@ export class ConversationOrchestrator {
   // --- internal handshake machinery ---
 
   private async beginHandshake(): Promise<void> {
-    if (this.conversation === null || this.transport === null) {
+    // Group-link mode sends its Hello (which carries no conversation id)
+    // before the pairwise conversation id resolves; pair mode still requires
+    // the id up front.
+    if (
+      this.transport === null ||
+      (this.conversation === null && this.groupLinkConversationId === undefined)
+    ) {
       throw new OrchestratorError(
         OrchestratorErrorCode.HandshakeFailed,
         "handshake started without conversation/transport",
@@ -1099,6 +1266,37 @@ export class ConversationOrchestrator {
     // async step inside this dispatch, drop the in-flight handling — a newer
     // handshake owns the field set and would be corrupted by our writes.
     const generation = this.handshakeGeneration;
+    // Group-link deferred resolution (protocol-v2 §3): while the pairwise
+    // conversation id is being derived from the peer's Hello, park inbound
+    // bytes so they are replayed in order once it lands.
+    if (this.groupLinkResolving) {
+      // Bound the parked-byte buffer exactly like the early-frame buffer:
+      // a peer spraying bytes into the deferred-resolution window must fail
+      // the handshake, not grow memory without limit.
+      if (this.groupLinkPendingBytes.length >= MAX_GROUP_LINK_PARKED_MESSAGES) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedHandshakeMessage,
+          "too many inbound messages arrived while the group link conversation id was resolving",
+        );
+      }
+      this.groupLinkPendingBytes.push(bytes);
+      return;
+    }
+    if (this.conversation === null) {
+      await this.resolveGroupLinkConversation(bytes, generation);
+      return;
+    }
+    await this.dispatchHandshakeMessage(bytes, generation);
+  }
+
+  /**
+   * Classify one inbound handshake message by its fixed wire length and
+   * route it to the matching handler. Split from {@link handleInbound} so
+   * the group-link deferred-resolution drain can replay parked bytes
+   * directly — re-entering handleInbound would park them right back behind
+   * {@link groupLinkResolving} and spin forever.
+   */
+  private async dispatchHandshakeMessage(bytes: Uint8Array, generation: number): Promise<void> {
     if (bytes.length === HELLO_BYTES) {
       // R6F1 (duplicate-Hello guard): the peer Hello is accepted exactly once
       // per handshake. Once remoteHello is set it is frozen into the signed
@@ -1169,10 +1367,114 @@ export class ConversationOrchestrator {
       await this.handlePakeConfirm(msg.role, msg.tag);
       return;
     }
+    // Group-link seam (protocol-v2 §4): on a group link an unexpected length
+    // can be a legitimate ENCRYPTED frame — the peer may reach Connected a
+    // beat before our side does and immediately send a control frame (e.g.
+    // `group_membership_request`). Buffer it for post-Connected ingest
+    // instead of killing the link; the cap bounds a handshake-phase flood.
+    // A pair-mode v1 link keeps the terminal protocol error.
+    if (this.groupLinkConversationId !== undefined) {
+      if (this.groupLinkEarlyFrames.length >= MAX_GROUP_LINK_PARKED_MESSAGES) {
+        throw new OrchestratorError(
+          OrchestratorErrorCode.MalformedHandshakeMessage,
+          "too many inbound frames arrived before the handshake completed",
+        );
+      }
+      this.groupLinkEarlyFrames.push(bytes);
+      return;
+    }
     throw new OrchestratorError(
       OrchestratorErrorCode.MalformedHandshakeMessage,
       `inbound handshake message has unexpected length ${bytes.length}`,
     );
+  }
+
+  /**
+   * GROUP-LINK mode (protocol-v2 §3): resolve the pairwise conversation id
+   * from the peer's Hello identity key, persist the conversation, hydrate
+   * the auth-failed cache — the same bookkeeping start()/join() do up front
+   * — then replay the triggering Hello plus every handshake message that
+   * arrived while the derivation/persistence awaited, in arrival order.
+   *
+   * Serialization is the point of {@link groupLinkResolving}: without it a
+   * SignatureMessage landing inside the derivation window would reach
+   * {@link verifyPeerAndComplete} while `transcript` is still null and fail
+   * a handshake that was actually well-formed. Latching the flag BEFORE the
+   * first await guarantees every subsequent inbound message buffers instead
+   * of racing the replay.
+   *
+   * The bail-out predicate is `generation advance OR transport null` —
+   * deliberately NOT {@link handshakeSuperseded}: its `ephemeral === null`
+   * clause also fires in the window between attachTransport and the
+   * completion of beginHandshake's keygen await, a live-handshake window in
+   * which the peer's first Hello legitimately arrives.
+   */
+  private async resolveGroupLinkConversation(
+    firstBytes: Uint8Array,
+    generation: number,
+  ): Promise<void> {
+    const resolver = this.groupLinkConversationId;
+    if (resolver === undefined) {
+      // Unreachable: attachTransport rejects a null conversation when no
+      // resolver is configured. Kept as a guard so a future caller cannot
+      // arrive here without one.
+      throw new OrchestratorError(
+        OrchestratorErrorCode.HandshakeFailed,
+        "conversation is not initialized",
+      );
+    }
+    if (firstBytes.length !== HELLO_BYTES) {
+      throw new OrchestratorError(
+        OrchestratorErrorCode.MalformedHandshakeMessage,
+        `the first inbound message on a group link must be a HelloMessage (${HELLO_BYTES} bytes); got ${firstBytes.length}`,
+      );
+    }
+    const hello = decodeHello(firstBytes);
+    if (generation !== this.handshakeGeneration) return;
+    this.groupLinkResolving = true;
+    try {
+      const conversationId = await resolver(hello.identityPublicKey);
+      if (generation !== this.handshakeGeneration || this.transport === null) return;
+      this.conversation = conversationId;
+      await this.repository.createConversation(conversationId, Date.now());
+      if (generation !== this.handshakeGeneration || this.transport === null) return;
+      // R7/F3 parity: hydrate the durable auth-failed flag for the derived
+      // pairwise conversation before any transcript work, matching the
+      // start()/join() hydration so retry() gating behaves identically.
+      this.authFailedCached =
+        (await this.repository.getAuthFailed(conversationId)) ||
+        (await getAuthFailedDurable(conversationId));
+      if (generation !== this.handshakeGeneration || this.transport === null) return;
+      // Replay in arrival order but WITHOUT awaiting each dispatch: in PAKE
+      // mode verifyPeerAndComplete parks on the peer's share/confirm — which
+      // may itself be parked behind it in this buffer — so a sequential
+      // await would deadlock the link. Kicking the dispatches in FIFO order
+      // reproduces exactly what the transport does (each coroutine runs its
+      // synchronous prefix, then interleaves on its own awaits); failures
+      // still route to failHandshake.
+      void this.dispatchHandshakeMessage(firstBytes, generation).catch((err: unknown) => {
+        this.failHandshake(err);
+      });
+      while (this.groupLinkPendingBytes.length > 0) {
+        const next = this.groupLinkPendingBytes.shift();
+        if (next === undefined) break;
+        if (generation !== this.handshakeGeneration || this.transport === null) return;
+        void this.dispatchHandshakeMessage(next, generation).catch((err: unknown) => {
+          this.failHandshake(err);
+        });
+      }
+    } finally {
+      // Clear the latch/buffer ONLY if this coroutine still owns them: a
+      // teardown followed by a re-attach advances the generation, and the
+      // NEW handshake may already have set the latch and parked its own
+      // bytes — clearing unconditionally would wipe them out from under the
+      // fresh resolution. teardownSession resets both for the no-reattach
+      // case, so a generation-equal clear here is always safe.
+      if (generation === this.handshakeGeneration) {
+        this.groupLinkResolving = false;
+        this.groupLinkPendingBytes = [];
+      }
+    }
   }
 
   private async maybeSignAndSend(): Promise<void> {
@@ -1327,6 +1629,11 @@ export class ConversationOrchestrator {
     // is authenticating the peer (Verifying), then transitions to Connected on
     // success or Disconnected via failHandshake on any check failure.
     this.setState(ConnectionState.Verifying);
+
+    // Group-link seam: expose the authenticated peer identity so the group
+    // session can bind this link to a member-list entry. Set only AFTER the
+    // signature verifies — a Hello alone claims (but does not prove) the key.
+    this.authenticatedPeerIdentity = remoteIdentityKey;
 
     // TOFU: first contact stores, resume must match.
     const existing = await this.repository.getPeerIdentity(this.conversation);
@@ -1491,6 +1798,9 @@ export class ConversationOrchestrator {
       localSessionId: this.localHello.sessionId,
       peerSessionId: remoteSessionId,
       transport: toFrameTransport(this.transport),
+      // protocol-v2 §4.1: group links accept the group control subtypes on
+      // the wire; pair-mode v1 links keep terminal-erroring on them.
+      allowGroupControlSubtypes: this.groupLinkConversationId !== undefined,
       onTransferStart: (transferId: number, name: string, mimeType: string, size: number): void => {
         // R2/F4 (Phase 7): no shared tracker slot here anymore — each send's
         // metadata was already registered under its own reserved id at
@@ -1519,6 +1829,7 @@ export class ConversationOrchestrator {
     const receiver = new FrameReceiver({
       sessionKeys,
       peerSessionId: remoteSessionId,
+      allowGroupControlSubtypes: this.groupLinkConversationId !== undefined,
       onText: (plaintext: Uint8Array): void => {
         // R2/F7 (Phase 7): handleReceivedText awaits repository.appendMessage;
         // a storage rejection (locked at-rest manager, OPFS/IndexedDB failure)
@@ -1536,8 +1847,12 @@ export class ConversationOrchestrator {
           );
         });
       },
-      onControl: (): void => {
-        // Control frames are not part of this slice's surface area.
+      onControl: (subtype: ControlSubtype, payload: Uint8Array): void => {
+        // protocol-v2 §4: on a group link the decoded control frame is
+        // surfaced to the group session (membership gossip, membership
+        // requests, peer leave). A v1 caller that sets no onControlFrame
+        // handler keeps the previous drop-on-the-floor behavior.
+        this.handlers.onControlFrame?.(subtype, payload);
       },
       onFileComplete: (file: ReceivedFile): void => {
         this.handleReceivedFile(file);
@@ -1573,6 +1888,17 @@ export class ConversationOrchestrator {
       this.handshakeTimeoutHandle = null;
     }
     this.setState(ConnectionState.Connected);
+    // Group-link seam: flush frames that arrived before our side finished
+    // the handshake (e.g. the peer's `group_membership_request`) through the
+    // normal ingest path — they carry the same AEAD authentication as any
+    // post-Connected frame.
+    if (this.groupLinkEarlyFrames.length > 0) {
+      const early = this.groupLinkEarlyFrames;
+      this.groupLinkEarlyFrames = [];
+      for (const earlyBytes of early) {
+        await this.handleInbound(earlyBytes);
+      }
+    }
     this.handlers.onSafetyNumber?.(safetyNumber, this.safetyNumberVerified);
   }
 
@@ -2115,6 +2441,17 @@ export class ConversationOrchestrator {
       this.pakeConfirmResolve = null;
     }
     this.pakeLocalSideByte = null;
+    // Group-link seam: clear the deferred-resolution latch and drop any
+    // handshake bytes parked behind a still-running resolution, plus any
+    // early encrypted frames not yet flushed. Clearing the latch matters: a
+    // stale resolveGroupLinkConversation coroutine's own finally is
+    // generation-guarded, so after a re-attach it would NOT clear — the
+    // teardown must leave the latch false so a new handshake's parked bytes
+    // are never mistaken for a stale resolution's. authenticatedPeerIdentity
+    // is kept — like safetyNumberValue it remains readable after teardown.
+    this.groupLinkResolving = false;
+    this.groupLinkPendingBytes = [];
+    this.groupLinkEarlyFrames = [];
     // CR-15: clear the test-only send-key mirror so a stale key never leaks
     // across a session boundary. Production code never reads this field.
     this.derivedSendKeyForTest = null;

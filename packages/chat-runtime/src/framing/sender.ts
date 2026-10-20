@@ -7,7 +7,12 @@ import {
   MAX_SEQUENCE,
   PROTOCOL_VERSION,
 } from "../protocol/limits";
-import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/types";
+import {
+  ControlSubtype,
+  CONTROL_SUBTYPE_VALUES,
+  FrameType,
+  GROUP_CONTROL_SUBTYPE_VALUES,
+} from "../protocol/types";
 import type { FrameAad, FrameHeader } from "../protocol/types";
 
 import type { SessionKeys } from "../crypto/types";
@@ -78,7 +83,16 @@ export class FrameSender {
 
   async sendControl(subtype: ControlSubtype, payload: Uint8Array): Promise<void> {
     this.assertNotTearingDown();
-    if (!CONTROL_SUBTYPE_VALUES.includes(subtype)) {
+    // protocol-v2 §4.1: the group subtypes (0x07/0x08) are accepted only when
+    // the caller opted this link into group mode; otherwise they remain a
+    // terminal error like any other unlisted subtype.
+    if (
+      !CONTROL_SUBTYPE_VALUES.includes(subtype) &&
+      !(
+        this.config.allowGroupControlSubtypes === true &&
+        GROUP_CONTROL_SUBTYPE_VALUES.includes(subtype)
+      )
+    ) {
       throw new FramingError(
         FramingErrorCode.UnknownControlSubtype,
         `unknown control subtype 0x${subtype.toString(16)}`,

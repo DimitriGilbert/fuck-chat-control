@@ -3,7 +3,12 @@ import { ctEqual } from "../crypto/ct-equal";
 import { CryptoError } from "../crypto/errors";
 import { decodeTransferCancelPayload } from "../protocol/codec";
 import { MAX_CONCURRENT_TRANSFERS, MAX_INCOMPLETE_TRANSFER_BYTES } from "../protocol/limits";
-import { ControlSubtype, CONTROL_SUBTYPE_VALUES, FrameType } from "../protocol/types";
+import {
+  ControlSubtype,
+  CONTROL_SUBTYPE_VALUES,
+  FrameType,
+  GROUP_CONTROL_SUBTYPE_VALUES,
+} from "../protocol/types";
 import type { FrameAad } from "../protocol/types";
 
 import { FramingError, FramingErrorCode } from "./errors";
@@ -221,13 +226,23 @@ export class FrameReceiver {
       throw new FramingError(FramingErrorCode.Malformed, "control payload is empty");
     }
     const subtypeByte = plaintext[0];
-    if (!CONTROL_SUBTYPE_VALUES.includes(subtypeByte as ControlSubtype)) {
+    const subtype = subtypeByte as ControlSubtype;
+    // protocol-v2 §4.1: the group subtypes (0x07/0x08) are valid on group
+    // links ONLY. They are not in CONTROL_SUBTYPE_VALUES — a pair-mode v1
+    // link (the default, `allowGroupControlSubtypes` unset) keeps
+    // terminal-erroring on them exactly like any other unlisted subtype.
+    if (
+      !CONTROL_SUBTYPE_VALUES.includes(subtype) &&
+      !(
+        this.config.allowGroupControlSubtypes === true &&
+        GROUP_CONTROL_SUBTYPE_VALUES.includes(subtype)
+      )
+    ) {
       throw new FramingError(
         FramingErrorCode.UnknownControlSubtype,
         `unknown control subtype 0x${subtypeByte.toString(16)}`,
       );
     }
-    const subtype = subtypeByte as ControlSubtype;
     const payload = plaintext.subarray(1);
     // R3/F2 (Phase 8.2): the sender-side abort signal is handled inline (not
     // routed through onControl) because the receiver is the authoritative
